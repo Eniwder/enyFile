@@ -69,11 +69,15 @@ cargo test --release --manifest-path app/Cargo.toml   # 単体テスト
 
 ## リリース
 
-`app/Cargo.toml` の `version` を上げてコミットし、同じ番号のタグを push すると GitHub Actions がビルドして Release を作成します。
+`app/Cargo.toml` の `version` を上げ、`Cargo.lock` も一緒にコミットしてから、そのコミットに同じ番号のタグを付けて push すると、GitHub Actions がビルドして Release を作成します。
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+# app/Cargo.toml の version を 0.1.1 に変更してから
+cargo update -p enyfile --manifest-path app/Cargo.toml   # Cargo.lock のバージョンを合わせる
+git commit -am "v0.1.1"
+git push
+git tag v0.1.1      # バージョンを上げたコミットに付ける
+git push origin v0.1.1
 ```
 
 | ワークフロー | タイミング | 内容 |
