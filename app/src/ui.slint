@@ -1193,11 +1193,12 @@ export component App inherits Window {
     in property <string> demo-keys;
     in property <string> demo-caption;
     if root.demo-caption != "" || root.demo-keys != "" : Rectangle {
-        width: caption-row.preferred-width + 36px; height: 44px;
+        width: caption-row.preferred-width; height: 44px;
         x: (parent.width - self.width) / 2; y: parent.height - 24px - self.height - 18px;
         background: Theme.caption-bg; border-radius: 8px;
+        // The padding, not an x offset, keeps the text centered in the box.
         caption-row := HorizontalLayout {
-            x: 18px; spacing: 14px; alignment: center;
+            padding-left: 18px; padding-right: 18px; spacing: 14px; alignment: center;
             if root.demo-keys != "" : Text { text: root.demo-keys; color: Theme.caption-key; font-size: 17px; font-weight: 700; vertical-alignment: center; }
             if root.demo-caption != "" : Text { text: root.demo-caption; color: Theme.caption-text; font-size: 17px; vertical-alignment: center; }
         }
