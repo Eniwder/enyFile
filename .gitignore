@@ -1,0 +1,15 @@
+# アプリ本体だけを管理する。実験 (experiments/)・計測結果 (results/)・
+# スクリーンショット・ローカルのツールチェーン (.tools/) などは対象外。
+/*
+!/.gitignore
+!/.gitattributes
+!/.github/
+!/app/
+!/enyFile.cmd
+!/LICENSE
+!/README.md
+
+/app/target/
+/app/target-check/
+/app/data/
+*.bak

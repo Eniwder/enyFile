@@ -1,0 +1,25 @@
+[package]
+name = "enyfile"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+default-run = "enyfile"
+
+[dependencies]
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2", "raw-window-handle-06"] }
+raw-window-handle = "=0.6.2"
+chrono = "=0.4.45"
+serde_json = "=1.0.154"
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+
+[[bin]]
+name = "enyfile"
+path = "src/main.rs"
+
+# Test helper that plays Explorer's part (Shell data object / folder Paste verb).
+[[bin]]
+name = "enyfile-shellprobe"
+path = "src/bin/shellprobe.rs"
+
+[profile.release]
+strip = true

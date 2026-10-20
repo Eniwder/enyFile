@@ -1,0 +1,2300 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod config;
+mod ctxmenu;
+mod icons;
+mod listing;
+mod paste;
+mod shell;
+mod smoke;
+mod theme;
+use listing::{Drive, Entry, Selection};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet, VecDeque},
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::{Arc, Condvar, Mutex, mpsc},
+    time::{Duration, Instant},
+};
+use windows::Win32::Foundation::HWND;
+slint::slint! { export { App, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns } from "src/ui.slint"; }
+
+type Positions = Arc<HashMap<Arc<PathBuf>, usize>>;
+#[derive(Default)]
+struct Snapshot {
+    dir: PathBuf,
+    rows: Vec<Entry>,
+    positions: Positions,
+    volume: Option<Arc<listing::Volume>>,
+}
+impl Snapshot {
+    fn new(dir: PathBuf, rows: Vec<Entry>, volume: Option<Arc<listing::Volume>>) -> Self {
+        let positions = Arc::new(
+            rows.iter()
+                .enumerate()
+                .map(|(i, e)| (e.path.clone(), i))
+                .collect(),
+        );
+        Self {
+            dir,
+            rows,
+            positions,
+            volume,
+        }
+    }
+    /// The list shows a ".." row first whenever the folder has a parent.
+    fn offset(&self) -> usize {
+        self.dir.parent().is_some() as usize
+    }
+}
+/// Where the cursor rests when it is not on an entry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Special {
+    Parent,
+    Drive(usize),
+}
+/// What a model row shows.
+enum Slot {
+    Parent,
+    Entry(usize),
+    Drive(usize),
+}
+/// Model rows: ".." (when the folder has a parent), the entries, then the drives.
+/// Selection works on entry indexes; the cursor can also rest on ".." or a drive.
+struct RowsModel {
+    data: RefCell<Arc<Snapshot>>,
+    selection: RefCell<Selection>,
+    drives: RefCell<Arc<Vec<Drive>>>,
+    /// The cursor is on ".." or a drive rather than on `selection.current`.
+    special: Cell<Option<Special>>,
+    /// The list is shown one page at a time: model rows are page-relative.
+    page_start: Cell<usize>,
+    page_size: Cell<usize>,
+    /// Lower-case extension -> name color (Settings > カラー).
+    ext_colors: RefCell<Arc<HashMap<String, slint::Color>>>,
+    notify: ModelNotify,
+}
+impl RowsModel {
+    fn slot(&self, row: usize) -> Option<Slot> {
+        let data = self.data.borrow();
+        let (offset, entries) = (data.offset(), data.rows.len());
+        if row < offset {
+            Some(Slot::Parent)
+        } else if row < offset + entries {
+            Some(Slot::Entry(row - offset))
+        } else {
+            let drive = row - offset - entries;
+            (drive < self.drives.borrow().len()).then_some(Slot::Drive(drive))
+        }
+    }
+    fn special_row(&self, special: Special) -> usize {
+        let data = self.data.borrow();
+        match special {
+            Special::Parent => 0,
+            Special::Drive(i) => data.offset() + data.rows.len() + i,
+        }
+    }
+    fn on_parent(&self) -> bool {
+        self.special.get() == Some(Special::Parent)
+    }
+}
+thread_local! {
+    /// Slint images made from icon pixels, once per icon key (UI thread only).
+    static IMAGES: RefCell<HashMap<Arc<str>, slint::Image>> = RefCell::new(HashMap::new());
+}
+/// The icon for `key`, or the `fallback` (type icon) while a per-file icon is still loading.
+fn icon_image(key: &Arc<str>, fallback: &Arc<str>) -> slint::Image {
+    IMAGES.with(|images| {
+        let mut images = images.borrow_mut();
+        for key in [key, fallback] {
+            if let Some(image) = images.get(key) {
+                return image.clone();
+            }
+            if let Some(pixels) = icons::get(key) {
+                let image = slint::Image::from_rgba8(pixels);
+                images.insert(key.clone(), image.clone());
+                return image;
+            }
+        }
+        slint::Image::default()
+    })
+}
+impl RowsModel {
+    /// All rows: "..", entries, drives.
+    fn total(&self) -> usize {
+        let data = self.data.borrow();
+        data.rows.len() + data.offset() + self.drives.borrow().len()
+    }
+    /// Shows the page holding global row `row`; true if the page changed.
+    fn show_page_of(&self, row: usize) -> bool {
+        let size = self.page_size.get().max(1);
+        let start = row.min(self.total().saturating_sub(1)) / size * size;
+        let changed = start != self.page_start.get();
+        self.page_start.set(start);
+        changed
+    }
+    fn pages(&self) -> (usize, usize) {
+        let size = self.page_size.get().max(1);
+        (self.page_start.get() / size + 1, self.total().div_ceil(size).max(1))
+    }
+}
+impl Model for RowsModel {
+    type Data = Row;
+    fn row_count(&self) -> usize {
+        self.total().saturating_sub(self.page_start.get()).min(self.page_size.get().max(1))
+    }
+    fn row_data(&self, row: usize) -> Option<Row> {
+        if row >= self.row_count() {
+            return None;
+        }
+        self.row_at(self.page_start.get() + row)
+    }
+    fn model_tracker(&self) -> &dyn ModelTracker {
+        &self.notify
+    }
+}
+impl RowsModel {
+    /// Row `row` of the whole list.
+    fn row_at(&self, row: usize) -> Option<Row> {
+        let index = match self.slot(row)? {
+            Slot::Parent => {
+                let folder: Arc<str> = icons::type_key("", true);
+                return Some(Row {
+                    name: "..".into(),
+                    size: "[DIR]".into(),
+                    directory: true,
+                    parent: true,
+                    current: self.on_parent(),
+                    icon: icon_image(&folder, &folder),
+                    ..Row::default()
+                });
+            }
+            Slot::Drive(i) => {
+                let drives = self.drives.borrow();
+                let drive = &drives[i];
+                return Some(Row {
+                    name: drive.name.clone().into(),
+                    // No medium (empty optical drive): no bar, no free space.
+                    kind: if drive.total > 0 { format!("{} フリー", listing::format_size(drive.free)) } else { String::new() }.into(),
+                    drive: true,
+                    used: if drive.total > 0 { 1.0 - drive.free as f32 / drive.total as f32 } else { 0.0 },
+                    current: self.special.get() == Some(Special::Drive(i)),
+                    icon: icon_image(&drive.icon, &drive.icon),
+                    ..Row::default()
+                });
+            }
+            Slot::Entry(index) => index,
+        };
+        let data = self.data.borrow();
+        let entry = data.rows.get(index)?;
+        let selection = self.selection.borrow();
+        let (date, time) = listing::format_date(entry.modified, chrono::Local::now().date_naive());
+        let tint = (!entry.directory).then(|| self.ext_colors.borrow().get(&entry.ext.to_lowercase()).copied()).flatten();
+        Some(Row {
+            icon: icon_image(&entry.icon, &entry.type_icon),
+            hidden: entry.hidden(),
+            readonly: entry.attributes & 0x1 != 0,
+            tinted: tint.is_some(),
+            tint: tint.unwrap_or_default(),
+            name: entry.stem.clone().into(),
+            ext: entry.ext.clone().into(),
+            size: if entry.directory {
+                "[DIR]".into()
+            } else {
+                listing::format_size(entry.size).into()
+            },
+            date: date.into(),
+            time: time.into(),
+            attr: listing::format_attributes(entry.attributes).into(),
+            kind: entry.type_name.as_ref().into(),
+            directory: entry.directory,
+            selected: selection.contains(&entry.path),
+            current: self.special.get().is_none() && selection.current == Some(index),
+            ..Row::default()
+        })
+    }
+}
+#[derive(Clone)]
+struct Saved {
+    path: PathBuf,
+    selection: Selection,
+    current: Option<Arc<PathBuf>>,
+    anchor: Option<Arc<PathBuf>>,
+}
+#[derive(Clone)]
+enum Mode {
+    New(Option<Arc<PathBuf>>),
+    Back,
+    Forward,
+    Refresh,
+    Sort,
+    /// Refresh after paste: select the pasted items (and anything new), like Explorer.
+    Pasted(Positions, Arc<Vec<PathBuf>>),
+}
+struct Job {
+    generation: u64,
+    path: PathBuf,
+    source: Option<Arc<Snapshot>>,
+    column: usize,
+    descending: bool,
+    show_hidden: bool,
+}
+/// Rename / new file / new folder, waiting for a name in the name dialog.
+enum NameKind {
+    Rename(PathBuf),
+    NewFile,
+    NewFolder,
+}
+struct Naming {
+    pane: usize,
+    dir: PathBuf,
+    kind: NameKind,
+    /// Lower-cased names already in the folder (the renamed item itself excluded).
+    taken: HashSet<String>,
+    before: Positions,
+}
+enum Reply {
+    /// Per-file icons (exe, lnk, ...) of the listing in this pane are ready.
+    Icons(usize),
+    Drives(Arc<Vec<Drive>>),
+    Menu(ctxmenu::Outcome),
+    /// Rename or creation done: (pane, folder, listing before, result path).
+    Made(usize, PathBuf, Positions, Result<PathBuf, String>),
+    Listing(usize, u64, Result<Arc<Snapshot>, String>),
+    Changed(usize, PathBuf),
+    Pasted(usize, PathBuf, Positions, Vec<PathBuf>, Result<PasteOutcome, String>),
+    Ask(usize, paste::Question, AnswerTx),
+    Deleted(Result<bool, String>),
+    Opened(Result<(), String>),
+    /// Folder chosen in the settings dialog for place `usize`.
+    Picked(usize, PathBuf),
+}
+
+thread_local! {
+    static CONTROLLER: RefCell<Option<Rc<RefCell<Controller>>>> = const { RefCell::new(None) };
+}
+/// Hands a worker result to the UI thread; the event loop wakes only when something arrives.
+fn post(reply: Reply) -> bool {
+    slint::invoke_from_event_loop(move || {
+        if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+            c.borrow_mut().handle(reply);
+        }
+    })
+    .is_ok()
+}
+
+struct Mail {
+    pending: Option<Job>,
+    closed: bool,
+}
+/// One listing/sort worker per pane. A newer request replaces an unstarted older one.
+struct Worker {
+    mail: Arc<(Mutex<Mail>, Condvar)>,
+}
+impl Worker {
+    fn new(pane: usize) -> Self {
+        let mail = Arc::new((
+            Mutex::new(Mail {
+                pending: None,
+                closed: false,
+            }),
+            Condvar::new(),
+        ));
+        let worker = mail.clone();
+        std::thread::spawn(move || {
+            // File type names come from the Shell, which needs COM on this thread.
+            let _com = shell::Apartment::new();
+            loop {
+                let job = {
+                    let (lock, cv) = &*worker;
+                    let mut m = lock.lock().unwrap();
+                    while m.pending.is_none() && !m.closed {
+                        m = cv.wait(m).unwrap();
+                    }
+                    if m.closed {
+                        return;
+                    }
+                    m.pending.take().unwrap()
+                };
+                let fresh = job.source.is_none();
+                let result = if let Some(source) = job.source {
+                    Ok((source.dir.clone(), source.rows.clone(), source.volume.clone()))
+                } else {
+                    listing::read(&job.path, job.show_hidden)
+                        .map(|(dir, rows)| {
+                            let volume = listing::volume(&dir).map(Arc::new);
+                            (dir, rows, volume)
+                        })
+                };
+                let result = result.map(|(dir, mut rows, volume)| {
+                    listing::sort(&mut rows, job.column, job.descending);
+                    Arc::new(Snapshot::new(dir, rows, volume))
+                });
+                // Files with their own icon (exe, lnk, ...) are looked up after the list shows.
+                let per_file: Vec<(Arc<str>, Arc<PathBuf>)> = match &result {
+                    Ok(snapshot) if fresh => snapshot
+                        .rows
+                        .iter()
+                        .filter(|e| e.icon != e.type_icon && icons::get(&e.icon).is_none())
+                        .map(|e| (e.icon.clone(), e.path.clone()))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if !post(Reply::Listing(pane, job.generation, result)) {
+                    return;
+                }
+                if !per_file.is_empty() {
+                    for (key, path) in &per_file {
+                        // A newer request wins: stop and let it run.
+                        if worker.0.lock().unwrap().pending.is_some() {
+                            break;
+                        }
+                        icons::ensure_path(key, &shell::shell_path(path));
+                    }
+                    if !post(Reply::Icons(pane)) {
+                        return;
+                    }
+                }
+            }
+        });
+        Self { mail }
+    }
+    fn submit(&self, job: Job) {
+        let (lock, cv) = &*self.mail;
+        lock.lock().unwrap().pending = Some(job);
+        cv.notify_one();
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.mail;
+        lock.lock().unwrap().closed = true;
+        cv.notify_one();
+    }
+}
+struct Pane {
+    model: Rc<RowsModel>,
+    worker: Worker,
+    generation: u64,
+    pending: Option<Mode>,
+    /// A change notification arrived while a listing was in flight.
+    stale: bool,
+    watch: Option<shell::Watch>,
+    back: Vec<Saved>,
+    forward: Vec<Saved>,
+    column: usize,
+    descending: bool,
+    prefix: String,
+    typed: Instant,
+}
+struct Controller {
+    ui: slint::Weak<App>,
+    /// Always four; the layout (2, 3 or 4 panes) decides how many are shown.
+    panes: [Pane; 4],
+    active: usize,
+    operations: usize,
+    /// Conflict questions from paste workers; the front one is on screen.
+    asking: VecDeque<(usize, paste::Question, AnswerTx)>,
+    config: config::Config,
+    /// Places being edited in the settings dialog.
+    /// 0..4 toolbar places, 4..6 start folders (left, right).
+    settings: [Option<PathBuf>; 7],
+    /// Colors and font being edited in the settings dialog.
+    settings_colors: Vec<slint::Color>,
+    settings_ext: Vec<(String, slint::Color)>,
+    settings_font: (String, f32),
+    drives: Arc<Vec<Drive>>,
+    menus: Option<ctxmenu::Menus>,
+    /// Pane the open context menu belongs to.
+    menu_pane: usize,
+    naming: Option<Naming>,
+}
+fn display(path: &Path) -> String {
+    shell::shell_path(path).to_string_lossy().into_owned()
+}
+fn hwnd(ui: &App) -> Option<HWND> {
+    let handle = ui.window().window_handle();
+    match handle.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(HWND(h.hwnd.get() as *mut _)),
+        _ => None,
+    }
+}
+impl Controller {
+    fn message(&self, message: impl Into<slint::SharedString>) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_message(message.into());
+        }
+    }
+    fn data(&self, p: usize) -> Arc<Snapshot> {
+        self.panes[p].model.data.borrow().clone()
+    }
+    fn saved(&self, p: usize) -> Saved {
+        let data = self.data(p);
+        let selection = self.panes[p].model.selection.borrow().clone();
+        Saved {
+            path: data.dir.clone(),
+            current: selection
+                .current
+                .and_then(|i| data.rows.get(i))
+                .map(|e| e.path.clone()),
+            anchor: selection
+                .anchor
+                .and_then(|i| data.rows.get(i))
+                .map(|e| e.path.clone()),
+            selection,
+        }
+    }
+    fn selected_paths(&self, p: usize) -> Vec<PathBuf> {
+        let data = self.data(p);
+        let selection = self.panes[p].model.selection.borrow();
+        data.rows
+            .iter()
+            .filter(|e| selection.contains(&e.path))
+            .map(|e| e.path.as_ref().clone())
+            .collect()
+    }
+    fn active(&mut self, p: usize) {
+        self.active = p;
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_active_pane(p as i32);
+            ui.set_active_hidden(self.config.show_hidden[p]);
+        }
+    }
+    fn busy(&self, p: usize, busy: bool) {
+        if let Some(ui) = self.ui.upgrade() {
+            match p {
+                0 => ui.set_p0_busy(busy),
+                1 => ui.set_p1_busy(busy),
+                2 => ui.set_p2_busy(busy),
+                _ => ui.set_p3_busy(busy),
+            }
+        }
+    }
+    fn set_path(&self, p: usize, path: String) {
+        if let Some(ui) = self.ui.upgrade() {
+            let path = path.into();
+            match p {
+                0 => ui.set_p0_path(path),
+                1 => ui.set_p1_path(path),
+                2 => ui.set_p2_path(path),
+                _ => ui.set_p3_path(path),
+            }
+        }
+    }
+    /// Panes shown by the current layout.
+    fn visible(&self) -> usize {
+        self.config.panes
+    }
+    /// View > 2 / 3 / 4 panes. A hidden active pane hands focus to the first one.
+    /// `columns`: the 3-pane layout with three tall panes side by side (else stacked).
+    fn set_layout(&mut self, count: usize, columns: bool) {
+        self.config.panes = count.clamp(2, 4);
+        self.config.three_columns = columns;
+        self.save_config();
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_pane_count(self.config.panes as i32);
+            ui.set_three_columns(columns);
+        }
+        if self.active >= self.config.panes {
+            self.active(0);
+        }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.invoke_focus_pane(self.active as i32);
+        }
+        let shape = match (self.config.panes, columns) {
+            (3, false) => "（横長・縦に3段）",
+            (3, true) => "（縦長・横に3列）",
+            _ => "",
+        };
+        self.message(format!("{} ペイン{shape}", self.config.panes));
+    }
+    fn toggle_attributes(&mut self) {
+        self.toggle_column(3);
+    }
+    /// View > 列: size, date, time, attributes, type (saved).
+    fn toggle_column(&mut self, column: usize) {
+        if let Some(shown) = self.config.columns.get_mut(column) {
+            *shown = !*shown;
+        }
+        self.save_config();
+        self.sync_columns();
+    }
+    fn sync_columns(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            let [size, date, time, attr, kind] = self.config.columns;
+            ui.set_columns(Columns { size, date, time, attr, kind });
+        }
+    }
+    /// Selected entries, or the entry under the cursor when nothing is selected.
+    fn targets(&self, p: usize) -> Vec<PathBuf> {
+        let selected = self.selected_paths(p);
+        if !selected.is_empty() || self.panes[p].model.special.get().is_some() {
+            return selected;
+        }
+        let data = self.data(p);
+        let current = self.panes[p].model.selection.borrow().current;
+        current.and_then(|i| data.rows.get(i)).map(|e| vec![e.path.as_ref().clone()]).unwrap_or_default()
+    }
+    /// Edit > 絶対パスのコピー / ファイル名のコピー: one per line.
+    fn copy_text(&mut self, p: usize, names: bool) {
+        let lines: Vec<String> = self
+            .targets(p)
+            .iter()
+            .map(|path| if names { path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()) } else { display(path) })
+            .collect();
+        if lines.is_empty() {
+            self.message("項目が選択されていません");
+            return;
+        }
+        let text = lines.join("\r\n");
+        let result = self
+            .ui
+            .upgrade()
+            .and_then(|ui| hwnd(&ui))
+            .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
+            .and_then(|h| shell::set_clipboard_text(h, &text));
+        match result {
+            Ok(()) => self.message(format!("{} 件の{}をコピーしました", lines.len(), if names { "ファイル名" } else { "パス" })),
+            Err(e) => self.message(e),
+        }
+    }
+    /// Edit > 同じ拡張子をすべて選択: the extension of the item under the cursor.
+    fn select_same_extension(&mut self, p: usize) {
+        let data = self.data(p);
+        let model = self.panes[p].model.clone();
+        let Some(current) = model.selection.borrow().current.filter(|_| model.special.get().is_none()) else {
+            return;
+        };
+        let Some(entry) = data.rows.get(current).filter(|e| !e.directory) else { return };
+        let ext = entry.ext.to_lowercase();
+        let paths: Vec<_> = data
+            .rows
+            .iter()
+            .filter(|e| !e.directory && e.ext.to_lowercase() == ext)
+            .map(|e| e.path.clone())
+            .collect();
+        let count = paths.len();
+        let mut selection = Selection::only(paths);
+        selection.current = Some(current);
+        selection.anchor = Some(current);
+        *model.selection.borrow_mut() = selection;
+        self.repaint(p);
+        let label = if ext.is_empty() { "拡張子なし".to_string() } else { format!(".{ext}") };
+        self.message(format!("{label} を {count} 件選択"));
+    }
+    /// Scrolls entry `index` into view (model rows are shifted by the ".." row; the first
+    /// entry also reveals "..", so Home shows the top of the list).
+    fn reveal(&self, p: usize, index: usize) {
+        let row = if index == 0 { 0 } else { index + self.data(p).offset() };
+        self.reveal_row(p, row);
+    }
+    fn reveal_row(&self, p: usize, row: usize) {
+        let model = &self.panes[p].model;
+        if model.show_page_of(row) {
+            model.notify.reset();
+        }
+    }
+    /// Page size follows the list height (window resize, font size).
+    fn page_resized(&mut self, p: usize, size: usize) {
+        let model = self.panes[p].model.clone();
+        if size == 0 || size == model.page_size.get() {
+            return;
+        }
+        model.page_size.set(size);
+        model.show_page_of(self.cursor_row(p));
+        model.notify.reset();
+        self.repaint(p);
+    }
+    /// Global row of the cursor.
+    fn cursor_row(&self, p: usize) -> usize {
+        let model = &self.panes[p].model;
+        match model.special.get() {
+            Some(special) => model.special_row(special),
+            None => model.selection.borrow().current.map_or(0, |i| i + self.data(p).offset()),
+        }
+    }
+    /// Mouse wheel: one page per notch, the cursor moves along.
+    fn page_step(&mut self, p: usize, forward: bool) {
+        self.active(p);
+        let key = if forward { slint::platform::Key::PageDown } else { slint::platform::Key::PageUp };
+        let mut event = slint::language::KeyEvent::default();
+        event.text = key.into();
+        self.key(p, event);
+    }
+    /// Breadcrumb segments ("D:", "Game", ...) and the ancestor each one opens.
+    fn crumbs(dir: &Path) -> Vec<(String, PathBuf)> {
+        let mut crumbs: Vec<_> = dir
+            .ancestors()
+            .map(|a| {
+                let label = a.file_name().map_or_else(
+                    || display(a).trim_end_matches('\\').to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                (label, a.to_path_buf())
+            })
+            .collect();
+        crumbs.reverse();
+        crumbs
+    }
+    fn info(&self, p: usize) -> PaneInfo {
+        let data = self.data(p);
+        let folders = data.rows.iter().filter(|e| e.directory).count();
+        let total: u64 = data.rows.iter().filter(|e| !e.directory).map(|e| e.size).sum();
+        let selected = self.panes[p].model.selection.borrow().count();
+        PaneInfo {
+            folders: folders.to_string().into(),
+            files: (data.rows.len() - folders).to_string().into(),
+            total: listing::format_size(total).into(),
+            volume: data.volume.as_ref().map_or(String::new(), |v| v.label.clone()).into(),
+            free: data.volume.as_ref().map_or(String::new(), |v| listing::format_size(v.free)).into(),
+            selected: if selected > 0 { selected.to_string() } else { String::new() }.into(),
+            page: {
+                let (page, pages) = self.panes[p].model.pages();
+                if pages > 1 { format!("{page}/{pages}") } else { String::new() }.into()
+            },
+        }
+    }
+    fn repaint(&self, p: usize) {
+        if let Some(ui) = self.ui.upgrade() {
+            // Update the rows of the page in place; a reset would destroy mouse/double-click state.
+            let model = &self.panes[p].model;
+            for i in 0..model.row_count() {
+                model.notify.row_changed(i);
+            }
+            let info = self.info(p);
+            match p {
+                0 => ui.set_p0_info(info),
+                1 => ui.set_p1_info(info),
+                2 => ui.set_p2_info(info),
+                _ => ui.set_p3_info(info),
+            }
+        }
+    }
+    fn navigate(&mut self, p: usize, path: PathBuf, mode: Mode) {
+        let show_hidden = self.config.show_hidden[p];
+        let pane = &mut self.panes[p];
+        pane.generation += 1;
+        pane.pending = Some(mode);
+        pane.worker.submit(Job {
+            generation: pane.generation,
+            path,
+            source: None,
+            column: pane.column,
+            descending: pane.descending,
+            show_hidden,
+        });
+        self.busy(p, true);
+    }
+    fn typed_path(&mut self, p: usize, text: String) {
+        self.active(p);
+        let path = PathBuf::from(text.trim().trim_matches('"'));
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.data(p).dir.join(path)
+        };
+        self.navigate(p, path, Mode::New(None));
+    }
+    fn command(&mut self, p: usize, c: i32) {
+        self.active(p);
+        let data = self.data(p);
+        match c {
+            0 => {
+                if let Some(saved) = self.panes[p].back.last() {
+                    self.navigate(p, saved.path.clone(), Mode::Back);
+                }
+            }
+            1 => {
+                if let Some(saved) = self.panes[p].forward.last() {
+                    self.navigate(p, saved.path.clone(), Mode::Forward);
+                }
+            }
+            2 => {
+                if let Some(parent) = data.dir.parent() {
+                    self.navigate(
+                        p,
+                        parent.to_path_buf(),
+                        Mode::New(Some(Arc::new(data.dir.clone()))),
+                    );
+                }
+            }
+            3 => self.navigate(p, data.dir.clone(), Mode::Refresh),
+            4 => self.set_path(p, display(&data.dir)),
+            _ => {}
+        }
+    }
+    fn sort(&mut self, p: usize, column: usize) {
+        if self.panes[p]
+            .pending
+            .as_ref()
+            .is_some_and(|m| !matches!(m, Mode::Sort))
+        {
+            return;
+        }
+        let source = self.data(p);
+        let show_hidden = self.config.show_hidden[p];
+        let pane = &mut self.panes[p];
+        pane.descending = if pane.column == column {
+            !pane.descending
+        } else {
+            false
+        };
+        pane.column = column;
+        pane.generation += 1;
+        pane.pending = Some(Mode::Sort);
+        pane.worker.submit(Job {
+            generation: pane.generation,
+            path: source.dir.clone(),
+            source: Some(source),
+            column,
+            descending: pane.descending,
+            show_hidden,
+        });
+        let order = if pane.descending { "降順" } else { "昇順" };
+        let key = ["名前", "サイズ", "更新日時", "拡張子"][column.min(3)];
+        self.busy(p, true);
+        self.message(format!("{key}の{order}で並べ替え"));
+    }
+    /// Breadcrumb click: open that ancestor with the folder we came from focused.
+    fn crumb(&mut self, p: usize, i: usize) {
+        self.active(p);
+        let crumbs = Self::crumbs(&self.data(p).dir);
+        let Some((_, target)) = crumbs.get(i) else { return };
+        let focus = crumbs.get(i + 1).map(|(_, path)| Arc::new(path.clone()));
+        self.navigate(p, target.clone(), Mode::New(focus));
+    }
+    /// Toolbar places (desktop, documents, pictures, videos, music) open in the active pane.
+    fn place(&mut self, i: usize) {
+        match self.config.place(i) {
+            Some(path) => self.navigate(self.active, path, Mode::New(None)),
+            None => self.message("このフォルダーは設定されていません"),
+        }
+    }
+    /// Settings dialog (File > 設定): edits a copy of the places until saved.
+    fn open_settings(&mut self) {
+        let [desktop, documents, pictures, videos, music] = self.config.places.clone();
+        let [left, right] = self.config.start.clone();
+        self.settings = [desktop, documents, pictures, videos, music, left, right];
+        self.settings_rows();
+        self.settings_colors = self.config.colors.clone();
+        self.settings_ext = self.config.extension_colors.clone();
+        self.settings_font = (self.config.font_family.clone(), self.config.font_size);
+        self.settings_color_rows();
+        if let Some(ui) = self.ui.upgrade() {
+            if ui.get_fonts().row_count() == 0 {
+                let fonts: Vec<slint::SharedString> = theme::font_families().into_iter().map(Into::into).collect();
+                ui.set_fonts(ModelRc::new(slint::VecModel::from(fonts)));
+            }
+            ui.set_settings_font_family(self.settings_font.0.clone().into());
+            ui.set_settings_font_size(self.settings_font.1.round() as i32);
+            ui.set_settings_opacity((self.config.opacity * 100.0).round() as i32);
+        }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_settings_open(true);
+            ui.invoke_focus_settings();
+        }
+    }
+    /// Rebuilds the rows, so edited fields show new values (browse / reset).
+    fn settings_rows(&self) {
+        let labels = ["デスクトップ", "ドキュメント", "画像", "動画", "音楽", "起動時の左", "起動時の右"];
+        let sandbox = sandbox_dir();
+        let rows: Vec<PlaceRow> = (0..7)
+            .map(|i| PlaceRow {
+                label: labels[i].into(),
+                value: self.settings[i].as_ref().map_or(String::new(), |p| display(p)).into(),
+                fallback: match (i, &sandbox) {
+                    (5, Some(d)) => display(&d.join("left")),
+                    (6, Some(d)) => display(&d.join("right")),
+                    // Released builds start at the Desktop / Documents (see `default_start`).
+                    (5 | 6, None) => config::known_folder(i - 5).map_or(String::new(), |p| display(&p)),
+                    _ => config::known_folder(i).map_or(String::new(), |p| display(&p)),
+                }
+                .into(),
+            })
+            .collect();
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_settings_places(ModelRc::new(slint::VecModel::from(rows)));
+        }
+    }
+    fn setting_edited(&mut self, i: usize, text: &str) {
+        let text = text.trim().trim_matches('"');
+        self.settings[i] = (!text.is_empty()).then(|| PathBuf::from(text));
+    }
+    fn setting_reset(&mut self, i: usize) {
+        self.settings[i] = None;
+        self.settings_rows();
+    }
+    /// The Windows folder picker runs on its own thread so the window keeps responding.
+    fn setting_browse(&mut self, i: usize) {
+        let start = self.settings[i].clone().or_else(|| if i < 5 { config::known_folder(i) } else { None });
+        std::thread::spawn(move || {
+            if let Some(path) = shell::pick_folder(start.as_deref()) {
+                post(Reply::Picked(i, path));
+            }
+        });
+    }
+    /// Copies colors, extension colors and font from the config into the UI.
+    fn apply_appearance(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let theme = ui.global::<Theme>();
+        for ((key, _, _), color) in theme::BASE.iter().zip(&self.config.colors) {
+            let color = *color;
+            match *key {
+                "pane" => theme.set_pane(color),
+                "text" => theme.set_text(color),
+                "folder-text" => theme.set_folder_text(color),
+                "drive-text" => theme.set_drive_text(color),
+                "readonly-text" => theme.set_readonly_text(color),
+                "hidden-text" => theme.set_hidden_text(color),
+                "size-text" => theme.set_size_text(color),
+                "time-text" => theme.set_time_text(color),
+                "attr-text" => theme.set_attr_text(color),
+                "kind" => theme.set_kind(color),
+                "selected-bg" => theme.set_selected_bg(color),
+                "cursor-bg" => theme.set_cursor_bg(color),
+                "accent" => theme.set_accent(color),
+                "chrome" => theme.set_chrome(color),
+                "bar" => theme.set_bar(color),
+                _ => {}
+            }
+        }
+        ui.set_font_family(self.config.font_family.clone().into());
+        ui.set_font_size(self.config.font_size);
+        let map = Arc::new(theme::extension_map(&self.config.extension_colors));
+        for pane in &self.panes {
+            *pane.model.ext_colors.borrow_mut() = map.clone();
+            pane.model.notify.reset();
+        }
+    }
+    fn settings_color_rows(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let base: Vec<ColorRow> = theme::BASE
+            .iter()
+            .zip(&self.settings_colors)
+            .map(|((_, label, _), color)| ColorRow {
+                label: (*label).into(),
+                color: *color,
+                r: color.red() as i32,
+                g: color.green() as i32,
+                b: color.blue() as i32,
+            })
+            .collect();
+        let ext: Vec<ExtRow> = self
+            .settings_ext
+            .iter()
+            .map(|(exts, color)| ExtRow {
+                exts: exts.clone().into(),
+                color: *color,
+                r: color.red() as i32,
+                g: color.green() as i32,
+                b: color.blue() as i32,
+            })
+            .collect();
+        ui.set_settings_colors(ModelRc::new(slint::VecModel::from(base)));
+        ui.set_settings_ext(ModelRc::new(slint::VecModel::from(ext)));
+    }
+    fn color_base(&mut self, i: usize, color: slint::Color) {
+        if let Some(c) = self.settings_colors.get_mut(i) {
+            *c = color;
+        }
+        self.settings_color_rows();
+    }
+    /// `i` out of range adds a rule.
+    fn color_ext(&mut self, i: usize, exts: &str, color: slint::Color) {
+        let exts = theme::split_extensions(exts).iter().map(|e| e.to_uppercase()).collect::<Vec<_>>().join(";");
+        if exts.is_empty() {
+            self.message("拡張子を入力してください");
+            return;
+        }
+        match self.settings_ext.get_mut(i) {
+            Some(rule) => *rule = (exts, color),
+            None => self.settings_ext.push((exts, color)),
+        }
+        self.settings_color_rows();
+    }
+    fn color_ext_delete(&mut self, i: usize) {
+        if i < self.settings_ext.len() {
+            self.settings_ext.remove(i);
+        }
+        self.settings_color_rows();
+    }
+    fn colors_reset(&mut self) {
+        self.settings_colors = config::Config::default_colors();
+        self.settings_ext = config::Config::default_extension_colors();
+        self.settings_color_rows();
+    }
+    fn font_set(&mut self, family: &str, size: f32) {
+        if !family.trim().is_empty() {
+            self.settings_font = (family.trim().to_string(), size.clamp(8.0, 32.0));
+        }
+    }
+    fn settings_done(&mut self, save: bool) {
+        if save {
+            let [desktop, documents, pictures, videos, music, left, right] = self.settings.clone();
+            self.config.places = [desktop, documents, pictures, videos, music];
+            self.config.start = [left, right];
+            if let Some(ui) = self.ui.upgrade() {
+                self.config.opacity = ui.get_settings_opacity() as f32 / 100.0;
+            }
+            self.apply_opacity();
+            self.config.colors = self.settings_colors.clone();
+            self.config.extension_colors = self.settings_ext.clone();
+            (self.config.font_family, self.config.font_size) = self.settings_font.clone();
+            self.apply_appearance();
+            self.save_config();
+            self.message("設定を保存しました");
+        }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_settings_open(false);
+            ui.invoke_focus_pane(self.active as i32);
+        }
+    }
+    /// A splitter was released: keep every layout's positions.
+    fn layout_committed(&mut self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        self.config.split = ui.get_split().clamp(0.15, 0.85);
+        self.config.split3_columns = [ui.get_col_a(), ui.get_col_b()];
+        self.config.split3_rows = [ui.get_row_a(), ui.get_row_b()];
+        self.config.split4 = [ui.get_quad_x(), ui.get_quad_y()];
+        self.save_config();
+    }
+    fn sync_bookmarks(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            let rows: Vec<BookmarkRow> = self
+                .config
+                .bookmarks
+                .iter()
+                .map(|b| BookmarkRow {
+                    name: b.name.clone().into(),
+                    path: b.path.to_string_lossy().into_owned().into(),
+                })
+                .collect();
+            ui.set_bookmarks(ModelRc::new(slint::VecModel::from(rows)));
+        }
+    }
+    fn save_config(&mut self) {
+        if let Err(e) = self.config.save() {
+            self.message(format!("設定を保存できません: {e}"));
+        }
+        self.sync_bookmarks();
+    }
+    fn open_bookmark(&mut self, i: usize) {
+        if let Some(b) = self.config.bookmarks.get(i) {
+            let path = b.path.clone();
+            self.navigate(self.active, path, Mode::New(None));
+        }
+    }
+    /// Adds the active pane's folder; it can be renamed or reordered in the edit dialog.
+    fn add_bookmark(&mut self) {
+        let dir = shell::shell_path(&self.data(self.active).dir);
+        if dir.as_os_str().is_empty() {
+            return;
+        }
+        let name = dir
+            .file_name()
+            .map_or_else(|| display(&dir), |n| n.to_string_lossy().into_owned());
+        self.message(format!("ブックマークに追加: {name}"));
+        self.config.bookmarks.push(config::Bookmark { name, path: dir });
+        self.save_config();
+    }
+    fn edit_bookmark(&mut self, i: usize) {
+        let Some(b) = self.config.bookmarks.get(i) else { return };
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_bookmark_index(i as i32);
+            ui.set_bookmark_name(b.name.clone().into());
+            ui.set_bookmark_path(b.path.to_string_lossy().into_owned().into());
+            ui.set_bookmark_editing(true);
+            ui.invoke_focus_bookmark();
+        }
+    }
+    fn close_bookmark_dialog(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_bookmark_editing(false);
+            ui.invoke_focus_pane(self.active as i32);
+        }
+    }
+    fn save_bookmark(&mut self, i: usize, name: &str, path: &str) {
+        let (name, path) = (name.trim(), path.trim().trim_matches('"'));
+        if name.is_empty() || path.is_empty() {
+            self.message("名前とパスを入力してください");
+            return;
+        }
+        if let Some(b) = self.config.bookmarks.get_mut(i) {
+            *b = config::Bookmark { name: name.into(), path: path.into() };
+            self.save_config();
+        }
+        self.close_bookmark_dialog();
+    }
+    fn delete_bookmark(&mut self, i: usize) {
+        if i < self.config.bookmarks.len() {
+            let removed = self.config.bookmarks.remove(i);
+            self.message(format!("ブックマークを削除: {}", removed.name));
+            self.save_config();
+        }
+        self.close_bookmark_dialog();
+    }
+    fn move_bookmark(&mut self, i: usize, down: bool) {
+        let j = if down { i + 1 } else { i.wrapping_sub(1) };
+        if i < self.config.bookmarks.len() && j < self.config.bookmarks.len() {
+            self.config.bookmarks.swap(i, j);
+            self.save_config();
+            if let Some(ui) = self.ui.upgrade() {
+                ui.set_bookmark_index(j as i32);
+            }
+        }
+    }
+    fn handle(&mut self, reply: Reply) {
+        match reply {
+            Reply::Listing(p, generation, result) => self.complete(p, generation, result),
+            Reply::Changed(p, dir) => {
+                if self.data(p).dir != dir {
+                    return;
+                }
+                if self.panes[p].pending.is_some() {
+                    self.panes[p].stale = true;
+                } else {
+                    self.navigate(p, dir, Mode::Refresh);
+                }
+            }
+            Reply::Ask(p, question, reply) => self.ask(p, question, reply),
+            Reply::Pasted(p, dir, before, targets, result) => {
+                self.operations -= 1;
+                match result {
+                    Ok(outcome) => {
+                        let verb = if outcome.moved { "移動" } else { "コピー" };
+                        self.message(if outcome.cancelled {
+                            "貼り付けを取り消しました".to_string()
+                        } else if outcome.aborted {
+                            format!("{verb}は途中で中止されました")
+                        } else if outcome.skipped {
+                            format!("{verb}しました（一部スキップ） → {}", display(&dir))
+                        } else {
+                            format!("{verb}しました → {}", display(&dir))
+                        });
+                    }
+                    Err(e) => self.message(format!("貼り付けできません: {e}")),
+                }
+                if self.data(p).dir == dir && self.panes[p].pending.is_none() {
+                    self.navigate(p, dir, Mode::Pasted(before, Arc::new(targets)));
+                }
+            }
+            Reply::Deleted(result) => {
+                self.operations -= 1;
+                match result {
+                    Ok(false) => self.message("削除しました"),
+                    Ok(true) => self.message("削除は中止またはスキップを含みます"),
+                    Err(e) => self.message(format!("削除できません: {e}")),
+                }
+            }
+            Reply::Icons(p) => self.repaint(p),
+            Reply::Drives(drives) => self.set_drives(drives),
+            Reply::Menu(outcome) => {
+                let p = self.menu_pane;
+                match outcome {
+                    ctxmenu::Outcome::Paste => self.paste(p),
+                    ctxmenu::Outcome::Rename => {
+                        let data = self.data(p);
+                        let current = self.panes[p].model.selection.borrow().current;
+                        if let Some(entry) = current.and_then(|i| data.rows.get(i)) {
+                            self.open_name(p, NameKind::Rename(entry.path.as_ref().clone()));
+                        }
+                    }
+                    ctxmenu::Outcome::Done => {}
+                    ctxmenu::Outcome::Failed(e) => self.message(format!("メニューを実行できません: {e}")),
+                }
+            }
+            Reply::Made(p, dir, before, result) => match result {
+                Ok(path) => {
+                    self.message(format!("完了: {}", display(&path)));
+                    if self.data(p).dir == dir && self.panes[p].pending.is_none() {
+                        self.navigate(p, dir, Mode::Pasted(before, Arc::new(vec![path])));
+                    }
+                }
+                Err(e) => self.message(format!("できませんでした: {e}")),
+            },
+            Reply::Picked(i, path) => {
+                if self.ui.upgrade().is_some_and(|ui| ui.get_settings_open()) {
+                    self.settings[i] = Some(path);
+                    self.settings_rows();
+                }
+            }
+            Reply::Opened(result) => {
+                if let Err(e) = result {
+                    self.message(format!("開けません: {e}"));
+                }
+            }
+        }
+    }
+    fn complete(&mut self, p: usize, generation: u64, result: Result<Arc<Snapshot>, String>) {
+        if generation != self.panes[p].generation {
+            return;
+        }
+        let mode = self.panes[p].pending.take().unwrap_or(Mode::Refresh);
+        let focus_list = matches!(&mode, Mode::New(_) | Mode::Back | Mode::Forward);
+        self.busy(p, false);
+        let data = match result {
+            Ok(data) => data,
+            Err(e) => {
+                self.message(format!("フォルダを開けません: {e}"));
+                return;
+            }
+        };
+        let old = self.saved(p);
+        let old_current = self.panes[p].model.selection.borrow().current;
+        let changed = old.path != data.dir;
+        let restore = match mode {
+            Mode::Back => {
+                let saved = self.panes[p].back.pop();
+                self.panes[p].forward.push(old.clone());
+                saved
+            }
+            Mode::Forward => {
+                let saved = self.panes[p].forward.pop();
+                self.panes[p].back.push(old.clone());
+                saved
+            }
+            Mode::Refresh | Mode::Sort => Some(old.clone()),
+            Mode::Pasted(before, targets) => {
+                let added: Vec<_> = data
+                    .rows
+                    .iter()
+                    .filter(|e| !before.contains_key(&e.path) || targets.contains(&e.path))
+                    .map(|e| e.path.clone())
+                    .collect();
+                if added.is_empty() {
+                    Some(old.clone())
+                } else {
+                    Some(Saved {
+                        path: data.dir.clone(),
+                        current: added.first().cloned(),
+                        anchor: added.first().cloned(),
+                        selection: Selection::only(added),
+                    })
+                }
+            }
+            Mode::New(focus) => {
+                if changed && !old.path.as_os_str().is_empty() {
+                    self.panes[p].back.push(old.clone());
+                    self.panes[p].forward.clear();
+                }
+                if !changed {
+                    Some(old.clone())
+                } else {
+                    focus.map(|path| Saved {
+                        path: data.dir.clone(),
+                        selection: Selection::only([path.clone()]),
+                        current: Some(path),
+                        anchor: None,
+                    })
+                }
+            }
+        };
+        let mut selection = restore
+            .as_ref()
+            .map(|s| s.selection.clone())
+            .unwrap_or_default();
+        selection.current = restore
+            .as_ref()
+            .and_then(|s| s.current.as_ref())
+            .and_then(|p| data.positions.get(p).copied())
+            // The focused item was removed (moved away, deleted): stay at the same position.
+            .or_else(|| (!changed).then_some(old_current).flatten())
+            .map(|i| i.min(data.rows.len().saturating_sub(1)))
+            .or_else(|| (!data.rows.is_empty()).then_some(0))
+            .filter(|_| !data.rows.is_empty());
+        selection.anchor = restore
+            .as_ref()
+            .and_then(|s| s.anchor.as_ref())
+            .and_then(|p| data.positions.get(p).copied());
+        selection
+            .exceptions
+            .retain(|p| data.positions.contains_key(p));
+        selection.deferred = None;
+        selection.selected_count = if selection.all {
+            data.rows.iter().filter(|e| selection.contains(&e.path)).count()
+        } else {
+            selection.exceptions.len()
+        };
+        // Keep the cursor on ".." or a drive across refresh; an empty folder puts it on "..".
+        let drives = self.drives.len();
+        let special = if data.offset() == 1 && data.rows.is_empty() {
+            Some(Special::Parent)
+        } else if changed {
+            None
+        } else {
+            self.panes[p].model.special.get().filter(|s| match s {
+                Special::Parent => data.offset() == 1,
+                Special::Drive(i) => *i < drives,
+            })
+        };
+        let reveal = if special.is_some() { None } else { selection.current };
+        let pane = &mut self.panes[p];
+        pane.model.special.set(special);
+        *pane.model.selection.borrow_mut() = selection;
+        *pane.model.data.borrow_mut() = data.clone();
+        if changed {
+            pane.model.page_start.set(0);
+        }
+        pane.model.show_page_of(pane.model.page_start.get());
+        pane.model.notify.reset();
+        if pane.back.len() > 64 {
+            pane.back.remove(0);
+        }
+        if pane.forward.len() > 64 {
+            pane.forward.remove(0);
+        }
+        if changed || pane.watch.is_none() {
+            let dir = data.dir.clone();
+            pane.watch = shell::watch(data.dir.clone(), move || {
+                post(Reply::Changed(p, dir.clone()));
+            });
+        }
+        let stale = std::mem::take(&mut pane.stale);
+        self.set_path(p, display(&data.dir));
+        if let Some(ui) = self.ui.upgrade() {
+            let crumbs: Vec<slint::SharedString> =
+                Self::crumbs(&data.dir).into_iter().map(|(label, _)| label.into()).collect();
+            let crumbs = ModelRc::new(slint::VecModel::from(crumbs));
+            match p {
+                0 => ui.set_p0_crumbs(crumbs),
+                1 => ui.set_p1_crumbs(crumbs),
+                2 => ui.set_p2_crumbs(crumbs),
+                _ => ui.set_p3_crumbs(crumbs),
+            }
+            if focus_list && self.active == p {
+                ui.invoke_focus_pane(p as i32);
+            }
+        }
+        if let Some(i) = reveal {
+            self.reveal(p, i);
+        }
+        if let Some(special) = special {
+            self.reveal_row(p, self.panes[p].model.special_row(special));
+        }
+        self.repaint(p);
+        if stale {
+            self.navigate(p, data.dir.clone(), Mode::Refresh);
+        }
+    }
+    /// `row` is a model row. kind: 0 press, 1 release, 2 double click, 3 right click.
+    fn pointer(&mut self, p: usize, row: usize, ctrl: bool, shift: bool, kind: i32) {
+        self.active(p);
+        let row = row + self.panes[p].model.page_start.get();
+        let data = self.data(p);
+        let model = self.panes[p].model.clone();
+        let index = match model.slot(row) {
+            None => return,
+            Some(Slot::Entry(index)) => index,
+            Some(slot) => {
+                // ".." or a drive: a click puts the cursor there (a plain click clears the selection).
+                let special = match slot {
+                    Slot::Drive(i) => Special::Drive(i),
+                    _ => Special::Parent,
+                };
+                match kind {
+                    0 | 3 => {
+                        model.special.set(Some(special));
+                        if !ctrl && !shift {
+                            model.selection.borrow_mut().clear();
+                        }
+                        self.repaint(p);
+                        if kind == 3 {
+                            let target = match special {
+                                Special::Drive(i) => ctxmenu::Target::Items(vec![self.drives[i].root.clone()]),
+                                Special::Parent => ctxmenu::Target::Background(data.dir.clone()),
+                            };
+                            self.show_menu(p, target, shift);
+                        }
+                    }
+                    2 => self.enter_special(p, special),
+                    _ => {}
+                }
+                return;
+            }
+        };
+        model.special.set(None);
+        let mut selection = model.selection.borrow_mut();
+        match kind {
+            0 => selection.select(&data.rows, index, ctrl, shift, true),
+            1 => selection.release(&data.rows),
+            2 => {
+                drop(selection);
+                self.activate(p, index);
+                return;
+            }
+            3 => {
+                // Right click: an unselected item becomes the selection, as in Explorer.
+                if !selection.contains(&data.rows[index].path) {
+                    selection.select(&data.rows, index, false, false, false);
+                }
+                selection.current = Some(index);
+                drop(selection);
+                self.repaint(p);
+                let items = self.selected_paths(p);
+                self.show_menu(p, ctxmenu::Target::Items(items), shift);
+                return;
+            }
+            _ => {}
+        }
+        drop(selection);
+        self.repaint(p);
+    }
+    /// Enter / double click on "..", or on a drive in the drive list.
+    fn enter_special(&mut self, p: usize, special: Special) {
+        match special {
+            Special::Parent => self.command(p, 2),
+            Special::Drive(i) => {
+                if let Some(drive) = self.drives.get(i) {
+                    let root = drive.root.clone();
+                    self.navigate(p, root, Mode::New(None));
+                }
+            }
+        }
+    }
+    fn show_menu(&mut self, p: usize, target: ctxmenu::Target, extended: bool) {
+        let owner = self.ui.upgrade().and_then(|ui| hwnd(&ui)).map_or(0, |h| h.0 as isize);
+        self.menu_pane = p;
+        match &self.menus {
+            Some(menus) => menus.show(ctxmenu::Request { target, owner, extended }),
+            None => self.message("コンテキストメニューを開けません"),
+        }
+    }
+    /// Right click on the empty part of the list: the folder background menu.
+    fn blank_menu(&mut self, p: usize, extended: bool) {
+        self.active(p);
+        let dir = self.data(p).dir.clone();
+        if !dir.as_os_str().is_empty() {
+            self.show_menu(p, ctxmenu::Target::Background(dir), extended);
+        }
+    }
+    /// Name dialog for rename (F2), new file (Ctrl+N) or new folder (F7).
+    fn open_name(&mut self, p: usize, kind: NameKind) {
+        let data = self.data(p);
+        if data.dir.as_os_str().is_empty() {
+            return;
+        }
+        let mut taken: HashSet<String> = data.rows.iter().map(|e| e.name_fold.clone()).collect();
+        let unique = |name: &str, folder: bool, taken: &HashSet<String>| {
+            if taken.contains(&name.to_lowercase()) {
+                paste::auto_name(name, folder, taken)
+            } else {
+                name.to_string()
+            }
+        };
+        let (title, initial, folder) = match &kind {
+            NameKind::Rename(path) => {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                taken.remove(&name.to_lowercase());
+                ("名前の変更", name, path.is_dir())
+            }
+            NameKind::NewFile => ("新規ファイル", unique("新しいテキスト ドキュメント.txt", false, &taken), false),
+            NameKind::NewFolder => ("新規フォルダー", unique("新しいフォルダー", true, &taken), true),
+        };
+        let stem = paste::stem_len(&initial, folder);
+        self.naming = Some(Naming {
+            pane: p,
+            dir: data.dir.clone(),
+            kind,
+            taken,
+            before: data.positions.clone(),
+        });
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_name_title(title.into());
+            ui.set_name_initial(initial.into());
+            ui.set_name_stem(stem as i32);
+            ui.set_name_open(true);
+            ui.invoke_focus_name();
+        }
+    }
+    fn name_error(&self, name: &str) -> &'static str {
+        self.naming
+            .as_ref()
+            .and_then(|n| paste::name_error(name, &n.taken))
+            .unwrap_or("")
+    }
+    fn name_done(&mut self, ok: bool, name: String) {
+        if ok && !self.name_error(&name).is_empty() {
+            return;
+        }
+        let Some(naming) = self.naming.take() else { return };
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_name_open(false);
+            ui.invoke_focus_pane(naming.pane as i32);
+        }
+        if !ok {
+            return;
+        }
+        let Naming { pane, dir, kind, before, .. } = naming;
+        if let NameKind::Rename(old) = &kind {
+            if old.file_name().is_some_and(|n| n == name.as_str()) {
+                return;
+            }
+        }
+        std::thread::spawn(move || {
+            let target = dir.join(&name);
+            let result = match kind {
+                NameKind::Rename(old) => shell::rename(&old, &name).map(|_| target),
+                NameKind::NewFolder => std::fs::create_dir(&target).map(|_| target).map_err(|e| e.to_string()),
+                NameKind::NewFile => std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .map(|_| target)
+                    .map_err(|e| e.to_string()),
+            };
+            post(Reply::Made(pane, dir, before, result));
+        });
+    }
+    /// New drive list from the drive thread: shown under the entries in both panes.
+    fn set_drives(&mut self, drives: Arc<Vec<Drive>>) {
+        let same_count = drives.len() == self.drives.len();
+        self.drives = drives.clone();
+        for pane in &self.panes {
+            let model = &pane.model;
+            *model.drives.borrow_mut() = drives.clone();
+            if let Some(Special::Drive(i)) = model.special.get() {
+                if i >= drives.len() {
+                    model.special.set(None);
+                }
+            }
+            if same_count {
+                // Only the numbers changed: update those rows in place (keeps click state).
+                let data = model.data.borrow();
+                let start = data.offset() + data.rows.len();
+                let page = model.page_start.get()..model.page_start.get() + model.row_count();
+                for i in 0..drives.len() {
+                    if page.contains(&(start + i)) {
+                        model.notify.row_changed(start + i - page.start);
+                    }
+                }
+            } else {
+                model.notify.reset();
+            }
+        }
+    }
+    /// Alt+Z: show or hide hidden files (saved in the config).
+    /// Alt+Z: hidden files on or off for one pane (saved).
+    fn toggle_hidden(&mut self, p: usize) {
+        self.config.show_hidden[p] = !self.config.show_hidden[p];
+        self.save_config();
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_active_hidden(self.config.show_hidden[self.active]);
+        }
+        let side = if p == 0 { "左" } else { "右" };
+        let state = if self.config.show_hidden[p] { "表示" } else { "非表示" };
+        self.message(format!("隠しファイルを{state}（{side}ペイン）"));
+        let dir = self.data(p).dir.clone();
+        if !dir.as_os_str().is_empty() {
+            self.navigate(p, dir, Mode::Refresh);
+        }
+    }
+    /// Path bar > パスのコピー.
+    fn copy_path(&mut self, p: usize) {
+        let path = display(&self.data(p).dir);
+        let result = self
+            .ui
+            .upgrade()
+            .and_then(|ui| hwnd(&ui))
+            .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
+            .and_then(|h| shell::set_clipboard_text(h, &path));
+        match result {
+            Ok(()) => self.message(format!("パスをコピー: {path}")),
+            Err(e) => self.message(e),
+        }
+    }
+    fn apply_opacity(&self) {
+        if let Some(h) = self.ui.upgrade().and_then(|ui| hwnd(&ui)) {
+            shell::set_opacity(h, self.config.opacity);
+        }
+    }
+    fn activate(&mut self, p: usize, index: usize) {
+        if self.panes[p].pending.is_some() {
+            return;
+        }
+        let data = self.data(p);
+        let Some(entry) = data.rows.get(index) else {
+            return;
+        };
+        if entry.directory {
+            self.navigate(p, entry.path.as_ref().clone(), Mode::New(None));
+        } else {
+            let path = entry.path.as_ref().clone();
+            std::thread::spawn(move || post(Reply::Opened(shell::open(&path))));
+        }
+    }
+    fn copy(&mut self, p: usize, cut: bool) {
+        let paths = self.selected_paths(p);
+        if paths.is_empty() {
+            self.message("項目が選択されていません");
+            return;
+        }
+        let result = self
+            .ui
+            .upgrade()
+            .and_then(|ui| hwnd(&ui))
+            .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
+            .and_then(|h| shell::set_clipboard(h, &paths, cut));
+        match result {
+            Ok(()) => self.message(format!(
+                "{} 件を{}しました",
+                paths.len(),
+                if cut { "切り取り" } else { "コピー" }
+            )),
+            Err(e) => self.message(e),
+        }
+    }
+    fn paste(&mut self, p: usize) {
+        let data = self.data(p);
+        if data.dir.as_os_str().is_empty() {
+            return;
+        }
+        if !self.asking.is_empty() {
+            return;
+        }
+        let dir = data.dir.clone();
+        let before = data.positions.clone();
+        self.operations += 1;
+        self.message(format!("貼り付け中 → {}", display(&dir)));
+        std::thread::spawn(move || paste_job(p, dir, before));
+    }
+    fn ask(&mut self, p: usize, question: paste::Question, reply: AnswerTx) {
+        self.asking.push_back((p, question, reply));
+        if self.asking.len() == 1 {
+            self.show_question();
+        }
+    }
+    fn show_question(&mut self) {
+        let Some((_, q, _)) = self.asking.front() else {
+            if let Some(ui) = self.ui.upgrade() {
+                ui.set_ask_open(false);
+                ui.invoke_focus_pane(self.active as i32);
+            }
+            return;
+        };
+        let detail = |m: &paste::Meta, newer: bool| {
+            let kind = if m.directory {
+                "フォルダー".to_string()
+            } else {
+                format!("{} バイト", m.size)
+            };
+            let date = chrono::DateTime::<chrono::Local>::from(m.modified).format("%Y-%m-%d %H:%M:%S");
+            format!("{kind}  ·  {date}{}", if newer { "  （新しい）" } else { "" })
+        };
+        let name = q.target.file_name().unwrap().to_string_lossy().into_owned();
+        let info = AskInfo {
+            kind: match q.kind {
+                paste::Kind::File => 0,
+                paste::Kind::Folder => 1,
+                paste::Kind::Mismatch => 2,
+            },
+            stem: paste::stem_len(&q.auto_name, q.from.directory) as i32,
+            existing_path: display(&q.target).into(),
+            existing_detail: detail(&q.to, q.to.modified > q.from.modified).into(),
+            incoming_label: if q.moved { "移動する項目:" } else { "コピーする項目:" }.into(),
+            incoming_path: display(&q.source).into(),
+            incoming_detail: detail(&q.from, q.from.modified > q.to.modified).into(),
+            rename: q.auto_name.clone().into(),
+            name: name.into(),
+        };
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_ask(info);
+            ui.set_ask_open(true);
+            ui.invoke_focus_ask();
+        }
+    }
+    fn validate(&self, name: &str) -> &'static str {
+        self.asking
+            .front()
+            .and_then(|(_, q, _)| paste::name_error(name, &q.taken))
+            .unwrap_or("")
+    }
+    fn answer(&mut self, code: i32, name: String, all: bool) {
+        use paste::{Answer, Kind};
+        let Some((_, q, _)) = self.asking.front() else { return };
+        let answer = match (code, q.kind) {
+            (0, Kind::File) => Answer::Overwrite,
+            (1, Kind::File) => Answer::Newer,
+            (2, _) => Answer::Skip,
+            (3, _) if self.validate(&name).is_empty() => Answer::Rename(name),
+            (4, Kind::Folder) => Answer::Merge,
+            (5, Kind::Folder) => Answer::Replace,
+            (6, _) => Answer::Cancel,
+            _ => return,
+        };
+        let (_, _, reply) = self.asking.pop_front().unwrap();
+        let _ = reply.send((answer, all));
+        self.show_question();
+    }
+    fn delete(&mut self, p: usize, permanent: bool) {
+        let paths = self.selected_paths(p);
+        if paths.is_empty() {
+            self.message("項目が選択されていません");
+            return;
+        }
+        self.operations += 1;
+        std::thread::spawn(move || post(Reply::Deleted(shell::delete(&paths, permanent))));
+    }
+    fn key(&mut self, p: usize, event: slint::language::KeyEvent) -> bool {
+        use slint::platform::Key;
+        self.active(p);
+        let data = self.data(p);
+        let is = |k: Key| event.text == slint::SharedString::from(k);
+        let ctrl = event.modifiers.control;
+        let shift = event.modifiers.shift;
+        let alt = event.modifiers.alt;
+        let letter = event.text.to_lowercase();
+        if is(Key::Tab) {
+            // Next shown pane, in order.
+            let other = (p + 1) % self.visible();
+            self.active(other);
+            if let Some(ui) = self.ui.upgrade() {
+                ui.invoke_focus_pane(other as i32);
+            }
+            return true;
+        }
+        // Ctrl+Shift+2 / 3 / 4: layouts. 3 again switches stacked <-> side by side.
+        // Shift turns the digit into a symbol on most layouts (JP: " #  US: @ # 197121.
+        if ctrl && shift && !alt {
+            let layout = match letter.as_str() {
+                "2" | "\"" | "@" => Some(2),
+                "3" | "#" => Some(3),
+                "4" | "$" => Some(4),
+                _ => None,
+            };
+            if let Some(count) = layout {
+                // First press: tall panes side by side; again: wide panes stacked; and so on.
+                let columns = count == 3 && !(self.config.panes == 3 && self.config.three_columns);
+                self.set_layout(count, columns);
+                return true;
+            }
+        }
+        // Ctrl+Shift+N/S/T/E: sort by name, size, time, extension; again for reverse order.
+        if ctrl && shift && !alt {
+            let column = match letter.as_str() {
+                "n" => Some(0),
+                "s" => Some(1),
+                "t" => Some(2),
+                "e" => Some(3),
+                _ => None,
+            };
+            if let Some(column) = column {
+                self.sort(p, column);
+                return true;
+            }
+        }
+        if ctrl && !alt {
+            match letter.as_str() {
+                "l" => {
+                    if let Some(ui) = self.ui.upgrade() {
+                        ui.invoke_focus_address(p as i32);
+                    }
+                    return true;
+                }
+                "c" => {
+                    self.copy(p, false);
+                    return true;
+                }
+                "x" => {
+                    self.copy(p, true);
+                    return true;
+                }
+                "v" => {
+                    self.paste(p);
+                    return true;
+                }
+                "a" => {
+                    self.panes[p]
+                        .model
+                        .selection
+                        .borrow_mut()
+                        .select_all(data.positions.clone());
+                    self.repaint(p);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if ctrl && !alt && letter == "n" {
+            self.open_name(p, NameKind::NewFile);
+            return true;
+        }
+        if is(Key::F7) {
+            self.open_name(p, NameKind::NewFolder);
+            return true;
+        }
+        if alt && !ctrl && letter == "z" {
+            self.toggle_hidden(p);
+            return true;
+        }
+        if is(Key::Delete) && !ctrl && !alt {
+            self.delete(p, shift);
+            return true;
+        }
+        if is(Key::F5) {
+            self.command(p, 3);
+            return true;
+        }
+        if alt && is(Key::LeftArrow) {
+            self.command(p, 0);
+            return true;
+        }
+        if alt && is(Key::RightArrow) {
+            self.command(p, 1);
+            return true;
+        }
+        if (alt && is(Key::UpArrow)) || is(Key::Backspace) {
+            self.command(p, 2);
+            return true;
+        }
+        if is(Key::Escape) {
+            self.panes[p].model.selection.borrow_mut().clear();
+            self.panes[p].prefix.clear();
+            self.repaint(p);
+            return true;
+        }
+        // The cursor moves over model rows: "..", the entries, then the drives.
+        let model = self.panes[p].model.clone();
+        let rows = model.total();
+        if rows == 0 {
+            return false;
+        }
+        let entries = data.rows.len();
+        // With no entry to rest on, the cursor sits on ".." or the first drive.
+        let special = model.special.get().or_else(|| {
+            (entries == 0).then(|| if data.offset() == 1 { Special::Parent } else { Special::Drive(0) })
+        });
+        let current = model
+            .selection
+            .borrow()
+            .current
+            .unwrap_or(0)
+            .min(entries.saturating_sub(1));
+        if is(Key::Return) {
+            match special {
+                Some(special) => self.enter_special(p, special),
+                None => self.activate(p, current),
+            }
+            return true;
+        }
+        if is(Key::F2) {
+            if special.is_none() && entries > 0 {
+                let path = data.rows[current].path.as_ref().clone();
+                self.open_name(p, NameKind::Rename(path));
+            }
+            return true;
+        }
+        let cursor = match special {
+            Some(special) => model.special_row(special),
+            None => current + data.offset(),
+        };
+        let page = model.page_size.get().max(1);
+        let target = if is(Key::UpArrow) {
+            Some(cursor.saturating_sub(1))
+        } else if is(Key::DownArrow) {
+            Some((cursor + 1).min(rows - 1))
+        } else if is(Key::Home) {
+            Some(0)
+        } else if is(Key::End) {
+            Some(rows - 1)
+        } else if is(Key::PageUp) || is(Key::LeftArrow) {
+            Some(cursor.saturating_sub(page))
+        } else if is(Key::PageDown) || is(Key::RightArrow) {
+            Some((cursor + page).min(rows - 1))
+        } else {
+            None
+        };
+        if let Some(row) = target {
+            self.panes[p].prefix.clear();
+            match model.slot(row) {
+                Some(Slot::Entry(index)) => {
+                    model.special.set(None);
+                    model.selection.borrow_mut().select(&data.rows, index, ctrl, shift, false);
+                    self.reveal(p, index);
+                }
+                Some(slot) => {
+                    model.special.set(Some(match slot {
+                        Slot::Drive(i) => Special::Drive(i),
+                        _ => Special::Parent,
+                    }));
+                    if !ctrl && !shift {
+                        model.selection.borrow_mut().clear();
+                    }
+                    self.reveal_row(p, row);
+                }
+                None => {}
+            }
+            self.repaint(p);
+            return true;
+        }
+        if special.is_some() && event.text == " " {
+            return true;
+        }
+        if event.text == " " {
+            let mut selection = self.panes[p].model.selection.borrow_mut();
+            if ctrl {
+                selection.toggle_current(&data.rows);
+            } else {
+                selection.select(&data.rows, current, false, shift, false);
+            }
+            drop(selection);
+            self.repaint(p);
+            return true;
+        }
+        // Shift+letter: that drive, when it exists (otherwise the letter searches names).
+        if shift && !ctrl && !alt && letter.len() == 1 && letter.chars().all(|c| c.is_ascii_alphabetic()) {
+            let prefix = format!("{}:", letter.to_uppercase());
+            if let Some(root) = self.drives.iter().find(|d| d.root.to_string_lossy().starts_with(&prefix)).map(|d| d.root.clone()) {
+                self.navigate(p, root, Mode::New(None));
+                return true;
+            }
+        }
+        if !ctrl && !alt && !event.text.is_empty() && !event.text.chars().any(char::is_control) {
+            let pane = &mut self.panes[p];
+            if pane.typed.elapsed() > Duration::from_millis(900) {
+                pane.prefix.clear();
+            }
+            let cycle = pane.prefix == letter;
+            if !cycle {
+                pane.prefix.push_str(&letter);
+            }
+            pane.typed = Instant::now();
+            let start = if cycle { current + 1 } else { current };
+            if let Some(index) = (0..data.rows.len())
+                .map(|offset| (start + offset) % data.rows.len())
+                .find(|&i| data.rows[i].name_fold.starts_with(&pane.prefix))
+            {
+                pane.model.special.set(None);
+                pane.model
+                    .selection
+                    .borrow_mut()
+                    .select(&data.rows, index, false, false, false);
+                self.reveal(p, index);
+                self.repaint(p);
+            }
+            return true;
+        }
+        false
+    }
+}
+
+#[derive(Default)]
+struct PasteOutcome {
+    moved: bool,
+    aborted: bool,
+    skipped: bool,
+    cancelled: bool,
+}
+type AnswerTx = mpsc::SyncSender<(paste::Answer, bool)>;
+/// Paste worker: read the clipboard, plan (asking the UI about each conflict), then run.
+fn paste_job(p: usize, dir: PathBuf, before: Positions) {
+    let ole = shell::Apartment::new();
+    let result = ole.as_ref().map_err(Clone::clone).and_then(|_| run_paste(p, &dir));
+    let (targets, result) = match result {
+        Ok((targets, outcome)) => (targets, Ok(outcome)),
+        Err(e) => (Vec::new(), Err(e)),
+    };
+    post(Reply::Pasted(p, dir, before, targets, result));
+}
+fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), String> {
+    let clip = shell::read_clip()?;
+    let moved = clip.moved;
+    let done = |aborted| (Vec::new(), PasteOutcome { moved, aborted, ..Default::default() });
+    let Some(paths) = clip.paths else {
+        // Shell items without paths: the Windows copy engine resolves conflicts itself.
+        return shell::paste_shell_items(dir, moved).map(done);
+    };
+    let same_folder = !paths.is_empty()
+        && paths.iter().all(|path| {
+            path.parent().and_then(|d| std::fs::canonicalize(d).ok()).as_deref() == Some(dir)
+        });
+    if same_folder {
+        if moved {
+            return Err("切り取った項目は既にこのフォルダーにあります".into());
+        }
+        return shell::duplicate(&paths, dir).map(done);
+    }
+    // Blocks this worker until the user answers; a closed window counts as Cancel.
+    let mut ask = |question: paste::Question| {
+        let (tx, rx) = mpsc::sync_channel(1);
+        if !post(Reply::Ask(p, question, tx)) {
+            return (paste::Answer::Cancel, false);
+        }
+        rx.recv().unwrap_or((paste::Answer::Cancel, false))
+    };
+    let Some(plan) = paste::plan(&paths, dir, moved, &mut ask)? else {
+        let cancelled = PasteOutcome { moved, cancelled: true, ..Default::default() };
+        return Ok((Vec::new(), cancelled));
+    };
+    if plan.changed() {
+        return Err("確認中に貼り付け先が変わったため中止しました".into());
+    }
+    let aborted = shell::transfer(&plan)?;
+    if moved && !aborted {
+        plan.remove_emptied();
+        if !plan.skipped {
+            shell::finish_cut(&paths);
+        }
+    }
+    let outcome = PasteOutcome { moved, aborted, skipped: plan.skipped, cancelled: false };
+    Ok((plan.targets, outcome))
+}
+
+/// The development sandbox folder, if running from the crate.
+fn sandbox_dir() -> Option<PathBuf> {
+    app_dir().map(|app| app.join("data").join("sandbox"))
+}
+/// The crate folder (`app`) when running from `app\target\<profile>`.
+fn app_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors()
+        .find(|dir| dir.join("Cargo.toml").is_file() && dir.join("src").is_dir())
+        .map(Path::to_path_buf)
+}
+/// Settings: `app\data\config.json` while developing (smoke runs use their own copy),
+/// otherwise `%APPDATA%\enyFile\config.json`.
+fn config_file(smoke_root: Option<&Path>) -> PathBuf {
+    if let Some(root) = smoke_root {
+        return root.join("config.json");
+    }
+    if let Some(app) = app_dir() {
+        return app.join("data").join("config.json");
+    }
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
+    appdata.join("enyFile").join("config.json")
+}
+/// Default start folders while in development: `app\data\sandbox` next to the crate
+/// (the exe lives in `app\target\<profile>`), never a system or user folder.
+/// Created with a few sample files on first use.
+fn sandbox() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let app = app_dir().ok_or("app フォルダーが見つかりません。開くフォルダーを引数で指定してください")?;
+    let root = app.join("data").join("sandbox");
+    if !root.join("left").is_dir() {
+        std::fs::create_dir_all(root.join("left").join("フォルダー A"))?;
+        std::fs::create_dir_all(root.join("right"))?;
+        for (name, text) in [
+            ("メモ.txt", "サンプル"),
+            ("file 1.txt", "one"),
+            ("file 2.txt", "two"),
+            ("file 10.txt", "ten"),
+        ] {
+            std::fs::write(root.join("left").join(name), text)?;
+        }
+        std::fs::write(root.join("right").join("file 1.txt"), "right side")?;
+    }
+    Ok(root)
+}
+/// Start folder when none is configured: the sandbox while developing,
+/// otherwise the Desktop (left, 0) and Documents (right, 1).
+fn default_start(side: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if app_dir().is_some() {
+        return Ok(sandbox()?.join(["left", "right"][side]));
+    }
+    config::known_folder(side).ok_or_else(|| "既定のフォルダーが見つかりません。開くフォルダーを引数で指定してください".into())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
+    let config = config::Config::load(config_file(smoke.map(|i| args[i + 1].as_path())));
+    let (left, right) = match smoke {
+        Some(i) => {
+            let root = args.get(i + 1).ok_or("--smoke <root> <log>")?;
+            (root.join("left"), root.join("right"))
+        }
+        // No arguments: the configured start folders, else the development sandbox.
+        None if args.is_empty() => {
+            let [start_left, start_right] = config.start.clone();
+            let left = match start_left { Some(p) => p, None => default_start(0)? };
+            let right = match start_right { Some(p) => p, None => default_start(1)? };
+            (left, right)
+        }
+        None => (args[0].clone(), args.get(1).unwrap_or(&args[0]).clone()),
+    };
+    let _ole = shell::Apartment::new()?;
+    let ui = App::new()?;
+    let panes = std::array::from_fn(|p| Pane {
+        model: Rc::new(RowsModel {
+            data: RefCell::new(Arc::new(Snapshot::default())),
+            selection: RefCell::new(Selection::default()),
+            special: Default::default(),
+            page_start: Cell::new(0),
+            page_size: Cell::new(30),
+            ext_colors: Default::default(),
+            drives: RefCell::new(Arc::new(Vec::new())),
+            notify: ModelNotify::default(),
+        }),
+        worker: Worker::new(p),
+        generation: 0,
+        pending: None,
+        stale: false,
+        watch: None,
+        back: Vec::new(),
+        forward: Vec::new(),
+        column: 0,
+        descending: false,
+        prefix: String::new(),
+        typed: Instant::now(),
+    });
+    ui.set_p0_rows(ModelRc::from(panes[0].model.clone()));
+    ui.set_p1_rows(ModelRc::from(panes[1].model.clone()));
+    ui.set_p2_rows(ModelRc::from(panes[2].model.clone()));
+    ui.set_p3_rows(ModelRc::from(panes[3].model.clone()));
+    let controller = Rc::new(RefCell::new(Controller {
+        ui: ui.as_weak(),
+        panes,
+        active: 0,
+        operations: 0,
+        asking: VecDeque::new(),
+        config,
+        settings: Default::default(),
+        settings_colors: Vec::new(),
+        settings_ext: Vec::new(),
+        settings_font: (String::new(), 0.0),
+        drives: Arc::new(Vec::new()),
+        menus: ctxmenu::Menus::start(|outcome| {
+            post(Reply::Menu(outcome));
+        }),
+        menu_pane: 0,
+        naming: None,
+    }));
+    CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
+    {
+        let c = controller.clone();
+        ui.on_navigate(move |p, path| c.borrow_mut().typed_path(p as usize, path.to_string()));
+    }
+    {
+        let c = controller.clone();
+        ui.on_command(move |p, command| c.borrow_mut().command(p as usize, command));
+    }
+    {
+        let c = controller.clone();
+        ui.on_sort(move |p, column| c.borrow_mut().sort(p as usize, column as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_crumb(move |p, i| c.borrow_mut().crumb(p as usize, i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_place(move |i| c.borrow_mut().place(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_open(move |i| c.borrow_mut().open_bookmark(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_add(move || c.borrow_mut().add_bookmark());
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_edit(move |i| c.borrow_mut().edit_bookmark(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_save(move |i, name, path| c.borrow_mut().save_bookmark(i as usize, &name, &path));
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_delete(move |i| c.borrow_mut().delete_bookmark(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_move(move |i, down| c.borrow_mut().move_bookmark(i as usize, down));
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_cancel(move || c.borrow().close_bookmark_dialog());
+    }
+    {
+        let c = controller.clone();
+        ui.on_open_settings(move || c.borrow_mut().open_settings());
+    }
+    {
+        let c = controller.clone();
+        ui.on_setting_edited(move |i, text| c.borrow_mut().setting_edited(i as usize, &text));
+    }
+    {
+        let c = controller.clone();
+        ui.on_setting_reset(move |i| c.borrow_mut().setting_reset(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_setting_browse(move |i| c.borrow_mut().setting_browse(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_settings_done(move |save| c.borrow_mut().settings_done(save));
+    }
+    {
+        let c = controller.clone();
+        ui.on_layout_committed(move || c.borrow_mut().layout_committed());
+    }
+    controller.borrow().sync_bookmarks();
+    {
+        let config = &controller.borrow().config;
+        ui.set_split(config.split);
+        ui.set_col_a(config.split3_columns[0]);
+        ui.set_col_b(config.split3_columns[1]);
+        ui.set_row_a(config.split3_rows[0]);
+        ui.set_row_b(config.split3_rows[1]);
+        ui.set_quad_x(config.split4[0]);
+        ui.set_quad_y(config.split4[1]);
+    }
+    {
+        let c = controller.clone();
+        ui.on_color_base(move |i, color| c.borrow_mut().color_base(i as usize, color));
+    }
+    {
+        let c = controller.clone();
+        ui.on_color_ext(move |i, exts, color| c.borrow_mut().color_ext(i as usize, exts.as_str(), color));
+    }
+    {
+        let c = controller.clone();
+        ui.on_color_ext_delete(move |i| c.borrow_mut().color_ext_delete(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_colors_reset(move || c.borrow_mut().colors_reset());
+    }
+    {
+        let c = controller.clone();
+        ui.on_font_set(move |family, size| c.borrow_mut().font_set(family.as_str(), size as f32));
+    }
+    controller.borrow().apply_appearance();
+    {
+        let c = controller.clone();
+        ui.on_name_validate(move |name| c.borrow().name_error(&name).into());
+    }
+    {
+        let c = controller.clone();
+        ui.on_name_done(move |ok, name| c.borrow_mut().name_done(ok, name.to_string()));
+    }
+    {
+        let c = controller.clone();
+        ui.on_menu_command(move |command| {
+            let mut c = c.borrow_mut();
+            let p = c.active;
+            match command {
+                0 => c.open_name(p, NameKind::NewFile),
+                1 => c.open_name(p, NameKind::NewFolder),
+                2 => c.toggle_hidden(p),
+                3 => c.copy(p, false),
+                4 => c.paste(p),
+                5 => c.delete(p, false),
+                6 => c.copy_text(p, false),
+                7 => c.copy_text(p, true),
+                8 => c.select_same_extension(p),
+                9 => c.toggle_attributes(),
+                20..=24 => c.toggle_column(command as usize - 20),
+                10 => c.set_layout(2, false),
+                11 => c.set_layout(3, false),
+                12 => c.set_layout(4, false),
+                13 => c.set_layout(3, true),
+                _ => {}
+            }
+        });
+    }
+    {
+        let c = controller.clone();
+        ui.on_page_resized(move |p, size| c.borrow_mut().page_resized(p as usize, size.max(1) as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_page_step(move |p, forward| c.borrow_mut().page_step(p as usize, forward));
+    }
+    {
+        let c = controller.clone();
+        ui.on_copy_path(move |p| c.borrow_mut().copy_path(p as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_blank_menu(move |p, extended| c.borrow_mut().blank_menu(p as usize, extended));
+    }
+    // Drive list: refreshed in the background (labels and free space), sent only on change.
+    std::thread::spawn(|| {
+        let _com = shell::Apartment::new();
+        let mut last = Vec::new();
+        loop {
+            let drives = listing::drives();
+            if drives != last {
+                last = drives.clone();
+                if !post(Reply::Drives(Arc::new(drives))) {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+    {
+        let c = controller.clone();
+        ui.on_pointer(move |p, index, ctrl, shift, kind| {
+            c.borrow_mut()
+                .pointer(p as usize, index as usize, ctrl, shift, kind)
+        });
+    }
+    {
+        let c = controller.clone();
+        ui.on_key_event(move |p, event| c.borrow_mut().key(p as usize, event));
+    }
+    {
+        let c = controller.clone();
+        ui.on_blank(move |p| {
+            let mut c = c.borrow_mut();
+            c.active(p as usize);
+            c.panes[p as usize].model.selection.borrow_mut().clear();
+            c.repaint(p as usize);
+        });
+    }
+    {
+        let c = controller.clone();
+        ui.on_ask_answer(move |code, name, all| c.borrow_mut().answer(code, name.to_string(), all));
+    }
+    {
+        let c = controller.clone();
+        ui.on_ask_validate(move |name| c.borrow().validate(&name).into());
+    }
+    ui.show()?;
+    // winit creates the native window once the event loop runs; poll briefly for its HWND.
+    let revoke = Rc::new(slint::Timer::default());
+    {
+        let weak = ui.as_weak();
+        let stop = Rc::downgrade(&revoke);
+        let start = Instant::now();
+        revoke.start(slint::TimerMode::Repeated, Duration::from_millis(16), move || {
+            let handle = weak.upgrade().and_then(|ui| hwnd(&ui));
+            if let Some(h) = handle {
+                shell::revoke_drop_target(h);
+                shell::dark_title_bar(h);
+                if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+                    c.borrow().apply_opacity();
+                }
+            }
+            if handle.is_some() || start.elapsed() > Duration::from_secs(5) {
+                if let Some(timer) = stop.upgrade() {
+                    timer.stop();
+                }
+            }
+        });
+    }
+    {
+        let mut c = controller.borrow_mut();
+        // Panes 3 and 4 (3/4-pane layouts) start where the left and right ones do.
+        c.navigate(0, left.clone(), Mode::New(None));
+        c.navigate(1, right.clone(), Mode::New(None));
+        c.navigate(2, left, Mode::New(None));
+        c.navigate(3, right, Mode::New(None));
+        let ui = c.ui.upgrade().unwrap();
+        ui.set_pane_count(c.config.panes as i32);
+        ui.set_three_columns(c.config.three_columns);
+        ui.set_active_hidden(c.config.show_hidden[0]);
+        c.sync_columns();
+    }
+    ui.invoke_focus_pane(0);
+    let _smoke = smoke.map(|i| smoke::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
+    slint::run_event_loop()?;
+    CONTROLLER.with(|c| c.borrow_mut().take());
+    Ok(())
+}

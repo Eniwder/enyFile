@@ -1,0 +1,41 @@
+name: Release
+
+# Push a tag such as v0.1.0 (matching app/Cargo.toml's version) to publish a release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+      - name: Check version
+        run: |
+          $version = (Select-String -Path app/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version" }
+      - name: Test
+        run: cargo test --release --locked --manifest-path app/Cargo.toml
+      - name: Build
+        run: cargo build --release --locked --bin enyfile --manifest-path app/Cargo.toml
+      - name: Package
+        run: |
+          $name = "enyFile-$env:GITHUB_REF_NAME-windows-x64"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item app/target/release/enyfile.exe, LICENSE, README.md -Destination $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          "ASSET=$name.zip" >> $env:GITHUB_ENV
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME $env:ASSET --title "enyFile $env:GITHUB_REF_NAME" --generate-notes

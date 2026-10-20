@@ -1,0 +1,1190 @@
+import { CheckBox, ComboBox, LineEdit, ListView, Palette, Slider, SpinBox } from "std-widgets.slint";
+
+// All colors in one place so themes (and later transparency) can be switched.
+export global Theme {
+    in-out property <color> chrome: #383838;
+    in-out property <color> pane: #2d2d2d;
+    in-out property <color> bar: #353535;
+    in-out property <color> text: #dcdcdc;
+    in-out property <color> dim: #9a9a9a;
+    in-out property <color> accent: #64a8ee;
+    in-out property <color> kind: #5ea0e6;
+    in-out property <color> key: #e39a3c;
+    in-out property <color> hover: #ffffff1a;
+    in-out property <color> border: #4a4a4a;
+    in-out property <color> border-active: #7b9bc2;
+    in-out property <color> cursor-bg: #d6d6d6;
+    in-out property <color> cursor-text: #1c1c1c;
+    in-out property <color> cursor-selected-bg: #9cc2ec;
+    in-out property <color> cursor-inactive-bg: #3a3a3a;
+    in-out property <color> cursor-inactive-line: #5c5c5c;
+    in-out property <color> selected-bg: #2f4c6e;
+    in-out property <color> selected-text: #ffffff;
+    in-out property <color> folder: #e9c25b;
+    in-out property <color> file-icon: #e8e8e8;
+    in-out property <color> file-icon-line: #9a9a9a;
+    in-out property <color> dialog: #3a3a3a;
+    in-out property <color> error: #f07a6a;
+    in-out property <color> folder-text: #e8e8e8;
+    in-out property <color> drive-text: #64a8ee;
+    in-out property <color> readonly-text: #d8c060;
+    in-out property <color> hidden-text: #8a8a8a;
+    in-out property <color> size-text: #c8c8c8;
+    in-out property <color> time-text: #c8c8c8;
+    in-out property <color> attr-text: #a0a0a0;
+}
+
+export struct Row { name: string, ext: string, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
+export struct Columns { size: bool, date: bool, time: bool, attr: bool, kind: bool }
+export struct ColorRow { label: string, color: color, r: int, g: int, b: int }
+export struct ExtRow { exts: string, color: color, r: int, g: int, b: int }
+export struct PaneInfo { folders: string, files: string, total: string, volume: string, free: string, selected: string, page: string }
+export struct BookmarkRow { name: string, path: string }
+export struct PlaceRow { label: string, value: string, fallback: string }
+// kind: 0 file, 1 folder, 2 file/folder mismatch.
+export struct AskInfo { kind: int, name: string, existing-path: string, existing-detail: string, incoming-label: string, incoming-path: string, incoming-detail: string, rename: string, stem: int }
+
+component FlatButton inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.text;
+    in property <length> font-size: 13px;
+    in property <bool> enabled: true;
+    in property <length> nudge;
+    callback clicked;
+    callback right-clicked;
+    preferred-width: label.preferred-width + 14px;
+    min-width: 22px;
+    border-radius: 3px;
+    background: touch.has-hover && root.enabled ? Theme.hover : transparent;
+    label := Text {
+        x: 7px; y: root.nudge; width: parent.width - 14px; height: parent.height;
+        text: root.text; color: root.enabled ? root.tint : Theme.border;
+        font-size: root.font-size; overflow: elide;
+        vertical-alignment: center; horizontal-alignment: center;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.up { root.right-clicked(); }
+        }
+    }
+}
+
+component MenuEntry inherits Rectangle {
+    in property <string> text;
+    // -1: plain item; 0 / 1: checkable, unchecked / checked (shown in its own column).
+    in property <int> check: -1;
+    callback clicked;
+    height: 26px;
+    background: touch.has-hover ? Theme.hover : transparent;
+    if root.check >= 0 : Text { x: 8px; width: 16px; text: root.check == 1 ? "✓" : ""; color: Theme.accent; vertical-alignment: center; }
+    Text { x: root.check >= 0 ? 26px : 10px; text: root.text; color: Theme.text; vertical-alignment: center; }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Draggable boundary between panes. Reports the new position of its leading edge.
+component Splitter inherits Rectangle {
+    in property <bool> vertical: true;
+    callback moved-to(length);
+    callback released();
+    callback reset();
+    background: drag.pressed || drag.has-hover ? Theme.border-active : transparent;
+    drag := TouchArea {
+        mouse-cursor: root.vertical ? MouseCursor.col-resize : MouseCursor.row-resize;
+        moved => {
+            if self.pressed {
+                root.moved-to(root.vertical ? root.x + self.mouse-x - self.pressed-x : root.y + self.mouse-y - self.pressed-y);
+            }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.up { root.released(); }
+        }
+        double-clicked => { root.reset(); }
+    }
+}
+
+component Glyph inherits Rectangle {
+    in property <bool> folder;
+    width: 16px; height: 16px;
+    if root.folder : Rectangle { x: 1px; y: 2px; width: 6px; height: 3px; background: Theme.folder; border-radius: 1px; }
+    if root.folder : Rectangle { x: 1px; y: 4px; width: 14px; height: 10px; background: Theme.folder; border-radius: 1px; }
+    if !root.folder : Rectangle { x: 3px; y: 1px; width: 10px; height: 14px; background: Theme.file-icon; border-width: 1px; border-color: Theme.file-icon-line; }
+}
+
+// One conflict at a time (NexusFile style), instead of the Windows copy engine prompt.
+// Answers: 0 overwrite, 1 overwrite if newer, 2 skip, 3 rename, 4 merge, 5 replace, 6 cancel.
+component DialogButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+    in property <bool> enabled: true;
+    preferred-width: label.preferred-width + 28px;
+    callback clicked;
+    height: 28px;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: root.primary ? Theme.accent : Theme.border;
+    background: touch.pressed ? Theme.border : touch.has-hover && root.enabled ? Theme.hover : Theme.bar;
+    label := Text { text: root.text; color: root.enabled ? Theme.text : Theme.border; horizontal-alignment: center; vertical-alignment: center; }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+// F2 rename, Ctrl+N new file, F7 new folder. The name part (without extension) is selected.
+component NameDialog inherits Rectangle {
+    in property <string> title;
+    in property <string> initial;
+    in property <int> stem;
+    callback validate(string) -> string;
+    callback done(bool, string);
+    property <string> error;
+    public function open() {
+        edit.text = root.initial;
+        root.error = "";
+        edit.focus();
+        edit.set-selection-offsets(0, root.stem);
+    }
+    function confirm() {
+        root.error = root.validate(edit.text);
+        if root.error == "" { root.done(true, edit.text); }
+    }
+    background: #00000066;
+    TouchArea { }
+    Rectangle {
+        width: min(parent.width - 40px, 520px); height: content.preferred-height;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
+        content := VerticalLayout {
+            padding: 16px; spacing: 10px;
+            Text { text: root.title; font-weight: 700; font-size: 14px; color: Theme.text; }
+            edit := LineEdit {
+                edited(t) => { root.error = root.validate(t); }
+                accepted => { root.confirm(); }
+                key-pressed(e) => { if e.text == Key.Escape { root.done(false, ""); return accept; } return reject; }
+            }
+            Text { text: root.error != "" ? root.error : "Enter 決定  ·  Esc キャンセル"; color: root.error != "" ? Theme.error : Theme.dim; height: 18px; }
+            HorizontalLayout {
+                spacing: 6px; alignment: end;
+                DialogButton { text: "OK"; primary: true; clicked => { root.confirm(); } }
+                DialogButton { text: "キャンセル"; clicked => { root.done(false, ""); } }
+            }
+        }
+    }
+}
+
+component AskDialog inherits Rectangle {
+    in property <AskInfo> info;
+    callback answer(int, string, bool);
+    callback validate(string) -> string;
+    property <bool> renaming;
+    property <bool> all;
+    property <string> error;
+    public function open() {
+        root.renaming = false;
+        root.all = false;
+        root.error = "";
+        name-edit.text = root.info.rename;
+        keys.focus();
+    }
+    function choose(code: int) {
+        if code == 0 || code == 1 { if root.info.kind != 0 { return; } }
+        if code == 4 { if root.info.kind != 1 { return; } }
+        if code == 5 { if root.info.kind != 1 { return; } }
+        if code == 3 && !root.all {
+            root.renaming = true;
+            name-edit.text = root.info.rename;
+            root.error = root.validate(name-edit.text);
+            name-edit.focus();
+            name-edit.set-selection-offsets(0, root.info.stem);
+            return;
+        }
+        root.answer(code, code == 3 ? root.info.rename : "", root.all);
+    }
+    function confirm-rename() {
+        root.error = root.validate(name-edit.text);
+        if root.error == "" { root.answer(3, name-edit.text, false); }
+    }
+    background: #00000066;
+    TouchArea { }
+    keys := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape { root.choose(6); return accept; }
+            if e.text.to-lowercase() == "o" { root.choose(0); return accept; }
+            if e.text.to-lowercase() == "n" { root.choose(1); return accept; }
+            if e.text.to-lowercase() == "s" { root.choose(2); return accept; }
+            if e.text.to-lowercase() == "r" { root.choose(3); return accept; }
+            if e.text.to-lowercase() == "g" { root.choose(4); return accept; }
+            if e.text.to-lowercase() == "e" { root.choose(5); return accept; }
+            if e.text.to-lowercase() == "c" { root.choose(6); return accept; }
+            if e.text.to-lowercase() == "a" { root.all = !root.all; return accept; }
+            return reject;
+        }
+    }
+    panel := Rectangle {
+        width: min(parent.width - 40px, 760px);
+        height: content.preferred-height;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
+        content := HorizontalLayout {
+            padding: 16px; spacing: 16px;
+            VerticalLayout {
+                spacing: 8px; horizontal-stretch: 1;
+                Text { text: "貼り付け先には、既に同じ名前のファイル/フォルダーが存在します。"; color: Theme.text; wrap: word-wrap; }
+                Text { text: root.info.name; font-weight: 700; font-size: 14px; color: Theme.text; overflow: elide; }
+                Rectangle {
+                    border-width: 1px; border-color: Theme.border; border-radius: 3px; background: Theme.pane;
+                    VerticalLayout {
+                        padding: 12px; spacing: 3px;
+                        Text { text: "既存の項目:"; font-weight: 700; color: Theme.text; }
+                        Text { text: root.info.existing-path; color: Theme.text; overflow: elide; }
+                        Text { text: root.info.existing-detail; color: Theme.dim; font-size: 12px; }
+                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                        Text { text: root.info.incoming-label; font-weight: 700; color: Theme.text; }
+                        Text { text: root.info.incoming-path; color: Theme.accent; overflow: elide; }
+                        Text { text: root.info.incoming-detail; color: Theme.dim; font-size: 12px; }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "新しい名前"; vertical-alignment: center; color: root.renaming ? Theme.text : Theme.dim; }
+                    name-edit := LineEdit {
+                        enabled: root.renaming;
+                        edited(t) => { root.error = root.validate(t); }
+                        accepted => { root.confirm-rename(); }
+                        key-pressed(e) => {
+                            if e.text == Key.Escape { root.renaming = false; root.error = ""; keys.focus(); return accept; }
+                            return reject;
+                        }
+                    }
+                }
+                Text { text: root.renaming ? (root.error != "" ? root.error : "Enter 決定  ·  Esc 戻る（拡張子は選択範囲の外）") : ""; color: root.error != "" ? Theme.error : Theme.dim; height: 18px; }
+                CheckBox { text: "すべて適用(A)"; checked <=> root.all; }
+            }
+            VerticalLayout {
+                spacing: 6px; width: 180px; alignment: start;
+                // Only the choices that apply to this conflict are shown.
+                if root.info.kind == 0 : DialogButton { text: "上書き(O)"; clicked => { root.choose(0); } }
+                if root.info.kind == 0 : DialogButton { text: "新しければ上書き(N)"; clicked => { root.choose(1); } }
+                if root.info.kind == 1 : DialogButton { text: "結合(G)"; clicked => { root.choose(4); } }
+                DialogButton { text: "スキップ(S)"; clicked => { root.choose(2); } }
+                if root.info.kind == 1 : DialogButton { text: "フォルダの置換(E)"; clicked => { root.choose(5); } }
+                DialogButton { text: "リネーム(R)"; primary: root.renaming; clicked => { if root.renaming { root.confirm-rename(); } else { root.choose(3); } } }
+                Rectangle { height: 12px; }
+                DialogButton { text: "キャンセル(C)"; clicked => { root.choose(6); } }
+            }
+        }
+    }
+}
+
+component Pane inherits Rectangle {
+    in property <[Row]> rows;
+    in-out property <string> path;
+    in property <[string]> crumbs;
+    in property <PaneInfo> info;
+    in property <bool> active;
+    in property <bool> busy;
+    in property <length> row-h: 23px;
+    // 3-pane layout: name (with extension), size and time only.
+    in property <bool> compact;
+    property <int> crumb-limit: root.width >= 640px ? 99 : root.width >= 420px ? 4 : 2;
+    in property <Columns> columns: { size: true, date: true, time: true, attr: true, kind: true };
+    property <bool> editing;
+    // The list shows whole pages (no scrolling); the controller follows this size.
+    out property <int> page-size: max(1, floor(list.height / root.row-h));
+    property <length> wheel;
+    callback command(int);
+    callback navigate(string);
+    callback crumb(int);
+    callback pointer(int, bool, bool, int);
+    callback key-event(KeyEvent) -> bool;
+    callback blank();
+    callback blank-menu(bool);
+    callback page-resized(int);
+    callback page-step(bool);
+    callback copy-path();
+    property <length> menu-x;
+    changed page-size => { root.page-resized(root.page-size); }
+    public function focus-list() { root.editing = false; keys.focus(); }
+    public function focus-path() { root.editing = true; address.focus(); address.select-all(); }
+    background: Theme.pane;
+    border-width: 1px;
+    border-color: root.active ? Theme.border-active : Theme.border;
+
+    // Path bar: breadcrumb (click a segment to open it), click the empty part or Ctrl+L to type.
+    Rectangle {
+        x: 1px; y: 1px; width: parent.width - 2px; height: 26px;
+        background: Theme.bar;
+        TouchArea {
+            clicked => { root.focus-path(); }
+            pointer-event(e) => {
+                if e.button == PointerEventButton.right && e.kind == PointerEventKind.up { root.menu-x = self.mouse-x; path-menu.show(); }
+            }
+        }
+        path-menu := PopupWindow {
+            x: root.menu-x; y: parent.height; width: 180px;
+            Rectangle {
+                background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+                VerticalLayout {
+                    padding: 4px;
+                    MenuEntry { text: "パスのコピー"; clicked => { root.copy-path(); } }
+                    MenuEntry { text: "パスの編集"; clicked => { root.focus-path(); } }
+                }
+            }
+        }
+        if !root.editing : HorizontalLayout {
+            x: 4px; width: parent.width - 40px; alignment: start;
+            // Narrow panes show the last segments only, after a leading "…".
+            if root.crumbs.length > root.crumb-limit : Text { text: "… ›"; color: Theme.dim; vertical-alignment: center; }
+            for crumb[i] in root.crumbs : HorizontalLayout {
+                if i >= root.crumbs.length - root.crumb-limit : FlatButton {
+                    text: crumb;
+                    tint: i == root.crumbs.length - 1 ? Theme.text : Theme.dim;
+                    max-width: i == root.crumbs.length - 1 ? 100000px : 120px;
+                    clicked => { root.crumb(i); }
+                    right-clicked => { root.menu-x = 8px; path-menu.show(); }
+                }
+                if i >= root.crumbs.length - root.crumb-limit && i < root.crumbs.length - 1 : Text { text: "›"; color: Theme.dim; width: 10px; horizontal-alignment: center; vertical-alignment: center; }
+            }
+        }
+        address := LineEdit {
+            x: 2px; y: 0px; width: parent.width - 36px; height: parent.height;
+            visible: root.editing;
+            text <=> root.path;
+            accepted => { root.editing = false; root.navigate(self.text); keys.focus(); }
+            key-pressed(e) => {
+                if e.text == Key.Escape { root.editing = false; root.command(4); keys.focus(); return accept; }
+                if e.modifiers.alt || e.text == Key.F5 { return root.key-event(e) ? accept : reject; }
+                return reject;
+            }
+            changed has-focus => { if !self.has-focus { root.editing = false; root.command(4); } }
+        }
+        FlatButton { x: parent.width - 30px; width: 28px; height: parent.height; text: "↺"; font-size: 15px; clicked => { root.command(3); } }
+    }
+    // Info line: counts and total on the left, volume and free space on the right.
+    HorizontalLayout {
+        x: 8px; y: 28px; width: parent.width - 16px; height: 20px; spacing: 0px;
+        Text { text: root.info.folders; color: Theme.accent; font-weight: 700; vertical-alignment: center; }
+        Text { text: " フォルダ "; color: Theme.text; vertical-alignment: center; }
+        Text { text: root.info.files; color: Theme.accent; font-weight: 700; vertical-alignment: center; }
+        Text { text: " ファイル (" + root.info.total + ")"; color: Theme.text; vertical-alignment: center; overflow: elide; }
+        if root.info.selected != "" : Text { text: "   選択 "; color: Theme.text; vertical-alignment: center; }
+        if root.info.selected != "" : Text { text: root.info.selected; color: Theme.key; font-weight: 700; vertical-alignment: center; }
+        if root.busy : Text { text: "   読み込み中…"; color: Theme.dim; vertical-alignment: center; }
+        if root.info.page != "" : Text { text: "   ページ " + root.info.page; color: Theme.dim; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+        // Narrow panes leave out the volume part so the counts stay readable.
+        if root.width >= 420px : Text { text: root.info.volume + " "; color: Theme.text; vertical-alignment: center; overflow: elide; }
+        if root.width >= 420px : Text { text: root.info.free; color: Theme.accent; font-weight: 700; vertical-alignment: center; }
+        if root.width >= 420px && root.info.free != "" : Text { text: " 空き"; color: Theme.text; vertical-alignment: center; }
+    }
+    keys := FocusScope {
+        x: 0; y: 0; width: 0; height: 0; focus-on-click: false;
+        key-pressed(e) => { return root.key-event(e) ? accept : reject; }
+    }
+    // One page of rows. Clicks on the empty part reach this area; the wheel turns pages.
+    list := TouchArea {
+        x: 1px; y: 50px; width: parent.width - 2px; height: parent.height - 51px;
+        clicked => { keys.focus(); root.blank(); }
+        pointer-event(e) => {
+            if e.button == PointerEventButton.right && e.kind == PointerEventKind.up { keys.focus(); root.blank-menu(e.modifiers.shift); }
+        }
+        scroll-event(e) => {
+            // Collect small touchpad steps; one wheel notch turns one page.
+            root.wheel += e.delta-y;
+            if root.wheel >= 30px { root.wheel = 0; root.page-step(false); }
+            if root.wheel <= -30px { root.wheel = 0; root.page-step(true); }
+            return accept;
+        }
+        for row[index] in root.rows : item := Rectangle {
+            x: 0; y: index * root.row-h; width: parent.width;
+            height: root.row-h;
+            property <bool> lit: row.current && root.active;
+            property <color> fg: item.lit ? Theme.cursor-text : row.selected ? Theme.selected-text : row.hidden ? Theme.hidden-text : Theme.text;
+            // Name and extension: extension color, else attribute / folder colors.
+            property <color> name-color: item.lit || row.selected ? item.fg
+                : row.tinted ? row.tint
+                : row.hidden ? Theme.hidden-text
+                : row.readonly ? Theme.readonly-text
+                : row.directory ? Theme.folder-text : Theme.text;
+            property <color> column-dim: item.lit || row.selected ? item.fg : row.hidden ? Theme.hidden-text : Theme.text;
+            background: item.lit ? (row.selected ? Theme.cursor-selected-bg : Theme.cursor-bg)
+                : row.selected ? Theme.selected-bg
+                : row.current ? Theme.cursor-inactive-bg : transparent;
+            if row.current && !root.active : Rectangle { y: 0; height: 1px; background: Theme.cursor-inactive-line; }
+            if row.current && !root.active : Rectangle { y: parent.height - 1px; height: 1px; background: Theme.cursor-inactive-line; }
+            // Files, folders and "..".
+            if !row.drive : HorizontalLayout {
+                padding-left: 8px; padding-right: 10px; spacing: 7px;
+                Rectangle {
+                    width: 16px;
+                    if row.icon.width > 0 : Image { y: (parent.height - 16px) / 2; width: 16px; height: 16px; source: row.icon; }
+                    if row.icon.width == 0 : Glyph { y: (parent.height - 16px) / 2; folder: row.directory; }
+                }
+                Text { text: root.compact && row.ext != "" ? row.name + "." + row.ext : row.name; color: item.name-color; overflow: elide; horizontal-stretch: 1; min-width: 40px; vertical-alignment: center; }
+                if !root.compact : Text { text: row.ext; color: item.name-color; overflow: elide; width: 40px; vertical-alignment: center; }
+                if root.columns.size : Text { text: row.size; color: item.lit || row.selected || row.hidden ? item.column-dim : Theme.size-text; width: 60px; horizontal-alignment: right; vertical-alignment: center; }
+                if !root.compact && root.columns.date : Text { text: row.date; color: item.lit || row.selected || row.hidden ? item.column-dim : Theme.time-text; width: 86px; vertical-alignment: center; }
+                if root.columns.time : Text { text: row.time; color: item.lit || row.selected || row.hidden ? item.column-dim : Theme.time-text; width: 42px; vertical-alignment: center; }
+                if !root.compact && root.columns.attr : Text { text: row.attr; color: item.lit || row.selected || row.hidden ? item.column-dim : Theme.attr-text; width: 32px; vertical-alignment: center; }
+                if !root.compact && root.columns.kind : Text { text: row.kind; color: item.lit ? Theme.cursor-text : Theme.kind; overflow: elide; width: 130px; vertical-alignment: center; }
+            }
+            // Drive list under the entries: name, used-space bar, free space.
+            if row.drive : HorizontalLayout {
+                padding-left: 8px; padding-right: 10px; spacing: 7px;
+                Rectangle {
+                    width: 16px;
+                    if row.icon.width > 0 : Image { y: (parent.height - 16px) / 2; width: 16px; height: 16px; source: row.icon; }
+                }
+                // Narrow panes: name and free space only (no bar).
+                Text { text: row.name; color: item.lit ? Theme.cursor-text : Theme.drive-text; overflow: elide; width: root.width >= 420px ? 190px : root.width - 150px; vertical-alignment: center; }
+                if root.width >= 420px : Rectangle {
+                    width: 100px;
+                    if row.kind != "" : Rectangle {
+                        y: (parent.height - 8px) / 2; height: 8px;
+                        border-width: 1px; border-color: Theme.dim;
+                        Rectangle { x: 1px; y: 1px; height: parent.height - 2px; width: (parent.width - 2px) * row.used; background: Theme.dim; }
+                    }
+                }
+                Text { text: row.kind; color: item.fg; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+            }
+            TouchArea {
+                pointer-event(e) => {
+                    if e.button == PointerEventButton.left {
+                        if e.kind == PointerEventKind.down {
+                            keys.focus();
+                            root.pointer(index, e.modifiers.control, e.modifiers.shift, 0);
+                        } else if e.kind == PointerEventKind.up {
+                            root.pointer(index, false, false, 1);
+                        }
+                    } else if e.button == PointerEventButton.right && e.kind == PointerEventKind.up {
+                        keys.focus();
+                        root.pointer(index, e.modifiers.control, e.modifiers.shift, 3);
+                    }
+                }
+                double-clicked => { root.pointer(index, false, false, 2); }
+            }
+        }
+    }
+}
+
+// Toolbar icon from the Windows icon font (Segoe MDL2 Assets).
+component IconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <color> tint: Theme.text;
+    in property <length> glyph-size: 19px;
+    in property <length> nudge;
+    callback clicked;
+    width: 38px;
+    border-radius: 3px;
+    background: touch.has-hover ? Theme.hover : transparent;
+    Text {
+        y: root.nudge; width: parent.width; height: parent.height;
+        text: root.glyph; color: root.tint; font-family: "Segoe MDL2 Assets"; font-size: root.glyph-size;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component BookmarkDialog inherits Rectangle {
+    in property <string> name;
+    in property <string> path;
+    in property <int> index;
+    in property <int> count;
+    callback save(string, string);
+    callback remove();
+    callback move(bool);
+    callback cancel();
+    public function open() {
+        name-edit.text = root.name;
+        path-edit.text = root.path;
+        name-edit.focus();
+        name-edit.select-all();
+    }
+    background: #00000066;
+    TouchArea { }
+    Rectangle {
+        width: min(parent.width - 40px, 560px); height: content.preferred-height;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
+        content := VerticalLayout {
+            padding: 16px; spacing: 10px;
+            Text { text: "ブックマークの編集"; font-weight: 700; font-size: 14px; color: Theme.text; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "名前"; width: 40px; color: Theme.text; vertical-alignment: center; }
+                name-edit := LineEdit {
+                    accepted => { root.save(name-edit.text, path-edit.text); }
+                    key-pressed(e) => { if e.text == Key.Escape { root.cancel(); return accept; } return reject; }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "パス"; width: 40px; color: Theme.text; vertical-alignment: center; }
+                path-edit := LineEdit {
+                    accepted => { root.save(name-edit.text, path-edit.text); }
+                    key-pressed(e) => { if e.text == Key.Escape { root.cancel(); return accept; } return reject; }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                DialogButton { text: "▲ 上へ"; enabled: root.index > 0; clicked => { root.move(false); } }
+                DialogButton { text: "▼ 下へ"; enabled: root.index < root.count - 1; clicked => { root.move(true); } }
+                Rectangle { horizontal-stretch: 1; }
+                DialogButton { text: "削除"; clicked => { root.remove(); } }
+                DialogButton { text: "保存"; primary: true; clicked => { root.save(name-edit.text, path-edit.text); } }
+                DialogButton { text: "キャンセル"; clicked => { root.cancel(); } }
+            }
+        }
+    }
+}
+
+// Color editor used by the カラー tab: RGB sliders, #RRGGBB, and extensions for rules.
+component ColorEditor inherits Rectangle {
+    in property <string> title;
+    in property <bool> with-extensions;
+    in-out property <int> red;
+    in-out property <int> green;
+    in-out property <int> blue;
+    in-out property <string> extensions;
+    callback done(bool);
+    property <color> value: rgb(root.red, root.green, root.blue);
+    property <[string]> digits: ["0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"];
+    function hex2(v: int) -> string { return root.digits[floor(v / 16)] + root.digits[mod(v, 16)]; }
+    background: #00000066;
+    TouchArea { }
+    Rectangle {
+        width: 420px; height: content.preferred-height;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
+        content := VerticalLayout {
+            padding: 16px; spacing: 10px;
+            Text { text: root.title; font-weight: 700; color: Theme.text; }
+            if root.with-extensions : HorizontalLayout {
+                spacing: 8px;
+                Text { text: "拡張子"; width: 50px; color: Theme.text; vertical-alignment: center; }
+                LineEdit { text <=> root.extensions; placeholder-text: "ZIP;RAR;7Z"; }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                Rectangle { width: 64px; height: 64px; background: root.value; border-width: 1px; border-color: Theme.border; }
+                VerticalLayout {
+                    spacing: 4px;
+                    HorizontalLayout { spacing: 6px; Text { text: "R"; width: 14px; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.red; changed(v) => { root.red = round(v); } } Text { text: root.red; width: 28px; color: Theme.dim; vertical-alignment: center; } }
+                    HorizontalLayout { spacing: 6px; Text { text: "G"; width: 14px; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.green; changed(v) => { root.green = round(v); } } Text { text: root.green; width: 28px; color: Theme.dim; vertical-alignment: center; } }
+                    HorizontalLayout { spacing: 6px; Text { text: "B"; width: 14px; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.blue; changed(v) => { root.blue = round(v); } } Text { text: root.blue; width: 28px; color: Theme.dim; vertical-alignment: center; } }
+                }
+            }
+            Text { text: "#" + root.hex2(root.red) + root.hex2(root.green) + root.hex2(root.blue); color: root.value; font-size: 14px; }
+            HorizontalLayout {
+                spacing: 6px; alignment: end;
+                DialogButton { text: "OK"; primary: true; clicked => { root.done(true); } }
+                DialogButton { text: "キャンセル"; clicked => { root.done(false); } }
+            }
+        }
+    }
+}
+
+// File > 設定: tabs for paths, colors and font. Empty path = the Windows default folder.
+component SettingsDialog inherits Rectangle {
+    in property <[PlaceRow]> places;
+    in property <[ColorRow]> colors;
+    in property <[ExtRow]> extensions;
+    in property <[string]> fonts;
+    in-out property <string> font-family;
+    in-out property <int> font-size;
+    in-out property <int> window-opacity;
+    callback edited(int, string);
+    callback browse(int);
+    callback reset(int);
+    callback done(bool);
+    callback color-base(int, color);
+    callback color-ext(int, string, color);
+    callback color-ext-delete(int);
+    callback colors-reset();
+    callback font-set(string, int);
+    in-out property <int> tab;
+    property <int> ext-selected: -1;
+    // Color editor state: kind 0 = base color, 1 = extension rule; index -1 = new rule.
+    property <bool> editing;
+    property <int> edit-kind;
+    property <int> edit-index;
+    public function open() { root.editing = false; keys.focus(); }
+    function edit(kind: int, index: int, r: int, g: int, b: int, exts: string) {
+        root.edit-kind = kind;
+        root.edit-index = index;
+        editor.red = r;
+        editor.green = g;
+        editor.blue = b;
+        editor.extensions = exts;
+        root.editing = true;
+    }
+    function save() { root.font-set(root.font-family, root.font-size); root.done(true); }
+    background: #00000066;
+    TouchArea { }
+    keys := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape { root.done(false); return accept; }
+            return reject;
+        }
+    }
+    Rectangle {
+        width: min(parent.width - 40px, 820px); height: min(parent.height - 40px, 600px);
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
+        VerticalLayout {
+            padding: 14px; spacing: 10px;
+            HorizontalLayout {
+                spacing: 2px; alignment: start;
+                for name[i] in ["パス", "カラー", "表示"] : Rectangle {
+                    width: tab-label.preferred-width + 28px; height: 28px;
+                    background: root.tab == i ? Theme.pane : Theme.bar;
+                    border-width: 1px; border-color: root.tab == i ? Theme.border-active : Theme.border;
+                    tab-label := Text { text: name; color: root.tab == i ? Theme.text : Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                    TouchArea { clicked => { root.tab = i; } }
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                // パス
+                if root.tab == 0 : VerticalLayout {
+                    spacing: 10px; alignment: start;
+                    Text { text: "ツールバーの場所"; font-weight: 700; color: Theme.text; }
+                    Text { text: "空欄のときはWindowsの既定のフォルダー（薄い文字）を開きます。"; color: Theme.dim; font-size: 12px; }
+                    for row[i] in root.places : HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: row.label; width: 90px; color: Theme.text; vertical-alignment: center; }
+                        LineEdit {
+                            text: row.value;
+                            placeholder-text: row.fallback;
+                            edited(t) => { root.edited(i, t); }
+                            key-pressed(e) => { if e.text == Key.Escape { root.done(false); return accept; } return reject; }
+                        }
+                        DialogButton { text: "参照..."; clicked => { root.browse(i); } }
+                        DialogButton { text: "既定に戻す"; clicked => { root.reset(i); } }
+                    }
+                }
+                // カラー
+                if root.tab == 1 : HorizontalLayout {
+                    spacing: 14px;
+                    VerticalLayout {
+                        spacing: 6px; width: 230px;
+                        Text { text: "基本カラー"; font-weight: 700; color: Theme.text; }
+                        Rectangle {
+                            background: Theme.pane; border-width: 1px; border-color: Theme.border;
+                            ListView {
+                                for c[i] in root.colors : Rectangle {
+                                    height: 24px;
+                                    background: hit.has-hover ? Theme.hover : transparent;
+                                    HorizontalLayout {
+                                        padding-left: 8px; spacing: 8px;
+                                        Rectangle { width: 14px; height: 14px; y: 5px; background: c.color; border-width: 1px; border-color: Theme.dim; }
+                                        Text { text: c.label; color: Theme.text; vertical-alignment: center; }
+                                    }
+                                    hit := TouchArea { double-clicked => { root.edit(0, i, c.r, c.g, c.b, ""); } }
+                                }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 6px; horizontal-stretch: 1;
+                        Text { text: "拡張子の色分け"; font-weight: 700; color: Theme.text; }
+                        Rectangle {
+                            background: #000000; border-width: 1px; border-color: Theme.border;
+                            ListView {
+                                for r[i] in root.extensions : Rectangle {
+                                    height: 24px;
+                                    background: root.ext-selected == i ? Theme.selected-bg : transparent;
+                                    HorizontalLayout {
+                                        padding-left: 8px; spacing: 8px;
+                                        Rectangle { width: 14px; height: 14px; y: 5px; background: r.color; }
+                                        Text { text: r.exts; color: r.color; vertical-alignment: center; overflow: elide; }
+                                    }
+                                    TouchArea {
+                                        clicked => { root.ext-selected = i; }
+                                        double-clicked => { root.ext-selected = i; root.edit(1, i, r.r, r.g, r.b, r.exts); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 6px; width: 120px; alignment: start;
+                        Rectangle { height: 22px; }
+                        DialogButton { text: "追加"; clicked => { root.edit(1, -1, 192, 192, 192, ""); } }
+                        DialogButton {
+                            text: "編集";
+                            clicked => {
+                                if root.ext-selected >= 0 && root.ext-selected < root.extensions.length {
+                                    root.edit(1, root.ext-selected, root.extensions[root.ext-selected].r, root.extensions[root.ext-selected].g, root.extensions[root.ext-selected].b, root.extensions[root.ext-selected].exts);
+                                }
+                            }
+                        }
+                        DialogButton { text: "削除"; clicked => { if root.ext-selected >= 0 { root.color-ext-delete(root.ext-selected); root.ext-selected = -1; } } }
+                        Rectangle { height: 20px; }
+                        DialogButton { text: "既定に戻す"; clicked => { root.colors-reset(); root.ext-selected = -1; } }
+                    }
+                }
+                // フォント
+                if root.tab == 2 : VerticalLayout {
+                    spacing: 12px; alignment: start;
+                    Text { text: "ウィンドウ"; font-weight: 700; color: Theme.text; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "不透明度"; width: 70px; color: Theme.text; vertical-alignment: center; }
+                        Slider { minimum: 30; maximum: 100; value: root.window-opacity; changed(v) => { root.window-opacity = round(v); } }
+                        Text { text: root.window-opacity + " %"; width: 50px; color: Theme.dim; vertical-alignment: center; }
+                    }
+                    Text { text: "一覧と画面のフォント"; font-weight: 700; color: Theme.text; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "フォント"; width: 70px; color: Theme.text; vertical-alignment: center; }
+                        ComboBox { model: root.fonts; current-value <=> root.font-family; }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px; alignment: start;
+                        Text { text: "サイズ"; width: 70px; color: Theme.text; vertical-alignment: center; }
+                        SpinBox { width: 120px; minimum: 8; maximum: 32; value <=> root.font-size; }
+                    }
+                    Rectangle {
+                        height: 90px; background: Theme.pane; border-width: 1px; border-color: Theme.border;
+                        VerticalLayout {
+                            padding: 10px; spacing: 4px;
+                            Text { text: "サンプル Sample 0123456789"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.text; }
+                            Text { text: "日本語表示MOD_0.1.0.json   20.4 MB   2025-05-17 09:33"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.dim; }
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px; alignment: end;
+                Text { text: root.tab == 1 ? "項目をダブルクリックで色を変更できます。" : ""; color: Theme.dim; vertical-alignment: center; horizontal-stretch: 1; }
+                DialogButton { text: "保存"; primary: true; clicked => { root.save(); } }
+                DialogButton { text: "キャンセル"; clicked => { root.done(false); } }
+            }
+        }
+    }
+    editor := ColorEditor {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        visible: root.editing;
+        title: root.edit-kind == 0 ? "基本カラーの変更" : root.edit-index < 0 ? "拡張子の色分けを追加" : "拡張子の色分けを編集";
+        with-extensions: root.edit-kind == 1;
+        done(ok) => {
+            root.editing = false;
+            if ok {
+                if root.edit-kind == 0 {
+                    root.color-base(root.edit-index, rgb(self.red, self.green, self.blue));
+                } else {
+                    root.color-ext(root.edit-index < 0 ? 100000 : root.edit-index, self.extensions, rgb(self.red, self.green, self.blue));
+                }
+            }
+            keys.focus();
+        }
+    }
+}
+
+export component App inherits Window {
+    title: "enyFile";
+    preferred-width: 1280px; preferred-height: 780px; min-width: 760px; min-height: 420px;
+    background: Theme.chrome;
+    in-out property <string> font-family: "Meiryo UI";
+    in-out property <float> font-size: 13;
+    default-font-family: root.font-family;
+    default-font-size: root.font-size * 1px;
+    property <length> row-h: max(18px, round(root.font-size * 1.75) * 1px);
+    in property <[Row]> p0-rows;
+    in-out property <string> p0-path;
+    in property <[string]> p0-crumbs;
+    in property <PaneInfo> p0-info;
+    in property <bool> p0-busy;
+    in property <[Row]> p1-rows;
+    in-out property <string> p1-path;
+    in property <[string]> p1-crumbs;
+    in property <PaneInfo> p1-info;
+    in property <bool> p1-busy;
+    in property <[Row]> p2-rows;
+    in-out property <string> p2-path;
+    in property <[string]> p2-crumbs;
+    in property <PaneInfo> p2-info;
+    in property <bool> p2-busy;
+    in property <[Row]> p3-rows;
+    in-out property <string> p3-path;
+    in property <[string]> p3-crumbs;
+    in property <PaneInfo> p3-info;
+    in property <bool> p3-busy;
+    /// 2, 3 or 4 panes shown.
+    in property <int> pane-count: 2;
+    // 3 panes side by side (tall) instead of stacked (wide).
+    in property <bool> three-columns;
+    // Hidden files shown in the active pane (check mark in the View menu).
+    in property <bool> active-hidden;
+    in property <Columns> columns: { size: true, date: true, time: true, attr: true, kind: true };
+    in property <int> active-pane: 0;
+    in property <string> message;
+    in property <bool> ask-open;
+    in property <AskInfo> ask;
+    in property <[BookmarkRow]> bookmarks;
+    in property <bool> bookmark-editing;
+    in property <int> bookmark-index;
+    in property <string> bookmark-name;
+    in property <string> bookmark-path;
+    callback navigate(int, string);
+    callback command(int, int);
+    callback crumb(int, int);
+    callback sort(int, int);
+    callback place(int);
+    callback bookmark-open(int);
+    callback bookmark-add();
+    callback bookmark-edit(int);
+    callback bookmark-save(int, string, string);
+    callback bookmark-delete(int);
+    callback bookmark-move(int, bool);
+    callback bookmark-cancel();
+    callback open-settings();
+    callback setting-edited(int, string);
+    callback setting-browse(int);
+    callback setting-reset(int);
+    callback settings-done(bool);
+    // A splitter was released or reset: the controller saves all positions.
+    callback layout-committed();
+    public function focus-settings() { settings-dialog.open(); }
+    in property <bool> settings-open;
+    in property <[PlaceRow]> settings-places;
+    in-out property <int> settings-tab;
+    in property <[ColorRow]> settings-colors;
+    in property <[ExtRow]> settings-ext;
+    in property <[string]> fonts;
+    in property <string> settings-font-family;
+    in property <int> settings-font-size;
+    in-out property <int> settings-opacity: 100;
+    callback color-base(int, color);
+    callback color-ext(int, string, color);
+    callback color-ext-delete(int);
+    callback colors-reset();
+    callback font-set(string, int);
+    // Left pane share of the width; dragged with the splitter between the panes.
+    in-out property <float> split: 0.5;
+    in-out property <float> col-a: 0.3333;
+    in-out property <float> col-b: 0.6667;
+    in-out property <float> row-a: 0.3333;
+    in-out property <float> row-b: 0.6667;
+    in-out property <float> quad-x: 0.5;
+    in-out property <float> quad-y: 0.5;
+    public function focus-bookmark() { bookmark-dialog.open(); }
+    callback pointer(int, int, bool, bool, int);
+    callback key-event(int, KeyEvent) -> bool;
+    callback blank(int);
+    callback blank-menu(int, bool);
+    callback page-resized(int, int);
+    callback copy-path(int);
+    callback page-step(int, bool);
+    callback menu-command(int);
+    callback name-validate(string) -> string;
+    callback name-done(bool, string);
+    public function focus-name() { name-dialog.open(); }
+    in property <bool> name-open;
+    in property <string> name-title;
+    in property <string> name-initial;
+    in property <int> name-stem;
+    callback ask-answer(int, string, bool);
+    callback ask-validate(string) -> string;
+    public function focus-ask() { asker.open(); }
+    public function focus-pane(pane: int) { if pane == 0 { p0.focus-list(); } else if pane == 1 { p1.focus-list(); } else if pane == 2 { p2.focus-list(); } else { p3.focus-list(); } }
+    public function focus-address(pane: int) { if pane == 0 { p0.focus-path(); } else if pane == 1 { p1.focus-path(); } else if pane == 2 { p2.focus-path(); } else { p3.focus-path(); } }
+    init => { Palette.color-scheme = ColorScheme.dark; }
+
+    // Menu bar drawn by Slint: the native Windows menu bar ignores the dark theme.
+    // ファイル / フォルダ / 編集 are placeholders for now.
+    HorizontalLayout {
+        x: 4px; y: 0px; height: 24px; alignment: start;
+        FlatButton {
+            text: "ファイル(F)";
+            clicked => { file-menu.show(); }
+            file-menu := PopupWindow {
+                y: parent.height; width: 200px;
+                Rectangle {
+                    background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+                    VerticalLayout {
+                        padding: 4px;
+                        MenuEntry { text: "新規ファイル (Ctrl+N)"; clicked => { root.menu-command(0); } }
+                        MenuEntry { text: "新規フォルダー (F7)"; clicked => { root.menu-command(1); } }
+                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                        MenuEntry { text: "設定..."; clicked => { root.open-settings(); } }
+                    }
+                }
+            }
+        }
+        FlatButton {
+            text: "編集(E)";
+            clicked => { edit-menu.show(); }
+            edit-menu := PopupWindow {
+                y: parent.height; width: 230px;
+                Rectangle {
+                    background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+                    VerticalLayout {
+                        padding: 4px;
+                        MenuEntry { text: "コピー (Ctrl+C)"; clicked => { root.menu-command(3); } }
+                        MenuEntry { text: "貼り付け (Ctrl+V)"; clicked => { root.menu-command(4); } }
+                        MenuEntry { text: "削除 (Delete)"; clicked => { root.menu-command(5); } }
+                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                        MenuEntry { text: "絶対パスのコピー"; clicked => { root.menu-command(6); } }
+                        MenuEntry { text: "ファイル名のコピー"; clicked => { root.menu-command(7); } }
+                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                        MenuEntry { text: "同じ拡張子をすべて選択"; clicked => { root.menu-command(8); } }
+                    }
+                }
+            }
+        }
+        FlatButton {
+            text: "表示(W)";
+            clicked => { view-menu.show(); }
+            view-menu := PopupWindow {
+                y: parent.height; width: 300px;
+                Rectangle {
+                    background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+                    VerticalLayout {
+                        padding: 4px;
+                        MenuEntry { text: "名前で並べ替え (Ctrl+Shift+N)"; clicked => { root.sort(root.active-pane, 0); } }
+                        MenuEntry { text: "サイズで並べ替え (Ctrl+Shift+S)"; clicked => { root.sort(root.active-pane, 1); } }
+                        MenuEntry { text: "更新日時で並べ替え (Ctrl+Shift+T)"; clicked => { root.sort(root.active-pane, 2); } }
+                        MenuEntry { text: "拡張子で並べ替え (Ctrl+Shift+E)"; clicked => { root.sort(root.active-pane, 3); } }
+                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                        MenuEntry { text: "隠しファイルの表示 (Alt+Z)"; check: root.active-hidden ? 1 : 0; clicked => { root.menu-command(2); } }
+                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                        MenuEntry { text: "サイズの表示"; check: root.columns.size ? 1 : 0; clicked => { root.menu-command(20); } }
+                        MenuEntry { text: "日付の表示"; check: root.columns.date ? 1 : 0; clicked => { root.menu-command(21); } }
+                        MenuEntry { text: "時刻の表示"; check: root.columns.time ? 1 : 0; clicked => { root.menu-command(22); } }
+                        MenuEntry { text: "属性の表示"; check: root.columns.attr ? 1 : 0; clicked => { root.menu-command(23); } }
+                        MenuEntry { text: "種類の表示"; check: root.columns.kind ? 1 : 0; clicked => { root.menu-command(24); } }
+                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                        MenuEntry { text: "2 ペイン (Ctrl+Shift+2)"; check: root.pane-count == 2 ? 1 : 0; clicked => { root.menu-command(10); } }
+                        MenuEntry { text: "3 ペイン 横長 (Ctrl+Shift+3 2回)"; check: root.pane-count == 3 && !root.three-columns ? 1 : 0; clicked => { root.menu-command(11); } }
+                        MenuEntry { text: "3 ペイン 縦長 (Ctrl+Shift+3)"; check: root.pane-count == 3 && root.three-columns ? 1 : 0; clicked => { root.menu-command(13); } }
+                        MenuEntry { text: "4 ペイン (Ctrl+Shift+4)"; check: root.pane-count == 4 ? 1 : 0; clicked => { root.menu-command(12); } }
+                    }
+                }
+            }
+        }
+    }
+    // Toolbar: history, then places (paths from the config file) and bookmarks.
+    HorizontalLayout {
+        x: 6px; y: 26px; height: 32px; spacing: 2px; alignment: start;
+        // nudge: optical vertical centering (glyphs carry different empty space above/below).
+        FlatButton { width: 36px; text: "◁"; font-size: 17px; tint: Theme.key; nudge: -1.33px; clicked => { root.command(root.active-pane, 0); } }
+        FlatButton { width: 36px; text: "▷"; font-size: 17px; tint: Theme.key; nudge: -1.33px; clicked => { root.command(root.active-pane, 1); } }
+        FlatButton { width: 36px; text: "△"; font-size: 17px; tint: Theme.key; nudge: -1.33px; clicked => { root.command(root.active-pane, 2); } }
+        Rectangle { width: 14px; Rectangle { x: 6px; y: 6px; width: 1px; height: parent.height - 12px; background: Theme.border; } }
+        IconButton { glyph: "\u{E7F4}"; tint: #79aee8; nudge: 0.67px; clicked => { root.place(0); } }
+        IconButton { glyph: "\u{E7C3}"; tint: #e6c86a; glyph-size: 15px; nudge: 0px; clicked => { root.place(1); } }
+        IconButton { glyph: "\u{EB9F}"; tint: #9bc86a; nudge: 0px; clicked => { root.place(2); } }
+        IconButton { glyph: "\u{E714}"; tint: #e0904a; nudge: 0px; clicked => { root.place(3); } }
+        IconButton { glyph: "\u{E8D6}"; tint: #b48ae0; nudge: 0px; clicked => { root.place(4); } }
+        IconButton {
+            glyph: "\u{E728}"; tint: #e86a8a;
+            clicked => { bookmark-menu.show(); }
+            bookmark-menu := PopupWindow {
+                y: parent.height; width: 380px;
+                Rectangle {
+                    background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+                    VerticalLayout {
+                        padding: 4px;
+                        for b[i] in root.bookmarks : Rectangle {
+                            height: 28px;
+                            background: hit.has-hover ? Theme.hover : transparent;
+                            hit := TouchArea { clicked => { root.bookmark-open(i); } }
+                            HorizontalLayout {
+                                padding-left: 10px; spacing: 10px;
+                                Text { text: b.name; color: Theme.text; vertical-alignment: center; }
+                                Text { text: b.path; color: Theme.dim; font-size: 11px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                                IconButton { width: 28px; glyph: "\u{E70F}"; glyph-size: 13px; tint: Theme.dim; clicked => { root.bookmark-edit(i); } }
+                            }
+                        }
+                        if root.bookmarks.length == 0 : Text { height: 28px; x: 10px; text: "ブックマークはありません"; color: Theme.dim; vertical-alignment: center; }
+                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                        MenuEntry { text: "＋ 現在のフォルダを追加"; clicked => { root.bookmark-add(); } }
+                    }
+                }
+            }
+        }
+    }
+    // Layouts: 2 panes side by side, 3 side by side or stacked, 4 in a 2x2 grid.
+    // Every layout has draggable splitters (4 px); double-click one to share evenly.
+    property <length> area-x: 2px;
+    property <length> area-y: 60px;
+    property <length> area-w: self.width - 4px;
+    property <length> area-h: self.height - 60px - 26px;
+    property <bool> stacked: root.pane-count == 3 && !root.three-columns;
+    property <bool> side-by-side: root.pane-count == 3 && root.three-columns;
+    property <bool> quad: root.pane-count == 4;
+    // 3 side by side: widths from the two boundaries col-a < col-b (fractions).
+    property <length> c-avail: root.area-w - 8px;
+    property <length> c-w0: root.c-avail * root.col-a;
+    property <length> c-w1: root.c-avail * (root.col-b - root.col-a);
+    property <length> c-w2: root.c-avail - root.c-w0 - root.c-w1;
+    // 3 stacked: heights from row-a < row-b.
+    property <length> r-avail: root.area-h - 8px;
+    property <length> r-h0: root.r-avail * root.row-a;
+    property <length> r-h1: root.r-avail * (root.row-b - root.row-a);
+    property <length> r-h2: root.r-avail - root.r-h0 - root.r-h1;
+    // 4: one column boundary and one row boundary.
+    property <length> q-w0: (root.area-w - 4px) * root.quad-x;
+    property <length> q-w1: root.area-w - 4px - root.q-w0;
+    property <length> q-h0: (root.area-h - 4px) * root.quad-y;
+    property <length> q-h1: root.area-h - 4px - root.q-h0;
+    p0 := Pane {
+        x: root.area-x; y: root.area-y;
+        width: root.pane-count == 2 ? (root.area-w - 4px) * root.split : root.side-by-side ? root.c-w0 : root.stacked ? root.area-w : root.q-w0;
+        height: root.pane-count == 2 || root.side-by-side ? root.area-h : root.stacked ? root.r-h0 : root.q-h0;
+        compact: root.pane-count >= 3; columns: root.columns;
+        rows: root.p0-rows; path <=> root.p0-path; crumbs: root.p0-crumbs; info: root.p0-info;
+        active: root.active-pane == 0; busy: root.p0-busy; row-h: root.row-h;
+        navigate(p) => { root.navigate(0, p); } command(c) => { root.command(0, c); } crumb(i) => { root.crumb(0, i); }
+        pointer(i, c, s, k) => { root.pointer(0, i, c, s, k); } key-event(e) => { return root.key-event(0, e); }
+        blank => { root.blank(0); } blank-menu(s) => { root.blank-menu(0, s); }
+        page-resized(n) => { root.page-resized(0, n); } copy-path => { root.copy-path(0); } page-step(f) => { root.page-step(0, f); }
+    }
+    p1 := Pane {
+        x: root.pane-count == 2 ? root.area-x + p0.width + 4px : root.side-by-side ? root.area-x + root.c-w0 + 4px : root.stacked ? root.area-x : root.area-x + root.q-w0 + 4px;
+        y: root.stacked ? root.area-y + root.r-h0 + 4px : root.area-y;
+        width: root.pane-count == 2 ? root.area-x + root.area-w - self.x : root.side-by-side ? root.c-w1 : root.stacked ? root.area-w : root.q-w1;
+        height: root.pane-count == 2 || root.side-by-side ? root.area-h : root.stacked ? root.r-h1 : root.q-h0;
+        compact: root.pane-count >= 3; columns: root.columns;
+        rows: root.p1-rows; path <=> root.p1-path; crumbs: root.p1-crumbs; info: root.p1-info;
+        active: root.active-pane == 1; busy: root.p1-busy; row-h: root.row-h;
+        navigate(p) => { root.navigate(1, p); } command(c) => { root.command(1, c); } crumb(i) => { root.crumb(1, i); }
+        pointer(i, c, s, k) => { root.pointer(1, i, c, s, k); } key-event(e) => { return root.key-event(1, e); }
+        blank => { root.blank(1); } blank-menu(s) => { root.blank-menu(1, s); }
+        page-resized(n) => { root.page-resized(1, n); } copy-path => { root.copy-path(1); } page-step(f) => { root.page-step(1, f); }
+    }
+    p2 := Pane {
+        visible: root.pane-count >= 3;
+        x: root.side-by-side ? root.area-x + root.c-w0 + 4px + root.c-w1 + 4px : root.area-x;
+        y: root.stacked ? root.area-y + root.r-h0 + 4px + root.r-h1 + 4px : root.side-by-side ? root.area-y : root.area-y + root.q-h0 + 4px;
+        width: root.side-by-side ? root.c-w2 : root.stacked ? root.area-w : root.q-w0;
+        height: root.side-by-side ? root.area-h : root.stacked ? root.r-h2 : root.q-h1;
+        compact: root.pane-count >= 3; columns: root.columns;
+        rows: root.p2-rows; path <=> root.p2-path; crumbs: root.p2-crumbs; info: root.p2-info;
+        active: root.active-pane == 2; busy: root.p2-busy; row-h: root.row-h;
+        navigate(p) => { root.navigate(2, p); } command(c) => { root.command(2, c); } crumb(i) => { root.crumb(2, i); }
+        pointer(i, c, s, k) => { root.pointer(2, i, c, s, k); } key-event(e) => { return root.key-event(2, e); }
+        blank => { root.blank(2); } blank-menu(s) => { root.blank-menu(2, s); }
+        page-resized(n) => { root.page-resized(2, n); } copy-path => { root.copy-path(2); } page-step(f) => { root.page-step(2, f); }
+    }
+    p3 := Pane {
+        visible: root.quad;
+        x: root.area-x + root.q-w0 + 4px; y: root.area-y + root.q-h0 + 4px;
+        width: root.q-w1; height: root.q-h1;
+        compact: true; columns: root.columns;
+        rows: root.p3-rows; path <=> root.p3-path; crumbs: root.p3-crumbs; info: root.p3-info;
+        active: root.active-pane == 3; busy: root.p3-busy; row-h: root.row-h;
+        navigate(p) => { root.navigate(3, p); } command(c) => { root.command(3, c); } crumb(i) => { root.crumb(3, i); }
+        pointer(i, c, s, k) => { root.pointer(3, i, c, s, k); } key-event(e) => { return root.key-event(3, e); }
+        blank => { root.blank(3); } blank-menu(s) => { root.blank-menu(3, s); }
+        page-resized(n) => { root.page-resized(3, n); } copy-path => { root.copy-path(3); } page-step(f) => { root.page-step(3, f); }
+    }
+    // 2 panes.
+    Splitter {
+        visible: root.pane-count == 2;
+        x: p0.x + p0.width; y: root.area-y; width: 4px; height: root.area-h;
+        moved-to(pos) => { root.split = max(0.15, min(0.85, (pos - root.area-x) / (root.area-w - 4px))); }
+        released => { root.layout-committed(); }
+        reset => { root.split = 0.5; root.layout-committed(); }
+    }
+    // 3 side by side.
+    Splitter {
+        visible: root.side-by-side;
+        x: root.area-x + root.c-w0; y: root.area-y; width: 4px; height: root.area-h;
+        moved-to(pos) => { root.col-a = max(0.1, min(root.col-b - 0.1, (pos - root.area-x) / root.c-avail)); }
+        released => { root.layout-committed(); }
+        reset => { root.col-a = 1 / 3; root.col-b = 2 / 3; root.layout-committed(); }
+    }
+    Splitter {
+        visible: root.side-by-side;
+        x: root.area-x + root.c-w0 + 4px + root.c-w1; y: root.area-y; width: 4px; height: root.area-h;
+        moved-to(pos) => { root.col-b = max(root.col-a + 0.1, min(0.9, (pos - root.area-x - 4px) / root.c-avail)); }
+        released => { root.layout-committed(); }
+        reset => { root.col-a = 1 / 3; root.col-b = 2 / 3; root.layout-committed(); }
+    }
+    // 3 stacked.
+    Splitter {
+        visible: root.stacked; vertical: false;
+        x: root.area-x; y: root.area-y + root.r-h0; width: root.area-w; height: 4px;
+        moved-to(pos) => { root.row-a = max(0.1, min(root.row-b - 0.1, (pos - root.area-y) / root.r-avail)); }
+        released => { root.layout-committed(); }
+        reset => { root.row-a = 1 / 3; root.row-b = 2 / 3; root.layout-committed(); }
+    }
+    Splitter {
+        visible: root.stacked; vertical: false;
+        x: root.area-x; y: root.area-y + root.r-h0 + 4px + root.r-h1; width: root.area-w; height: 4px;
+        moved-to(pos) => { root.row-b = max(root.row-a + 0.1, min(0.9, (pos - root.area-y - 4px) / root.r-avail)); }
+        released => { root.layout-committed(); }
+        reset => { root.row-a = 1 / 3; root.row-b = 2 / 3; root.layout-committed(); }
+    }
+    // 4 panes: one column boundary, one row boundary.
+    Splitter {
+        visible: root.quad;
+        x: root.area-x + root.q-w0; y: root.area-y; width: 4px; height: root.area-h;
+        moved-to(pos) => { root.quad-x = max(0.1, min(0.9, (pos - root.area-x) / (root.area-w - 4px))); }
+        released => { root.layout-committed(); }
+        reset => { root.quad-x = 0.5; root.layout-committed(); }
+    }
+    Splitter {
+        visible: root.quad; vertical: false;
+        x: root.area-x; y: root.area-y + root.q-h0; width: root.area-w; height: 4px;
+        moved-to(pos) => { root.quad-y = max(0.1, min(0.9, (pos - root.area-y) / (root.area-h - 4px))); }
+        released => { root.layout-committed(); }
+        reset => { root.quad-y = 0.5; root.layout-committed(); }
+    }
+    // History line: what was done (results, errors). Planned: double-click to type to the AI.
+    Rectangle {
+        x: 0; y: parent.height - 24px; width: parent.width; height: 24px;
+        background: Theme.bar;
+        Rectangle { height: 1px; y: 0; background: Theme.border; }
+        Text {
+            x: 10px; width: parent.width - 20px; height: parent.height;
+            text: root.message; color: Theme.dim; overflow: elide; vertical-alignment: center;
+        }
+    }
+    settings-dialog := SettingsDialog {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        visible: root.settings-open;
+        places: root.settings-places;
+        tab <=> root.settings-tab;
+        colors: root.settings-colors;
+        extensions: root.settings-ext;
+        fonts: root.fonts;
+        font-family: root.settings-font-family;
+        font-size: root.settings-font-size;
+        window-opacity <=> root.settings-opacity;
+        color-base(i, c) => { root.color-base(i, c); }
+        color-ext(i, e, c) => { root.color-ext(i, e, c); }
+        color-ext-delete(i) => { root.color-ext-delete(i); }
+        colors-reset => { root.colors-reset(); }
+        font-set(f, s) => { root.font-set(f, s); }
+        edited(i, t) => { root.setting-edited(i, t); }
+        browse(i) => { root.setting-browse(i); }
+        reset(i) => { root.setting-reset(i); }
+        done(save) => { root.settings-done(save); }
+    }
+    name-dialog := NameDialog {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        visible: root.name-open;
+        title: root.name-title; initial: root.name-initial; stem: root.name-stem;
+        validate(n) => { return root.name-validate(n); }
+        done(ok, n) => { root.name-done(ok, n); }
+    }
+    bookmark-dialog := BookmarkDialog {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        visible: root.bookmark-editing;
+        index: root.bookmark-index; count: root.bookmarks.length;
+        name: root.bookmark-name; path: root.bookmark-path;
+        save(name, path) => { root.bookmark-save(root.bookmark-index, name, path); }
+        remove => { root.bookmark-delete(root.bookmark-index); }
+        move(down) => { root.bookmark-move(root.bookmark-index, down); }
+        cancel => { root.bookmark-cancel(); }
+    }
+    asker := AskDialog {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        visible: root.ask-open;
+        info: root.ask;
+        answer(code, name, all) => { root.ask-answer(code, name, all); }
+        validate(name) => { return root.ask-validate(name); }
+    }
+}
