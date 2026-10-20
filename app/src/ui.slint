@@ -36,6 +36,10 @@ export global Theme {
     in-out property <color> diff-add-bg: #1e4a2b;
     in-out property <color> diff-del-bg: #5a2329;
     in-out property <color> diff-change-bg: #5c5320;
+    // `--demo` recordings: the caption naming the keys being pressed.
+    in-out property <color> caption-bg: #1b2433e6;
+    in-out property <color> caption-text: #ffffff;
+    in-out property <color> caption-key: #ffc861;
 }
 
 // Comparing (Ctrl+Shift+D): `gap` is an empty row where only the other pane has an entry;
@@ -57,6 +61,8 @@ component FlatButton inherits Rectangle {
     in property <string> text;
     in property <color> tint: Theme.text;
     in property <length> font-size: 13px;
+    // Empty: the window's font. Symbols that a chosen font may lack need their own.
+    in property <string> font-family;
     in property <bool> enabled: true;
     in property <length> nudge;
     callback clicked;
@@ -71,7 +77,7 @@ component FlatButton inherits Rectangle {
     label := Text {
         x: 7px; y: root.nudge; width: parent.width - 14px; height: parent.height;
         text: root.text; color: root.enabled ? root.tint : Theme.border;
-        font-size: root.font-size; overflow: elide;
+        font-size: root.font-size; font-family: root.font-family; overflow: elide;
         vertical-alignment: center; horizontal-alignment: center;
     }
     touch := TouchArea {
@@ -372,7 +378,7 @@ component Pane inherits Rectangle {
             }
             changed has-focus => { if !self.has-focus { root.editing = false; root.command(4); } }
         }
-        FlatButton { x: parent.width - 30px; width: 28px; height: parent.height; text: "↺"; font-size: 15px; clicked => { root.command(3); } }
+        FlatButton { x: parent.width - 30px; width: 28px; height: parent.height; text: "↺"; font-size: 15px; font-family: "Segoe UI Symbol"; clicked => { root.command(3); } }
     }
     // Info line: counts and total on the left, volume and free space on the right.
     HorizontalLayout {
@@ -1181,6 +1187,19 @@ export component App inherits Window {
                     : "Ctrl+G: 次へ  Ctrl+Shift+G: 前へ  Enter / Esc: 終了";
                 color: Theme.dim; overflow: elide; vertical-alignment: center; horizontal-stretch: 1;
             }
+        }
+    }
+    // `--demo` only: the keys pressed (`demo-keys`) and what they do, over the lower panes.
+    in property <string> demo-keys;
+    in property <string> demo-caption;
+    if root.demo-caption != "" || root.demo-keys != "" : Rectangle {
+        width: caption-row.preferred-width + 36px; height: 44px;
+        x: (parent.width - self.width) / 2; y: parent.height - 24px - self.height - 18px;
+        background: Theme.caption-bg; border-radius: 8px;
+        caption-row := HorizontalLayout {
+            x: 18px; spacing: 14px; alignment: center;
+            if root.demo-keys != "" : Text { text: root.demo-keys; color: Theme.caption-key; font-size: 17px; font-weight: 700; vertical-alignment: center; }
+            if root.demo-caption != "" : Text { text: root.demo-caption; color: Theme.caption-text; font-size: 17px; vertical-alignment: center; }
         }
     }
     // Menu bar drawn by Slint: the native Windows menu bar ignores the dark theme.

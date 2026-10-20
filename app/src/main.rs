@@ -2,6 +2,7 @@
 mod compare;
 mod config;
 mod ctxmenu;
+mod demo;
 mod finder;
 mod icons;
 mod listing;
@@ -567,6 +568,8 @@ struct Controller {
     compare: Option<Comparing>,
     /// The pane active before the current one: what Ctrl+Shift+D compares with.
     previous: usize,
+    /// `--demo`: drives and volume names (this machine's) are not shown.
+    demo: bool,
 }
 fn display(path: &Path) -> String {
     shell::shell_path(path).to_string_lossy().into_owned()
@@ -919,6 +922,7 @@ impl Controller {
     }
     fn info(&self, p: usize) -> PaneInfo {
         let data = self.data(p);
+        let volume = data.volume.as_ref().filter(|_| !self.demo);
         let folders = data.rows.iter().filter(|e| e.directory).count();
         let total: u64 = data.rows.iter().filter(|e| !e.directory).map(|e| e.size).sum();
         let selected = self.panes[p].model.selection.borrow().count();
@@ -926,8 +930,8 @@ impl Controller {
             folders: folders.to_string().into(),
             files: (data.rows.len() - folders).to_string().into(),
             total: listing::format_size(total).into(),
-            volume: data.volume.as_ref().map_or(String::new(), |v| v.label.clone()).into(),
-            free: data.volume.as_ref().map_or(String::new(), |v| listing::format_size(v.free)).into(),
+            volume: volume.map_or(String::new(), |v| v.label.clone()).into(),
+            free: volume.map_or(String::new(), |v| listing::format_size(v.free)).into(),
             selected: if selected > 0 { selected.to_string() } else { String::new() }.into(),
             filter: self.panes[p].filter.as_ref().map_or(String::new(), |(text, _)| text.clone()).into(),
             search: self.panes[p].found.as_ref().map_or(String::new(), |f| f.text.clone()).into(),
@@ -1536,6 +1540,14 @@ impl Controller {
                 "diff-add-bg" => theme.set_diff_add_bg(color),
                 "diff-del-bg" => theme.set_diff_del_bg(color),
                 "diff-change-bg" => theme.set_diff_change_bg(color),
+                "selected-text" => theme.set_selected_text(color),
+                "cursor-text" => theme.set_cursor_text(color),
+                "cursor-selected-bg" => theme.set_cursor_selected_bg(color),
+                "cursor-inactive-bg" => theme.set_cursor_inactive_bg(color),
+                "cursor-inactive-line" => theme.set_cursor_inactive_line(color),
+                "dim" => theme.set_dim(color),
+                "border" => theme.set_border(color),
+                "dialog" => theme.set_dialog(color),
                 "kind" => theme.set_kind(color),
                 "selected-bg" => theme.set_selected_bg(color),
                 "cursor-bg" => theme.set_cursor_bg(color),
@@ -1813,6 +1825,7 @@ impl Controller {
                 }
             }
             Reply::Icons(p) => self.repaint(p),
+            Reply::Drives(_) if self.demo => {}
             Reply::Drives(drives) => self.set_drives(drives),
             Reply::Menu(outcome) => {
                 let p = self.menu_pane;
@@ -2830,12 +2843,20 @@ fn default_start(side: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
-    let config = config::Config::load(config_file(smoke.map(|i| args[i + 1].as_path())));
+    // `--demo <root> <frames>`: records the README animation (demo.rs) in a fresh `<root>`.
+    let demo = args.iter().position(|a| a.as_os_str() == "--demo");
+    if let Some(i) = demo {
+        let root = args.get(i + 1).ok_or("--demo <root> <frames>")?;
+        demo::prepare(root)?;
+    }
+    let own_root = smoke.or(demo).map(|i| args[i + 1].as_path());
+    let config = config::Config::load(config_file(own_root));
     let (left, right) = match smoke {
         Some(i) => {
             let root = args.get(i + 1).ok_or("--smoke <root> <log>")?;
             (root.join("left"), root.join("right"))
         }
+        None if demo.is_some() => demo::start_folders(own_root.unwrap()),
         // No arguments: the configured start folders, else the development sandbox.
         None if args.is_empty() => {
             let [start_left, start_right] = config.start.clone();
@@ -2903,6 +2924,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         index_limit: finder::INDEX_LIMIT,
         compare: None,
         previous: 1,
+        demo: demo.is_some(),
     }));
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
     {
@@ -3130,7 +3152,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     // Set before show, so the window opens in place instead of jumping there.
-    if let Some(w) = controller.borrow().config.window.filter(|w| shell::on_screen(w.x, w.y, w.width)) {
+    if demo.is_some() {
+        ui.window().set_size(demo::SIZE);
+    } else if let Some(w) = controller.borrow().config.window.filter(|w| shell::on_screen(w.x, w.y, w.width)) {
         ui.window().set_position(slint::PhysicalPosition::new(w.x, w.y));
         ui.window().set_size(slint::PhysicalSize::new(w.width, w.height));
         ui.window().set_maximized(w.maximized);
@@ -3175,6 +3199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     ui.invoke_focus_pane(0);
     let _smoke = smoke.map(|i| smoke::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
+    let _demo = demo.map(|i| demo::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
     slint::run_event_loop()?;
     CONTROLLER.with(|c| c.borrow_mut().take());
     Ok(())

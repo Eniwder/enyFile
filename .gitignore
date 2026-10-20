@@ -5,6 +5,7 @@
 !/.gitattributes
 !/.github/
 !/app/
+!/docs/
 !/enyFile.cmd
 !/LICENSE
 !/COPYING

@@ -22,6 +22,15 @@ pub const BASE: &[(&str, &str, &str)] = &[
     ("diff-add-bg", "比較: 右（新）にだけある", "#1e4a2b"),
     ("diff-del-bg", "比較: 左（旧）にだけある", "#5a2329"),
     ("diff-change-bg", "比較: 違う項目（サイズ・日時・属性）", "#5c5320"),
+    // A light palette needs these too (the defaults are those of the dark theme).
+    ("selected-text", "選択の文字", "#ffffff"),
+    ("cursor-text", "カーソルの文字", "#1c1c1c"),
+    ("cursor-selected-bg", "カーソル（選択中の項目）", "#9cc2ec"),
+    ("cursor-inactive-bg", "カーソル（非アクティブなペイン）", "#3a3a3a"),
+    ("cursor-inactive-line", "カーソルの枠線（非アクティブなペイン）", "#5c5c5c"),
+    ("dim", "薄い文字", "#9a9a9a"),
+    ("border", "枠線", "#4a4a4a"),
+    ("dialog", "ダイアログ・メニュー", "#3a3a3a"),
 ];
 
 /// Default extension colors, after NexusFile's groups (a few newer formats added).
