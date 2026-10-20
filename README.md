@@ -85,7 +85,7 @@ git push origin v0.1.0
 
 ## 構成
 
-```
+```text
 app/
 ├── Cargo.toml
 ├── Check.ps1           ビルド＋テスト＋スモーク
@@ -107,4 +107,4 @@ app/
 
 自作のソースコードは [MIT License](LICENSE) です。
 
-ただし UI ツールキットの Slint を GPLv3 で利用しているため、ビルドしたアプリケーション（Release の配布物を含む）は **GPL-3.0-only** の条件で配布します（`app/Cargo.toml` の `license` も同じ）。第三者の依存ライブラリはそれぞれのライセンスに従います。
+ただし UI ツールキットの Slint を GPLv3 で利用しているため、ビルドしたアプリケーション（Release の配布物を含む）は **GPL-3.0-only** の条件で配布します（全文は [COPYING](COPYING)、`app/Cargo.toml` の `license` も同じ）。各 Release に対応するソースコードは、同じ名前のタグで入手できます。第三者の依存ライブラリはそれぞれのライセンスに従います。
