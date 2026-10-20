@@ -9,15 +9,14 @@ Windows 専用の、キーボード中心の 2 ペインファイラー。Rust +
 
 enyFile は、長く愛用してきたファイラー **NexusFile** をリスペクトして作っています。画面構成や操作感は NexusFile を強く参考にしています。
 
-enyFile は NexusFile とは無関係の個人プロジェクトで、NexusFile のコードや画像などは使っていません。enyFile についての質問や不具合報告は、NexusFile の作者ではなく、このリポジトリの [Issues](https://github.com/Eniwder/enyFile/issues) へお願いします。
+enyFile は NexusFile とは無関係の個人プロジェクトで、NexusFile のコードや画像などは使っていません。enyFile についての質問や不具合報告は、NexusFile の作者ではなく、このリポジトリの [Issues](https://github.com/Eniwder/enyFile/issues) または [@Eniel120](https://x.com/Eniel120) へお願いします。
 
 ## 特徴
 
-- Explorer とクリップボードで相互運用できるコピー・移動（Ctrl+C / X / V）
-- 同名ファイルの衝突は 1 件ずつ確認
 - 2 / 3 / 4 ペイン
-- シェルのコンテキストメニュー、ごみ箱、フォルダーの自動更新
-- 配色・フォント・ブックマークなどのカスタマイズ
+- スタイリッシュなデザイン
+  - 配色・フォント・ブックマークなどのカスタマイズ
+- 高速な動作
 
 ## 動作環境
 
