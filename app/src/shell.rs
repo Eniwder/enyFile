@@ -278,6 +278,8 @@ fn finish(op: &IFileOperation) -> Result<bool, String> {
 /// Items being replaced are deleted first, without the Recycle Bin (the user's choice).
 /// Returns whether anything was aborted. Call on a thread that owns an [`Apartment`].
 pub fn transfer(plan: &crate::paste::Plan) -> Result<bool, String> {
+    // The last check before anything is deleted or overwritten.
+    plan.verify()?;
     if !plan.remove.is_empty() {
         let op = operation(FOF_NOCONFIRMATION)?;
         for path in &plan.remove {

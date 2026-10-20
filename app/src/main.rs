@@ -6,6 +6,7 @@ mod finder;
 mod icons;
 mod listing;
 mod paste;
+mod pathid;
 mod shell;
 mod smoke;
 mod theme;
@@ -1789,6 +1790,8 @@ impl Controller {
                             "貼り付けを取り消しました".to_string()
                         } else if outcome.aborted {
                             format!("{verb}は途中で中止されました")
+                        } else if outcome.inside > 0 {
+                            format!("フォルダーをその中へは貼り付けられないため {} 件をスキップしました → {}", outcome.inside, display(&dir))
                         } else if outcome.skipped {
                             format!("{verb}しました（一部スキップ） → {}", display(&dir))
                         } else {
@@ -2378,6 +2381,7 @@ impl Controller {
         };
         let name = q.target.file_name().unwrap().to_string_lossy().into_owned();
         let info = AskInfo {
+            replace: q.replace,
             kind: match q.kind {
                 paste::Kind::File => 0,
                 paste::Kind::Folder => 1,
@@ -2413,7 +2417,7 @@ impl Controller {
             (2, _) => Answer::Skip,
             (3, _) if self.validate(&name).is_empty() => Answer::Rename(name),
             (4, Kind::Folder) => Answer::Merge,
-            (5, Kind::Folder) => Answer::Replace,
+            (5, Kind::Folder) if q.replace => Answer::Replace,
             (6, _) => Answer::Cancel,
             _ => return,
         };
@@ -2716,6 +2720,8 @@ struct PasteOutcome {
     aborted: bool,
     skipped: bool,
     cancelled: bool,
+    /// Folders left out because the destination was the folder itself or inside it.
+    inside: usize,
 }
 type AnswerTx = mpsc::SyncSender<(paste::Answer, bool)>;
 /// Paste worker: read the clipboard, plan (asking the UI about each conflict), then run.
@@ -2736,10 +2742,8 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
         // Shell items without paths: the Windows copy engine resolves conflicts itself.
         return shell::paste_shell_items(dir, moved).map(done);
     };
-    let same_folder = !paths.is_empty()
-        && paths.iter().all(|path| {
-            path.parent().and_then(|d| std::fs::canonicalize(d).ok()).as_deref() == Some(dir)
-        });
+    let mut ids = pathid::Idents::default();
+    let same_folder = !paths.is_empty() && paths.iter().all(|path| path.parent().is_some_and(|d| ids.same(d, dir)));
     if same_folder {
         if moved {
             return Err("切り取った項目は既にこのフォルダーにあります".into());
@@ -2758,9 +2762,7 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
         let cancelled = PasteOutcome { moved, cancelled: true, ..Default::default() };
         return Ok((Vec::new(), cancelled));
     };
-    if plan.changed() {
-        return Err("確認中に貼り付け先が変わったため中止しました".into());
-    }
+    // `transfer` verifies the plan against the disk right before it changes anything.
     let aborted = shell::transfer(&plan)?;
     if moved && !aborted {
         plan.remove_emptied();
@@ -2768,7 +2770,7 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
             shell::finish_cut(&paths);
         }
     }
-    let outcome = PasteOutcome { moved, aborted, skipped: plan.skipped, cancelled: false };
+    let outcome = PasteOutcome { moved, aborted, skipped: plan.skipped, cancelled: false, inside: plan.inside };
     Ok((plan.targets, outcome))
 }
 
