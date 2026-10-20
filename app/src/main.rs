@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod compare;
 mod config;
 mod ctxmenu;
 mod finder;
@@ -58,16 +59,22 @@ impl Snapshot {
 enum Special {
     Parent,
     Drive(usize),
+    /// Comparing: a row where only the other pane has an entry.
+    Gap(usize),
 }
 /// What a model row shows.
 enum Slot {
     Parent,
     Entry(usize),
     Drive(usize),
+    Gap,
 }
 /// Model rows: ".." (when the folder has a parent), the entries, then the drives.
 /// Selection works on entry indexes; the cursor can also rest on ".." or a drive.
+/// Comparing, the rows are those of `compare` instead (no "..", no drives).
 struct RowsModel {
+    /// Ctrl+Shift+D: the rows shared with the other pane, and this pane's side (0 old, 1 new).
+    compare: RefCell<Option<(Rc<compare::Aligned>, usize)>>,
     data: RefCell<Arc<Snapshot>>,
     selection: RefCell<Selection>,
     drives: RefCell<Arc<Vec<Drive>>>,
@@ -82,6 +89,9 @@ struct RowsModel {
 }
 impl RowsModel {
     fn slot(&self, row: usize) -> Option<Slot> {
+        if let Some((aligned, side)) = &*self.compare.borrow() {
+            return aligned.pairs.get(row).map(|pair| pair[*side].map_or(Slot::Gap, Slot::Entry));
+        }
         let data = self.data.borrow();
         let (offset, entries) = (data.offset(), data.rows.len());
         if row < offset {
@@ -98,6 +108,14 @@ impl RowsModel {
         match special {
             Special::Parent => 0,
             Special::Drive(i) => data.offset() + data.rows.len() + i,
+            Special::Gap(row) => row,
+        }
+    }
+    /// Global row of entry `index`.
+    fn entry_row(&self, index: usize) -> usize {
+        match &*self.compare.borrow() {
+            Some((aligned, side)) => aligned.row_of(*side, index).unwrap_or(0),
+            None => index + self.data.borrow().offset(),
         }
     }
     fn on_parent(&self) -> bool {
@@ -128,6 +146,9 @@ fn icon_image(key: &Arc<str>, fallback: &Arc<str>) -> slint::Image {
 impl RowsModel {
     /// All rows: "..", entries, drives.
     fn total(&self) -> usize {
+        if let Some((aligned, _)) = &*self.compare.borrow() {
+            return aligned.pairs.len();
+        }
         let data = self.data.borrow();
         data.rows.len() + data.offset() + self.drives.borrow().len()
     }
@@ -189,8 +210,17 @@ impl RowsModel {
                     ..Row::default()
                 });
             }
+            Slot::Gap => {
+                return Some(Row {
+                    compare: true,
+                    gap: true,
+                    current: self.special.get() == Some(Special::Gap(row)),
+                    ..Row::default()
+                });
+            }
             Slot::Entry(index) => index,
         };
+        let diff = self.compare.borrow().as_ref().map(|(aligned, _)| aligned.diffs[row]);
         let data = self.data.borrow();
         let entry = data.rows.get(index)?;
         let selection = self.selection.borrow();
@@ -217,6 +247,11 @@ impl RowsModel {
             directory: entry.directory,
             selected: selection.contains(&entry.path),
             current: self.special.get().is_none() && selection.current == Some(index),
+            compare: diff.is_some(),
+            diff: diff.map_or(0, |d| d.kind),
+            size_diff: diff.is_some_and(|d| d.size),
+            time_diff: diff.is_some_and(|d| d.time),
+            attr_diff: diff.is_some_and(|d| d.attr),
             ..Row::default()
         })
     }
@@ -476,6 +511,18 @@ struct Found {
     /// come in, so typing does not blank it on every key.
     replace: bool,
 }
+/// Ctrl+Shift+D: two panes compared row by row.
+struct Comparing {
+    /// Old ("-", left / upper) and new ("+") pane.
+    panes: [usize; 2],
+    /// Second Ctrl+Shift+D: rows that are the same are left out.
+    only_diff: bool,
+    /// The listings as loaded; the panes show the rows the comparison keeps.
+    base: [Arc<Snapshot>; 2],
+    /// Sort order before the comparison, which shows both sides by name.
+    sort: [(usize, bool); 2],
+    counts: [usize; 4],
+}
 /// Typing in the recursive search bar: the query runs once the keys pause this long.
 const TYPING: Duration = Duration::from_millis(120);
 /// The find bar is open for `pane`.
@@ -516,6 +563,9 @@ struct Controller {
     /// `finder::INDEX_LIMIT`; the smoke test lowers it.
     index_limit: usize,
     naming: Option<Naming>,
+    compare: Option<Comparing>,
+    /// The pane active before the current one: what Ctrl+Shift+D compares with.
+    previous: usize,
 }
 fn display(path: &Path) -> String {
     shell::shell_path(path).to_string_lossy().into_owned()
@@ -562,6 +612,9 @@ impl Controller {
             .collect()
     }
     fn active(&mut self, p: usize) {
+        if p != self.active {
+            self.previous = self.active;
+        }
         self.active = p;
         if let Some(ui) = self.ui.upgrade() {
             ui.set_active_pane(p as i32);
@@ -605,6 +658,9 @@ impl Controller {
         }
         if self.active >= self.config.panes {
             self.active(0);
+        }
+        if self.compare.as_ref().is_some_and(|c| c.panes[1] >= self.config.panes) {
+            self.end_compare(None);
         }
         if let Some(ui) = self.ui.upgrade() {
             ui.invoke_focus_pane(self.active as i32);
@@ -692,6 +748,11 @@ impl Controller {
     }
     /// The find bar for pane `p`, in `Finding::mode`.
     fn open_find(&mut self, p: usize, mode: i32) {
+        // The compared rows are the two folders as they are: no filter or search results.
+        if mode != 1 && self.compare_side(p).is_some() {
+            self.message("比較中は使えません（Esc で比較を終了）");
+            return;
+        }
         let origin = self.panes[p].model.selection.borrow().current.unwrap_or(0);
         let text = match mode {
             2 => self.panes[p].filter.as_ref().map_or(String::new(), |(text, _)| text.clone()),
@@ -803,7 +864,8 @@ impl Controller {
     /// Scrolls entry `index` into view (model rows are shifted by the ".." row; the first
     /// entry also reveals "..", so Home shows the top of the list).
     fn reveal(&self, p: usize, index: usize) {
-        let row = if index == 0 { 0 } else { index + self.data(p).offset() };
+        let model = &self.panes[p].model;
+        let row = if index == 0 && model.compare.borrow().is_none() { 0 } else { model.entry_row(index) };
         self.reveal_row(p, row);
     }
     fn reveal_row(&self, p: usize, row: usize) {
@@ -828,7 +890,7 @@ impl Controller {
         let model = &self.panes[p].model;
         match model.special.get() {
             Some(special) => model.special_row(special),
-            None => model.selection.borrow().current.map_or(0, |i| i + self.data(p).offset()),
+            None => model.selection.borrow().current.map_or(0, |i| model.entry_row(i)),
         }
     }
     /// Mouse wheel: one page per notch, the cursor moves along.
@@ -868,6 +930,15 @@ impl Controller {
             selected: if selected > 0 { selected.to_string() } else { String::new() }.into(),
             filter: self.panes[p].filter.as_ref().map_or(String::new(), |(text, _)| text.clone()).into(),
             search: self.panes[p].found.as_ref().map_or(String::new(), |f| f.text.clone()).into(),
+            compare: match self.compare.as_ref().filter(|c| c.panes.contains(&p)) {
+                Some(c) => {
+                    let [old, new, differ, same] = c.counts;
+                    let only = if c.only_diff { "（差分のみ）" } else { "" };
+                    format!("-{old} +{new} ≠{differ} ={same}{only}")
+                }
+                None => String::new(),
+            }
+            .into(),
             page: {
                 let (page, pages) = self.panes[p].model.pages();
                 if pages > 1 { format!("{page}/{pages}") } else { String::new() }.into()
@@ -875,6 +946,27 @@ impl Controller {
         }
     }
     fn repaint(&self, p: usize) {
+        self.paint(p);
+        // Comparing, the other pane's cursor and page follow the active one.
+        let Some(c) = self.compare.as_ref().filter(|c| p == self.active && c.panes.contains(&p)) else { return };
+        let other = if c.panes[0] == p { c.panes[1] } else { c.panes[0] };
+        let row = self.cursor_row(p);
+        let model = &self.panes[other].model;
+        match model.slot(row) {
+            Some(Slot::Entry(i)) => {
+                model.special.set(None);
+                model.selection.borrow_mut().current = Some(i);
+            }
+            _ => model.special.set(Some(Special::Gap(row))),
+        }
+        let page = self.panes[p].model.page_start.get();
+        if model.page_start.get() != page {
+            model.page_start.set(page);
+            model.notify.reset();
+        }
+        self.paint(other);
+    }
+    fn paint(&self, p: usize) {
         if let Some(ui) = self.ui.upgrade() {
             // Update the rows of the page in place; a reset would destroy mouse/double-click state.
             let model = &self.panes[p].model;
@@ -962,6 +1054,10 @@ impl Controller {
         }
     }
     fn sort(&mut self, p: usize, column: usize) {
+        if self.compare_side(p).is_some() {
+            self.message("比較中は名前順で表示します");
+            return;
+        }
         if self.panes[p]
             .pending
             .as_ref()
@@ -1216,6 +1312,131 @@ impl Controller {
         }
         self.repaint(p);
     }
+    /// Ctrl+Shift+D: compare -> only the differences -> off.
+    fn toggle_compare(&mut self) {
+        match &mut self.compare {
+            None => self.start_compare(),
+            Some(c) if !c.only_diff => {
+                c.only_diff = true;
+                self.recompare();
+                self.message("差分のみ表示（Ctrl+Shift+D でもう一度押すと比較を終了）");
+            }
+            Some(_) => self.end_compare(None),
+        }
+    }
+    /// The active pane with the one active before it; the lower pane number is the old side.
+    fn start_compare(&mut self) {
+        let a = self.active;
+        let b = if self.previous != a && self.previous < self.visible() { self.previous } else { (a + 1) % self.visible() };
+        let panes = [a.min(b), a.max(b)];
+        if panes.iter().any(|&p| self.panes[p].found.is_some()) {
+            self.message("検索結果は比較できません");
+            return;
+        }
+        if panes.iter().any(|&p| self.panes[p].pending.as_ref().is_some_and(|m| !matches!(m, Mode::Sort))) {
+            self.message("フォルダーの読み込み中です");
+            return;
+        }
+        let sort = panes.map(|p| (self.panes[p].column, self.panes[p].descending));
+        self.compare = Some(Comparing { panes, only_diff: false, base: panes.map(|p| self.data(p)), sort, counts: [0; 4] });
+        // Both sides by name, so the rows line up; the reply of the sort compares.
+        for p in panes {
+            if (self.panes[p].column, self.panes[p].descending) != (0, false) {
+                self.panes[p].column = 0;
+                self.panes[p].descending = false;
+                self.rearrange(p);
+            }
+        }
+        self.recompare();
+        self.message("比較中（Ctrl+Shift+D で差分のみ、Esc で終了）");
+    }
+    fn compare_side(&self, p: usize) -> Option<usize> {
+        self.compare.as_ref().and_then(|c| c.panes.iter().position(|&q| q == p))
+    }
+    /// Lines up the two listings again (after any reload of either side).
+    fn recompare(&mut self) {
+        let Some(c) = &mut self.compare else { return };
+        if c.panes.iter().any(|&p| self.panes[p].pending.is_some()) {
+            return;
+        }
+        let (aligned, shown) = compare::align(&c.base[0].rows, &c.base[1].rows, c.only_diff);
+        c.counts = aligned.counts;
+        let aligned = Rc::new(aligned);
+        // The cursor stays on its item (or its row, when the item is gone).
+        let side = if self.active == c.panes[1] { 1 } else { 0 };
+        let model = &self.panes[c.panes[side]].model;
+        let old_row = match model.special.get() {
+            Some(special) => model.special_row(special),
+            None => model.selection.borrow().current.map_or(0, |i| model.entry_row(i)),
+        };
+        let focus = (model.special.get().is_none())
+            .then(|| model.selection.borrow().current.and_then(|i| model.data.borrow().rows.get(i).map(|e| e.path.clone())))
+            .flatten();
+        for (s, rows) in shown.into_iter().enumerate() {
+            let p = c.panes[s];
+            let base = &c.base[s];
+            let snapshot = Snapshot::new(base.dir.clone(), rows, base.volume.clone());
+            let model = &self.panes[p].model;
+            let old = model.selection.borrow().clone();
+            *model.selection.borrow_mut() = Selection::only(snapshot.rows.iter().filter(|e| old.contains(&e.path)).map(|e| e.path.clone()));
+            *model.data.borrow_mut() = Arc::new(snapshot);
+            *model.compare.borrow_mut() = Some((aligned.clone(), s));
+        }
+        let row = focus
+            .and_then(|path| self.panes[c.panes[side]].model.data.borrow().positions.get(&path).copied())
+            .and_then(|i| aligned.row_of(side, i))
+            .unwrap_or(old_row)
+            .min(aligned.pairs.len().saturating_sub(1));
+        let panes = c.panes;
+        for p in panes {
+            let model = &self.panes[p].model;
+            match model.slot(row) {
+                Some(Slot::Entry(i)) => {
+                    model.special.set(None);
+                    model.selection.borrow_mut().current = Some(i);
+                }
+                _ => model.special.set(Some(Special::Gap(row))),
+            }
+            model.show_page_of(row);
+            model.notify.reset();
+            self.paint(p);
+        }
+    }
+    /// Back to the folders as loaded. `keep`: a pane that opened another folder (its list
+    /// is already the new one).
+    fn end_compare(&mut self, keep: Option<usize>) {
+        let Some(c) = self.compare.take() else { return };
+        for (s, &p) in c.panes.iter().enumerate() {
+            let model = &self.panes[p].model;
+            *model.compare.borrow_mut() = None;
+            if keep == Some(p) {
+                continue;
+            }
+            let current = (model.special.get().is_none())
+                .then(|| model.selection.borrow().current.and_then(|i| model.data.borrow().rows.get(i).map(|e| e.path.clone())))
+                .flatten();
+            let base = c.base[s].clone();
+            {
+                let mut selection = model.selection.borrow_mut();
+                selection.current = current
+                    .and_then(|path| base.positions.get(&path).copied())
+                    .or_else(|| (!base.rows.is_empty()).then_some(0));
+                selection.anchor = None;
+            }
+            model.special.set((base.rows.is_empty() && base.offset() == 1).then_some(Special::Parent));
+            *model.data.borrow_mut() = base;
+            model.page_start.set(0);
+            model.notify.reset();
+            if c.sort[s] != (0, false) {
+                (self.panes[p].column, self.panes[p].descending) = c.sort[s];
+                self.rearrange(p);
+            } else if let Some(i) = self.panes[p].model.selection.borrow().current {
+                self.reveal(p, i);
+            }
+            self.paint(p);
+        }
+        self.message("比較を終了しました");
+    }
     /// Breadcrumb click: open that ancestor with the folder we came from focused.
     fn crumb(&mut self, p: usize, i: usize) {
         self.active(p);
@@ -1311,6 +1532,9 @@ impl Controller {
                 "size-text" => theme.set_size_text(color),
                 "time-text" => theme.set_time_text(color),
                 "attr-text" => theme.set_attr_text(color),
+                "diff-add-bg" => theme.set_diff_add_bg(color),
+                "diff-del-bg" => theme.set_diff_del_bg(color),
+                "diff-change-bg" => theme.set_diff_change_bg(color),
                 "kind" => theme.set_kind(color),
                 "selected-bg" => theme.set_selected_bg(color),
                 "cursor-bg" => theme.set_cursor_bg(color),
@@ -1432,6 +1656,28 @@ impl Controller {
                 })
                 .collect();
             ui.set_bookmarks(ModelRc::new(slint::VecModel::from(rows)));
+        }
+    }
+    /// The window is closing: keep its placement for the next start. While maximized the
+    /// restored rectangle is unknown, so the previous one is kept.
+    fn remember_window(&mut self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let window = ui.window();
+        if window.is_minimized() {
+            return;
+        }
+        let placement = if window.is_maximized() {
+            match self.config.window {
+                Some(previous) => config::Placement { maximized: true, ..previous },
+                None => return,
+            }
+        } else {
+            let (position, size) = (window.position(), window.size());
+            config::Placement { x: position.x, y: position.y, width: size.width, height: size.height, maximized: false }
+        };
+        if self.config.window != Some(placement) {
+            self.config.window = Some(placement);
+            self.save_config();
         }
     }
     fn save_config(&mut self) {
@@ -1620,6 +1866,8 @@ impl Controller {
             // The job for an opened folder ran without the filter.
             self.panes[p].filter = None;
         }
+        // Comparing: this pane shows its plain list until `recompare` lines it up again.
+        *self.panes[p].model.compare.borrow_mut() = None;
         let old = self.saved(p);
         let old_current = self.panes[p].model.selection.borrow().current;
         let changed = old.path != data.dir;
@@ -1707,6 +1955,7 @@ impl Controller {
             self.panes[p].model.special.get().filter(|s| match s {
                 Special::Parent => data.offset() == 1,
                 Special::Drive(i) => *i < drives,
+                Special::Gap(_) => false,
             })
         };
         let reveal = if special.is_some() { None } else { selection.current };
@@ -1754,6 +2003,17 @@ impl Controller {
             self.reveal_row(p, self.panes[p].model.special_row(special));
         }
         self.repaint(p);
+        // Comparing: another folder ends it; a reload (watch, paste, F5) compares again.
+        if let Some(side) = self.compare_side(p) {
+            if changed {
+                self.end_compare(Some(p));
+            } else {
+                if let Some(c) = &mut self.compare {
+                    c.base[side] = data.clone();
+                }
+                self.recompare();
+            }
+        }
         if stale {
             self.navigate(p, data.dir.clone(), Mode::Refresh);
         }
@@ -1772,9 +2032,11 @@ impl Controller {
             None => return,
             Some(Slot::Entry(index)) => index,
             Some(slot) => {
-                // ".." or a drive: a click puts the cursor there (a plain click clears the selection).
+                // "..", a drive or an empty compare row: a click puts the cursor there
+                // (a plain click clears the selection).
                 let special = match slot {
                     Slot::Drive(i) => Special::Drive(i),
+                    Slot::Gap => Special::Gap(row),
                     _ => Special::Parent,
                 };
                 match kind {
@@ -1787,7 +2049,7 @@ impl Controller {
                         if kind == 3 {
                             let target = match special {
                                 Special::Drive(i) => ctxmenu::Target::Items(vec![self.drives[i].root.clone()]),
-                                Special::Parent => ctxmenu::Target::Background(data.dir.clone()),
+                                Special::Parent | Special::Gap(_) => ctxmenu::Target::Background(data.dir.clone()),
                             };
                             self.show_menu(p, target, shift);
                         }
@@ -1835,6 +2097,7 @@ impl Controller {
                     self.navigate(p, root, Mode::New(None));
                 }
             }
+            Special::Gap(_) => {}
         }
     }
     fn show_menu(&mut self, p: usize, target: ctxmenu::Target, extended: bool) {
@@ -1956,6 +2219,10 @@ impl Controller {
                 if i >= drives.len() {
                     model.special.set(None);
                 }
+            }
+            // Compared panes show no drive list.
+            if model.compare.borrow().is_some() {
+                continue;
             }
             if same_count {
                 // Only the numbers changed: update those rows in place (keeps click state).
@@ -2197,6 +2464,11 @@ impl Controller {
                 return true;
             }
         }
+        // Ctrl+Shift+D: compare with the pane active before, only differences, off.
+        if ctrl && shift && !alt && letter == "d" {
+            self.toggle_compare();
+            return true;
+        }
         // Ctrl+Shift+N/S/T/E: sort by name, size, time, extension; again for reverse order.
         if ctrl && shift && !alt {
             let column = match letter.as_str() {
@@ -2290,6 +2562,10 @@ impl Controller {
             return true;
         }
         if is(Key::Escape) {
+            if self.compare_side(p).is_some() {
+                self.end_compare(None);
+                return true;
+            }
             if self.panes[p].filter.is_some() {
                 self.set_filter(p, "");
                 return true;
@@ -2311,8 +2587,13 @@ impl Controller {
         }
         let entries = data.rows.len();
         // With no entry to rest on, the cursor sits on ".." or the first drive.
+        let comparing = model.compare.borrow().is_some();
         let special = model.special.get().or_else(|| {
-            (entries == 0).then(|| if data.offset() == 1 { Special::Parent } else { Special::Drive(0) })
+            (entries == 0).then(|| match () {
+                _ if comparing => Special::Gap(0),
+                _ if data.offset() == 1 => Special::Parent,
+                _ => Special::Drive(0),
+            })
         });
         let current = model
             .selection
@@ -2336,7 +2617,7 @@ impl Controller {
         }
         let cursor = match special {
             Some(special) => model.special_row(special),
-            None => current + data.offset(),
+            None => model.entry_row(current),
         };
         let page = model.page_size.get().max(1);
         let target = if is(Key::UpArrow) {
@@ -2365,6 +2646,7 @@ impl Controller {
                 Some(slot) => {
                     model.special.set(Some(match slot {
                         Slot::Drive(i) => Special::Drive(i),
+                        Slot::Gap => Special::Gap(row),
                         _ => Special::Parent,
                     }));
                     if !ctrl && !shift {
@@ -2565,6 +2847,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = App::new()?;
     let panes = std::array::from_fn(|p| Pane {
         model: Rc::new(RowsModel {
+            compare: RefCell::new(None),
             data: RefCell::new(Arc::new(Snapshot::default())),
             selection: RefCell::new(Selection::default()),
             special: Default::default(),
@@ -2616,6 +2899,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         searches: 0,
         typing: slint::Timer::default(),
         index_limit: finder::INDEX_LIMIT,
+        compare: None,
+        previous: 1,
     }));
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
     {
@@ -2757,6 +3042,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 33 => c.set_filter(p, ""),
                 34 => c.open_find(p, 3),
                 35 => c.toggle_search_links(),
+                40 => c.toggle_compare(),
                 _ => {}
             }
         });
@@ -2831,6 +3117,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let c = controller.clone();
         ui.on_ask_validate(move |name| c.borrow().validate(&name).into());
+    }
+    {
+        let c = controller.clone();
+        ui.window().on_close_requested(move || {
+            if let Ok(mut c) = c.try_borrow_mut() {
+                c.remember_window();
+            }
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
+    // Set before show, so the window opens in place instead of jumping there.
+    if let Some(w) = controller.borrow().config.window.filter(|w| shell::on_screen(w.x, w.y, w.width)) {
+        ui.window().set_position(slint::PhysicalPosition::new(w.x, w.y));
+        ui.window().set_size(slint::PhysicalSize::new(w.width, w.height));
+        ui.window().set_maximized(w.maximized);
     }
     ui.show()?;
     // winit creates the native window once the event loop runs; poll briefly for its HWND.

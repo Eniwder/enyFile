@@ -47,6 +47,7 @@ enyfile.exe "D:\Work" "E:\Backup" # 左右のフォルダーを指定
 | Ctrl+F / Ctrl+G | 検索 / 次を検索（`*` `?` 可） |
 | Ctrl+Shift+F / Esc | フィルター / 解除 |
 | Ctrl+Alt+Shift+F | フォルダー以下を検索（入力しながら絞り込み、Esc で戻る） |
+| Ctrl+Shift+D | 2 つのペインを比較（もう一度で差分のみ、3 回目か Esc で終了） |
 
 並べ替え、ペイン数の切り替え、設定画面など、そのほかの操作と画面の説明は [app/README.md](app/README.md) を参照してください。
 

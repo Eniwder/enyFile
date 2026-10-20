@@ -16,6 +16,15 @@ pub const PLACES: [&str; 5] = ["desktop", "documents", "pictures", "videos", "mu
 /// Optional list columns, in `Config::columns` order.
 pub const COLUMNS: [&str; 5] = ["size", "date", "time", "attr", "kind"];
 
+/// Last window placement in physical pixels: outer position, inner size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bookmark {
     pub name: String,
@@ -55,6 +64,8 @@ pub struct Config {
     /// Recursive search enters junctions and symbolic links to folders (off: cycles and
     /// unexpectedly huge trees such as a link to a drive root are left alone).
     pub search_links: bool,
+    /// Where the window was when it was last closed; None = Slint's default placement.
+    pub window: Option<Placement>,
 }
 fn default_extensions() -> Vec<(String, slint::Color)> {
     theme::EXTENSIONS
@@ -159,6 +170,15 @@ impl Config {
             .to_string();
         let font_size = raw["font"]["size"].as_f64().map_or(theme::DEFAULT_SIZE, |s| s as f32).clamp(8.0, 32.0);
         let search_links = raw["search_links"].as_bool().unwrap_or(false);
+        let w = &raw["window"];
+        let int = |key: &str| w[key].as_i64().and_then(|v| i32::try_from(v).ok());
+        let size = |key: &str| w[key].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|&v| v >= 100);
+        let window = match (int("x"), int("y"), size("width"), size("height")) {
+            (Some(x), Some(y), Some(width), Some(height)) => {
+                Some(Placement { x, y, width, height, maximized: w["maximized"].as_bool().unwrap_or(false) })
+            }
+            _ => None,
+        };
         Self {
             file,
             raw,
@@ -179,6 +199,7 @@ impl Config {
             font_family,
             font_size,
             search_links,
+            window,
         }
     }
     pub fn default_colors() -> Vec<slint::Color> {
@@ -238,6 +259,9 @@ impl Config {
         }
         self.raw["font"] = json!({ "family": self.font_family, "size": self.font_size });
         self.raw["search_links"] = json!(self.search_links);
+        if let Some(w) = self.window {
+            self.raw["window"] = json!({ "x": w.x, "y": w.y, "width": w.width, "height": w.height, "maximized": w.maximized });
+        }
         self.raw["bookmarks"] = Value::Array(
             self.bookmarks
                 .iter()
@@ -296,6 +320,12 @@ mod tests {
         assert_eq!(again.place(2), Some(PathBuf::from(r"E:\写真")));
         assert_eq!(again.place(4), Some(PathBuf::from(r"D:\曲")));
         assert!((again.split - 0.3).abs() < 1e-6);
+        assert_eq!(again.window, None);
+        let mut config = again;
+        let placement = Placement { x: -1900, y: 40, width: 1200, height: 700, maximized: true };
+        config.window = Some(placement);
+        config.save().unwrap();
+        assert_eq!(Config::load(file.clone()).window, Some(placement));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

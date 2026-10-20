@@ -435,6 +435,13 @@ pub fn pick_folder(start: Option<&Path>) -> Option<PathBuf> {
 pub fn revoke_drop_target(hwnd: HWND) {
     let _ = unsafe { RevokeDragDrop(hwnd) };
 }
+/// Whether the top strip of a window at (x, y) with this width lies on some monitor, so a
+/// saved position from an unplugged display does not reopen the window out of reach.
+pub fn on_screen(x: i32, y: i32, width: u32) -> bool {
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect};
+    let strip = RECT { left: x, top: y, right: x.saturating_add(width as i32), bottom: y.saturating_add(32) };
+    !unsafe { MonitorFromRect(&strip, MONITOR_DEFAULTTONULL) }.is_invalid()
+}
 /// Dark title bar to match the dark theme (ignored on Windows versions without it).
 pub fn dark_title_bar(hwnd: HWND) {
     use windows::{

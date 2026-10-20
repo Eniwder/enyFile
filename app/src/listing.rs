@@ -260,18 +260,19 @@ pub fn drives() -> Vec<Drive> {
         })
         .collect()
 }
+/// Explorer's name order (natural, case ignored), folders first.
+pub fn name_order(a: &Entry, b: &Entry) -> std::cmp::Ordering {
+    b.directory
+        .cmp(&a.directory)
+        .then_with(|| unsafe { StrCmpLogicalW(PCWSTR(a.wide_name.as_ptr()), PCWSTR(b.wide_name.as_ptr())) }.cmp(&0))
+}
 pub fn sort(rows: &mut [Entry], column: usize, descending: bool) {
-    use windows::{Win32::UI::Shell::StrCmpLogicalW, core::PCWSTR};
     rows.sort_by(|a, b| {
         let folders = b.directory.cmp(&a.directory);
         if !folders.is_eq() {
             return folders;
         }
-        let name = || {
-            unsafe { StrCmpLogicalW(PCWSTR(a.wide_name.as_ptr()), PCWSTR(b.wide_name.as_ptr())) }
-                .cmp(&0)
-                .then(a.path.cmp(&b.path))
-        };
+        let name = || name_order(a, b).then(a.path.cmp(&b.path));
         let order = match column {
             1 => a.size.cmp(&b.size).then_with(name),
             2 => a.modified.cmp(&b.modified).then_with(name),

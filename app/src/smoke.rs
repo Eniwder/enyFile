@@ -10,6 +10,19 @@ use std::{
 fn names(c: &Rc<RefCell<Controller>>, p: usize) -> Vec<String> {
     c.borrow().data(p).rows.iter().map(|e| e.name.clone()).collect()
 }
+/// Compared rows of pane `p`: the entry name, or "" for an empty row.
+fn compared(c: &Rc<RefCell<Controller>>, p: usize) -> Vec<String> {
+    let c = c.borrow();
+    let model = &c.panes[p].model;
+    (0..model.total()).map(|r| model.row_at(r).map_or("?".into(), |row| if row.gap { String::new() } else { format!("{}{}{}", row.name, if row.ext.is_empty() { "" } else { "." }, row.ext) })).collect()
+}
+fn ctrl_shift_key(ui: &App, p: i32, letter: &str) {
+    let mut event = slint::language::KeyEvent::default();
+    event.text = letter.into();
+    event.modifiers.control = true;
+    event.modifiers.shift = true;
+    ui.invoke_key_event(p, event);
+}
 /// Model row of `name` (shifted by the ".." row), as the UI passes it to `pointer`.
 fn index(c: &Rc<RefCell<Controller>>, p: usize, name: &str) -> Result<i32, String> {
     let offset = c.borrow().data(p).offset();
@@ -105,6 +118,8 @@ struct State {
     menus: Vec<i32>,
     /// The recursive search walk started with the search bar.
     session: u64,
+    /// Sort order of pane 0 before a comparison.
+    sort: (usize, bool),
 }
 impl State {
     fn spawn(&mut self, args: &[&std::ffi::OsStr]) -> Result<(), String> {
@@ -142,6 +157,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
         sweep: 0.0,
         menus: Vec::new(),
         session: 0,
+        sort: (0, false),
     });
     let finish = move |state: &mut State, error: Option<String>| {
         if let Some(mut probe) = state.probe.take() {
@@ -956,8 +972,73 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(c.borrow().panes[0].found.is_none() && c.borrow().data(0).dir.ends_with("tree"), "\"..\" in the results returns to the searched folder")?;
                     s.pass("Esc / \"..\" leave the results and stop the walk");
                     std::fs::remove_dir(root.join("tree").join("loop")).map_err(|e| e.to_string())?;
+                    // Ctrl+Shift+D: two small folders that differ in each way.
+                    let at = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+                    for (side, files) in [("cmpL", [("same.txt", "x"), ("old.txt", "o"), ("size.txt", "aa")]), ("cmpR", [("same.txt", "x"), ("new.txt", "n"), ("size.txt", "aaaa")])] {
+                        let dir = root.join(side);
+                        std::fs::create_dir_all(dir.join("dir")).map_err(|e| e.to_string())?;
+                        for (name, text) in files {
+                            std::fs::write(dir.join(name), text).map_err(|e| e.to_string())?;
+                            let file = std::fs::File::options().write(true).open(dir.join(name)).map_err(|e| e.to_string())?;
+                            file.set_modified(at).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    ui.invoke_navigate(0, display(&root.join("cmpL")).into());
+                    ui.invoke_navigate(1, display(&root.join("cmpR")).into());
                 }
-                54 => return Err("done".into()),
+                54 => {
+                    if !idle(&c) || !c.borrow().data(0).dir.ends_with("cmpL") || !c.borrow().data(1).dir.ends_with("cmpR") {
+                        return Ok(false);
+                    }
+                    s.sort = (c.borrow().panes[0].column, c.borrow().panes[0].descending);
+                    ctrl_shift_key(&ui, 0, "D");
+                    expect(c.borrow().compare.as_ref().is_some_and(|k| k.panes == [0, 1]), "Ctrl+Shift+D compares the two panes")?;
+                }
+                55 => {
+                    if !idle(&c) || c.borrow().panes[0].model.compare.borrow().is_none() {
+                        return Ok(false);
+                    }
+                    expect(compared(&c, 0) == ["dir", "", "old.txt", "same.txt", "size.txt"], &format!("left rows: {:?}", compared(&c, 0)))?;
+                    expect(compared(&c, 1) == ["dir", "new.txt", "", "same.txt", "size.txt"], &format!("right rows: {:?}", compared(&c, 1)))?;
+                    let kinds: Vec<i32> = (0..5).map(|r| c.borrow().panes[0].model.row_at(r).map_or(-1, |row| row.diff)).collect();
+                    expect(kinds == [0, 0, 2, 0, 3] && c.borrow().panes[1].model.row_at(1).is_some_and(|row| row.diff == 1), &format!("- / + / changed rows: {kinds:?}"))?;
+                    let size = c.borrow().panes[1].model.row_at(4).ok_or("no row")?;
+                    expect(size.size_diff && !size.time_diff && !size.attr_diff, "only the size cell differs")?;
+                    expect(c.borrow().panes[0].model.row_at(1).is_some_and(|row| row.gap), "the left side has an empty row for new.txt")?;
+                    expect(ui.get_p0_info().compare == "-1 +1 ≠1 =2", &format!("counts in the info line: {}", ui.get_p0_info().compare))?;
+                    // The cursor moves on both sides; an empty row can hold it.
+                    fkey(&ui, 0, slint::platform::Key::Home);
+                    fkey(&ui, 0, slint::platform::Key::DownArrow);
+                    let other = c.borrow().panes[1].model.selection.borrow().current;
+                    let right = other.map(|i| c.borrow().data(1).rows[i].name.clone());
+                    expect(c.borrow().panes[0].model.special.get() == Some(Special::Gap(1)) && right.as_deref() == Some("new.txt"), "both cursors on row 2")?;
+                    s.pass("Ctrl+Shift+D lines up both folders: -, +, differing cells, cursor in step");
+                    ctrl_shift_key(&ui, 0, "D");
+                    expect(compared(&c, 1) == ["new.txt", "", "size.txt"], &format!("second Ctrl+Shift+D: only the differences: {:?}", compared(&c, 1)))?;
+                    // A change on disk compares again.
+                    let made = root.join("cmpR").join("old.txt");
+                    std::fs::write(&made, "o").map_err(|e| e.to_string())?;
+                    std::fs::File::options().write(true).open(&made).and_then(|f| f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000))).map_err(|e| e.to_string())?;
+                }
+                56 => {
+                    if !idle(&c) || c.borrow().compare.as_ref().is_none_or(|k| k.counts[0] != 0) {
+                        return Ok(false);
+                    }
+                    expect(compared(&c, 0) == ["", "size.txt"], &format!("old.txt now on both sides and the same: {:?}", compared(&c, 0)))?;
+                    s.pass("second Ctrl+Shift+D shows only the differences; changes compare again");
+                    ctrl_shift_key(&ui, 0, "D");
+                    expect(c.borrow().compare.is_none(), "third Ctrl+Shift+D ends the comparison")?;
+                }
+                57 => {
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    let names = names(&c, 0);
+                    expect(c.borrow().panes[0].model.compare.borrow().is_none() && names.len() == 4, &format!("the full folder is back: {names:?}"))?;
+                    expect((c.borrow().panes[0].column, c.borrow().panes[0].descending) == s.sort, "the sort order is back")?;
+                    s.pass("the comparison ends with the folders and sort order as before");
+                }
+                58 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)

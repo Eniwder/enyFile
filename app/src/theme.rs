@@ -19,6 +19,9 @@ pub const BASE: &[(&str, &str, &str)] = &[
     ("accent", "強調（件数・空き容量）", "#64a8ee"),
     ("chrome", "ウィンドウ背景", "#383838"),
     ("bar", "パス欄・バー", "#353535"),
+    ("diff-add-bg", "比較: 右（新）にだけある", "#1e4a2b"),
+    ("diff-del-bg", "比較: 左（旧）にだけある", "#5a2329"),
+    ("diff-change-bg", "比較: 違う項目（サイズ・日時・属性）", "#5c5320"),
 ];
 
 /// Default extension colors, after NexusFile's groups (a few newer formats added).

@@ -32,13 +32,20 @@ export global Theme {
     in-out property <color> size-text: #c8c8c8;
     in-out property <color> time-text: #c8c8c8;
     in-out property <color> attr-text: #a0a0a0;
+    // Ctrl+Shift+D: rows only on the new / old side, and the cells that differ.
+    in-out property <color> diff-add-bg: #1e4a2b;
+    in-out property <color> diff-del-bg: #5a2329;
+    in-out property <color> diff-change-bg: #5c5320;
 }
 
-export struct Row { location: string, name: string, ext: string, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
+// Comparing (Ctrl+Shift+D): `gap` is an empty row where only the other pane has an entry;
+// `diff` 0 same, 1 only here and new ("+"), 2 only here and old ("-"), 3 differs in the
+// cells flagged by size-diff / time-diff / attr-diff.
+export struct Row { compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
 export struct Columns { size: bool, date: bool, time: bool, attr: bool, kind: bool }
 export struct ColorRow { label: string, color: color, r: int, g: int, b: int }
 export struct ExtRow { exts: string, color: color, r: int, g: int, b: int }
-export struct PaneInfo { folders: string, files: string, total: string, volume: string, free: string, selected: string, page: string, filter: string, search: string }
+export struct PaneInfo { folders: string, files: string, total: string, volume: string, free: string, selected: string, page: string, filter: string, search: string, compare: string }
 export struct BookmarkRow { name: string, path: string }
 export struct PlaceRow { label: string, value: string, fallback: string }
 // kind: 0 file, 1 folder, 2 file/folder mismatch.
@@ -372,6 +379,8 @@ component Pane inherits Rectangle {
         if root.info.selected != "" : Text { text: root.info.selected; color: Theme.key; font-weight: 700; vertical-alignment: center; }
         if root.info.filter != "" : Text { text: "   フィルター "; color: Theme.text; vertical-alignment: center; }
         if root.info.filter != "" : Text { text: root.info.filter; color: Theme.key; font-weight: 700; vertical-alignment: center; overflow: elide; }
+        if root.info.compare != "" : Text { text: "   比較 "; color: Theme.text; vertical-alignment: center; }
+        if root.info.compare != "" : Text { text: root.info.compare; color: Theme.key; font-weight: 700; vertical-alignment: center; overflow: elide; }
         if root.info.search != "" : Text { text: "   検索 "; color: Theme.text; vertical-alignment: center; }
         if root.info.search != "" : Text { text: root.info.search; color: Theme.key; font-weight: 700; vertical-alignment: center; overflow: elide; }
         if root.busy : Text { text: root.info.search != "" ? "   検索中…" : "   読み込み中…"; color: Theme.dim; vertical-alignment: center; }
@@ -414,12 +423,19 @@ component Pane inherits Rectangle {
             property <color> column-dim: item.lit || row.selected ? item.fg : row.hidden ? Theme.hidden-text : Theme.text;
             background: item.lit ? (row.selected ? Theme.cursor-selected-bg : Theme.cursor-bg)
                 : row.selected ? Theme.selected-bg
+                : row.diff == 1 ? Theme.diff-add-bg
+                : row.diff == 2 ? Theme.diff-del-bg
                 : row.current ? Theme.cursor-inactive-bg : transparent;
             if row.current && !root.active : Rectangle { y: 0; height: 1px; background: Theme.cursor-inactive-line; }
             if row.current && !root.active : Rectangle { y: parent.height - 1px; height: 1px; background: Theme.cursor-inactive-line; }
-            // Files, folders and "..".
-            if !row.drive : HorizontalLayout {
-                padding-left: 8px; padding-right: 10px; spacing: 7px;
+            // Files, folders and "..". Comparing, an empty row stays empty.
+            if !row.drive && !row.gap : HorizontalLayout {
+                padding-left: row.compare ? 2px : 8px; padding-right: 10px; spacing: 7px;
+                // Comparing: "+" / "-" stay readable when the cursor or selection hides the color.
+                if row.compare : Text {
+                    width: 8px; text: row.diff == 1 ? "+" : row.diff == 2 ? "-" : "";
+                    color: item.fg; font-weight: 700; horizontal-alignment: center; vertical-alignment: center;
+                }
                 Rectangle {
                     width: 16px;
                     if row.icon.width > 0 : Image { y: (parent.height - 16px) / 2; width: 16px; height: 16px; source: row.icon; }
@@ -433,10 +449,23 @@ component Pane inherits Rectangle {
                     Text { text: root.compact && row.ext != "" ? row.name + "." + row.ext : row.name; color: item.name-color; overflow: elide; horizontal-stretch: 1; min-width: row.location != "" ? min(self.preferred-width, 160px) : 40px; vertical-alignment: center; }
                 }
                 if !root.compact : Text { text: row.ext; color: item.name-color; overflow: elide; width: 40px; vertical-alignment: center; }
-                if root.columns.size : Text { text: row.size; color: item.lit || row.selected || row.hidden ? item.column-dim : Theme.size-text; width: 60px; horizontal-alignment: right; vertical-alignment: center; }
-                if !root.compact && root.columns.date : Text { text: row.date; color: item.lit || row.selected || row.hidden ? item.column-dim : Theme.time-text; width: 86px; vertical-alignment: center; }
-                if root.columns.time : Text { text: row.time; color: item.lit || row.selected || row.hidden ? item.column-dim : Theme.time-text; width: 42px; vertical-alignment: center; }
-                if !root.compact && root.columns.attr : Text { text: row.attr; color: item.lit || row.selected || row.hidden ? item.column-dim : Theme.attr-text; width: 32px; vertical-alignment: center; }
+                // Comparing: the cells that differ from the other side get a yellow background.
+                if root.columns.size : Rectangle {
+                    width: 60px; background: row.size-diff ? Theme.diff-change-bg : transparent;
+                    Text { width: parent.width - 2px; x: 0; text: row.size; color: row.size-diff ? Theme.text : item.lit || row.selected || row.hidden ? item.column-dim : Theme.size-text; horizontal-alignment: right; vertical-alignment: center; }
+                }
+                if !root.compact && root.columns.date : Rectangle {
+                    width: 86px; background: row.time-diff ? Theme.diff-change-bg : transparent;
+                    Text { x: 2px; width: parent.width - 2px; text: row.date; color: row.time-diff ? Theme.text : item.lit || row.selected || row.hidden ? item.column-dim : Theme.time-text; vertical-alignment: center; }
+                }
+                if root.columns.time : Rectangle {
+                    width: 42px; background: row.time-diff ? Theme.diff-change-bg : transparent;
+                    Text { x: 2px; width: parent.width - 2px; text: row.time; color: row.time-diff ? Theme.text : item.lit || row.selected || row.hidden ? item.column-dim : Theme.time-text; vertical-alignment: center; }
+                }
+                if !root.compact && root.columns.attr : Rectangle {
+                    width: 32px; background: row.attr-diff ? Theme.diff-change-bg : transparent;
+                    Text { x: 1px; width: parent.width - 1px; text: row.attr; color: row.attr-diff ? Theme.text : item.lit || row.selected || row.hidden ? item.column-dim : Theme.attr-text; vertical-alignment: center; }
+                }
                 if !root.compact && root.columns.kind : Text { text: row.kind; color: item.lit ? Theme.cursor-text : Theme.kind; overflow: elide; width: 130px; vertical-alignment: center; }
             }
             // Drive list under the entries: name, used-space bar, free space.
@@ -1234,6 +1263,7 @@ export component App inherits Window {
             MenuEntry { text: "拡張子で並べ替え (Ctrl+Shift+E)"; clicked => { root.close-menu(); root.sort(root.active-pane, 3); } }
             Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
             MenuEntry { text: "隠しファイルの表示 (Alt+Z)"; check: root.active-hidden ? 1 : 0; clicked => { root.close-menu(); root.menu-command(2); } }
+            MenuEntry { text: "ペインの比較 (Ctrl+Shift+D)"; clicked => { root.close-menu(); root.menu-command(40); } }
             Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
             MenuEntry { text: "サイズの表示"; check: root.columns.size ? 1 : 0; clicked => { root.close-menu(); root.menu-command(20); } }
             MenuEntry { text: "日付の表示"; check: root.columns.date ? 1 : 0; clicked => { root.close-menu(); root.menu-command(21); } }
