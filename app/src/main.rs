@@ -1953,7 +1953,7 @@ fn app_dir() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 /// Settings: `app\data\config.json` while developing (smoke runs use their own copy),
-/// otherwise `%APPDATA%\enyFile\config.json`.
+/// otherwise `config.json` next to the exe (portable: the unzipped folder).
 fn config_file(smoke_root: Option<&Path>) -> PathBuf {
     if let Some(root) = smoke_root {
         return root.join("config.json");
@@ -1961,8 +1961,8 @@ fn config_file(smoke_root: Option<&Path>) -> PathBuf {
     if let Some(app) = app_dir() {
         return app.join("data").join("config.json");
     }
-    let appdata = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
-    appdata.join("enyFile").join("config.json")
+    let exe = std::env::current_exe().unwrap_or_default();
+    exe.with_file_name("config.json")
 }
 /// Default start folders while in development: `app\data\sandbox` next to the crate
 /// (the exe lives in `app\target\<profile>`), never a system or user folder.
