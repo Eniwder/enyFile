@@ -2184,6 +2184,7 @@ impl Controller {
             ui.set_name_open(true);
             ui.invoke_focus_name();
         }
+        self.apply_opacity();
     }
     fn name_error(&self, name: &str) -> &'static str {
         self.naming
@@ -2200,6 +2201,7 @@ impl Controller {
             ui.set_name_open(false);
             ui.invoke_focus_pane(naming.pane as i32);
         }
+        self.apply_opacity();
         if !ok {
             return;
         }
@@ -2308,11 +2310,12 @@ impl Controller {
             Err(e) => self.message(e),
         }
     }
-    /// The settings dialog is always shown opaque; the configured opacity returns when it closes.
+    /// The settings and name dialogs are always shown opaque; the configured opacity returns when they close.
     fn apply_opacity(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         if let Some(h) = hwnd(&ui) {
-            shell::set_opacity(h, if ui.get_settings_open() { 1.0 } else { self.config.opacity });
+            let opaque = ui.get_settings_open() || ui.get_name_open();
+            shell::set_opacity(h, if opaque { 1.0 } else { self.config.opacity });
         }
     }
     fn activate(&mut self, p: usize, index: usize) {
