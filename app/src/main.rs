@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod config;
 mod ctxmenu;
+mod finder;
 mod icons;
 mod listing;
 mod paste;
@@ -22,12 +23,14 @@ use windows::Win32::Foundation::HWND;
 slint::slint! { export { App, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns } from "src/ui.slint"; }
 
 type Positions = Arc<HashMap<Arc<PathBuf>, usize>>;
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Snapshot {
     dir: PathBuf,
     rows: Vec<Entry>,
     positions: Positions,
     volume: Option<Arc<listing::Volume>>,
+    /// All entries while a filter hides some, so changing the filter needs no disk read.
+    unfiltered: Option<Arc<Vec<Entry>>>,
 }
 impl Snapshot {
     fn new(dir: PathBuf, rows: Vec<Entry>, volume: Option<Arc<listing::Volume>>) -> Self {
@@ -42,6 +45,7 @@ impl Snapshot {
             rows,
             positions,
             volume,
+            unfiltered: None,
         }
     }
     /// The list shows a ".." row first whenever the folder has a parent.
@@ -198,6 +202,7 @@ impl RowsModel {
             readonly: entry.attributes & 0x1 != 0,
             tinted: tint.is_some(),
             tint: tint.unwrap_or_default(),
+            location: entry.location.clone().into(),
             name: entry.stem.clone().into(),
             ext: entry.ext.clone().into(),
             size: if entry.directory {
@@ -232,6 +237,8 @@ enum Mode {
     Sort,
     /// Refresh after paste: select the pasted items (and anything new), like Explorer.
     Pasted(Positions, Arc<Vec<PathBuf>>),
+    /// Back from search results to the folder as it was.
+    Return(Saved),
 }
 struct Job {
     generation: u64,
@@ -240,6 +247,7 @@ struct Job {
     column: usize,
     descending: bool,
     show_hidden: bool,
+    filter: Option<listing::Pattern>,
 }
 /// Rename / new file / new folder, waiting for a name in the name dialog.
 enum NameKind {
@@ -270,6 +278,8 @@ enum Reply {
     Opened(Result<(), String>),
     /// Folder chosen in the settings dialog for place `usize`.
     Picked(usize, PathBuf),
+    /// From the recursive search walk `u64` of a pane.
+    Finder(usize, u64, finder::Event),
 }
 
 thread_local! {
@@ -320,7 +330,8 @@ impl Worker {
                 };
                 let fresh = job.source.is_none();
                 let result = if let Some(source) = job.source {
-                    Ok((source.dir.clone(), source.rows.clone(), source.volume.clone()))
+                    let rows = source.unfiltered.as_ref().map_or_else(|| source.rows.clone(), |all| all.as_ref().clone());
+                    Ok((source.dir.clone(), rows, source.volume.clone()))
                 } else {
                     listing::read(&job.path, job.show_hidden)
                         .map(|(dir, rows)| {
@@ -330,18 +341,40 @@ impl Worker {
                 };
                 let result = result.map(|(dir, mut rows, volume)| {
                     listing::sort(&mut rows, job.column, job.descending);
-                    Arc::new(Snapshot::new(dir, rows, volume))
+                    let Some(filter) = &job.filter else {
+                        return Arc::new(Snapshot::new(dir, rows, volume));
+                    };
+                    let shown = rows.iter().filter(|e| filter.matches_entry(e)).cloned().collect();
+                    let mut snapshot = Snapshot::new(dir, shown, volume);
+                    snapshot.unfiltered = Some(Arc::new(rows));
+                    Arc::new(snapshot)
                 });
                 // Files with their own icon (exe, lnk, ...) are looked up after the list shows.
                 let per_file: Vec<(Arc<str>, Arc<PathBuf>)> = match &result {
                     Ok(snapshot) if fresh => snapshot
-                        .rows
+                        .unfiltered
+                        .as_deref()
+                        .unwrap_or(&snapshot.rows)
                         .iter()
                         .filter(|e| e.icon != e.type_icon && icons::get(&e.icon).is_none())
                         .map(|e| (e.icon.clone(), e.path.clone()))
                         .collect(),
                     _ => Vec::new(),
                 };
+                // Kind icons the Shell failed to give (it can be busy): asked again below.
+                let mut missing: Vec<(Arc<str>, bool)> = match &result {
+                    Ok(snapshot) => snapshot
+                        .unfiltered
+                        .as_deref()
+                        .unwrap_or(&snapshot.rows)
+                        .iter()
+                        .filter(|e| icons::get(&e.type_icon).is_none())
+                        .map(|e| (e.type_icon.clone(), e.directory))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                missing.sort();
+                missing.dedup();
                 if !post(Reply::Listing(pane, job.generation, result)) {
                     return;
                 }
@@ -354,6 +387,30 @@ impl Worker {
                         icons::ensure_path(key, &shell::shell_path(path));
                     }
                     if !post(Reply::Icons(pane)) {
+                        return;
+                    }
+                }
+                for _ in 0..3 {
+                    if missing.is_empty() {
+                        break;
+                    }
+                    // Waits on the mailbox, so a new request is not held up by the retry.
+                    let (lock, cv) = &*worker;
+                    let waiting = lock.lock().unwrap();
+                    let waiting = cv
+                        .wait_timeout_while(waiting, icons::RETRY, |m| m.pending.is_none() && !m.closed)
+                        .unwrap()
+                        .0;
+                    if waiting.pending.is_some() || waiting.closed {
+                        break;
+                    }
+                    drop(waiting);
+                    for (key, directory) in &missing {
+                        icons::ensure_type(key, *directory);
+                    }
+                    let before = missing.len();
+                    missing.retain(|(key, _)| icons::get(key).is_none());
+                    if missing.len() < before && !post(Reply::Icons(pane)) {
                         return;
                     }
                 }
@@ -388,6 +445,46 @@ struct Pane {
     descending: bool,
     prefix: String,
     typed: Instant,
+    /// Ctrl+Shift+F: the text and its pattern. Cleared when another folder opens.
+    filter: Option<(String, listing::Pattern)>,
+    /// Ctrl+Alt+Shift+F: the walk of the tree, kept while the search bar or results are open.
+    finder: Option<Session>,
+    /// Ctrl+Alt+Shift+F: the list shows search results instead of the folder.
+    found: Option<Found>,
+}
+struct Session {
+    id: u64,
+    finder: finder::Finder,
+    root: PathBuf,
+    /// Too many items to keep in memory: queries run on Enter only.
+    overflow: bool,
+}
+/// Search results of query `id`; they grow while the walk runs.
+struct Found {
+    id: u64,
+    text: String,
+    root: PathBuf,
+    /// The folder view to return to.
+    saved: Saved,
+    /// Results not in the list yet: they wait while a sort or filter job is in flight,
+    /// because that job's snapshot would replace them.
+    backlog: Vec<Entry>,
+    running: bool,
+    /// The query is answered: sort once the backlog is in. Some(hit the limit).
+    finished: Option<bool>,
+    /// The list still shows the previous query (or the folder) until the first results
+    /// come in, so typing does not blank it on every key.
+    replace: bool,
+}
+/// Typing in the recursive search bar: the query runs once the keys pause this long.
+const TYPING: Duration = Duration::from_millis(120);
+/// The find bar is open for `pane`.
+struct Finding {
+    pane: usize,
+    /// 1 search (Ctrl+F), 2 filter (Ctrl+Shift+F), 3 recursive search (Ctrl+Alt+Shift+F).
+    mode: i32,
+    /// Entry the incremental search starts from.
+    origin: usize,
 }
 struct Controller {
     ui: slint::Weak<App>,
@@ -409,6 +506,15 @@ struct Controller {
     menus: Option<ctxmenu::Menus>,
     /// Pane the open context menu belongs to.
     menu_pane: usize,
+    finding: Option<Finding>,
+    /// Last Ctrl+F text, for Ctrl+G and the next Ctrl+F.
+    search: String,
+    /// Last recursive search text and the id of the latest search.
+    tree_search: String,
+    searches: u64,
+    typing: slint::Timer,
+    /// `finder::INDEX_LIMIT`; the smoke test lowers it.
+    index_limit: usize,
     naming: Option<Naming>,
 }
 fn display(path: &Path) -> String {
@@ -584,6 +690,116 @@ impl Controller {
         let label = if ext.is_empty() { "拡張子なし".to_string() } else { format!(".{ext}") };
         self.message(format!("{label} を {count} 件選択"));
     }
+    /// The find bar for pane `p`, in `Finding::mode`.
+    fn open_find(&mut self, p: usize, mode: i32) {
+        let origin = self.panes[p].model.selection.borrow().current.unwrap_or(0);
+        let text = match mode {
+            2 => self.panes[p].filter.as_ref().map_or(String::new(), |(text, _)| text.clone()),
+            3 => self.panes[p].found.as_ref().map_or_else(|| self.tree_search.clone(), |f| f.text.clone()),
+            _ => self.search.clone(),
+        };
+        self.finding = Some(Finding { pane: p, mode, origin });
+        // The walk starts now, so the first keys find a good part of the tree read.
+        if mode == 3 {
+            self.session(p, false);
+        }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_find_mode(mode);
+            ui.set_find_text(text.into());
+            ui.invoke_focus_find();
+        }
+    }
+    /// Search moves the cursor while typing; the filter and the recursive search wait for Enter.
+    fn find_edited(&mut self, text: &str) {
+        if let Some(Finding { pane, mode: 3, .. }) = self.finding {
+            self.query_typed(pane, text);
+            return;
+        }
+        let Some(Finding { pane, mode: 1, origin }) = self.finding else { return };
+        let Some(pattern) = listing::Pattern::new(text) else { return };
+        self.search = text.trim().to_string();
+        let found = self.find(pane, &pattern, origin, true);
+        self.message(if found { String::new() } else { format!("見つかりません: {}", text.trim()) });
+    }
+    fn find_done(&mut self, ok: bool, text: &str) {
+        let Some(finding) = self.finding.take() else { return };
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_find_mode(0);
+            ui.invoke_focus_pane(finding.pane as i32);
+        }
+        if finding.mode == 3 {
+            // Enter shows the text at once; Esc goes back to the folder.
+            self.typing.stop();
+            if ok {
+                self.query(finding.pane, text);
+            } else {
+                self.close_found(finding.pane);
+            }
+            if self.panes[finding.pane].found.is_none() {
+                self.panes[finding.pane].finder = None;
+            }
+            return;
+        }
+        if !ok {
+            return;
+        }
+        if finding.mode == 2 {
+            self.set_filter(finding.pane, text);
+        } else if listing::Pattern::new(text).is_some() {
+            self.search = text.trim().to_string();
+            if self.ui.upgrade().is_some_and(|ui| ui.get_message().is_empty()) {
+                self.message(format!("検索: {}（Ctrl+G で次へ、Ctrl+Shift+G で前へ）", self.search));
+            }
+        }
+    }
+    /// Ctrl+G in the search bar: further typing then refines from the new match.
+    fn find_next_typing(&mut self, forward: bool) {
+        let Some(Finding { pane, mode: 1, .. }) = self.finding else { return };
+        self.find_next(pane, forward);
+        let current = self.panes[pane].model.selection.borrow().current;
+        if let (Some(finding), Some(current)) = (&mut self.finding, current) {
+            finding.origin = current;
+        }
+    }
+    /// Ctrl+G / Ctrl+Shift+G: the next / previous match of the last search.
+    fn find_next(&mut self, p: usize, forward: bool) {
+        let Some(pattern) = listing::Pattern::new(&self.search) else {
+            self.message("Ctrl+F で検索してください");
+            return;
+        };
+        let count = self.data(p).rows.len();
+        if count == 0 {
+            return;
+        }
+        let model = &self.panes[p].model;
+        let current = model.selection.borrow().current.filter(|_| model.special.get().is_none());
+        let start = match current {
+            Some(i) if forward => i + 1,
+            Some(i) => i + count - 1,
+            None if forward => 0,
+            None => count - 1,
+        };
+        if !self.find(p, &pattern, start % count, forward) {
+            self.message(format!("見つかりません: {}", self.search));
+        }
+    }
+    /// Puts the cursor on the first entry matching `pattern`, from `start` on (wrapping).
+    fn find(&mut self, p: usize, pattern: &listing::Pattern, start: usize, forward: bool) -> bool {
+        let data = self.data(p);
+        let count = data.rows.len();
+        let Some(index) = (0..count)
+            .map(|step| if forward { (start + step) % count } else { (start + count - step) % count })
+            .find(|&i| pattern.matches(&data.rows[i].name_fold))
+        else {
+            return false;
+        };
+        let model = &self.panes[p].model;
+        model.special.set(None);
+        model.selection.borrow_mut().select(&data.rows, index, false, false, false);
+        self.reveal(p, index);
+        self.repaint(p);
+        true
+    }
     /// Scrolls entry `index` into view (model rows are shifted by the ".." row; the first
     /// entry also reveals "..", so Home shows the top of the list).
     fn reveal(&self, p: usize, index: usize) {
@@ -650,6 +866,8 @@ impl Controller {
             volume: data.volume.as_ref().map_or(String::new(), |v| v.label.clone()).into(),
             free: data.volume.as_ref().map_or(String::new(), |v| listing::format_size(v.free)).into(),
             selected: if selected > 0 { selected.to_string() } else { String::new() }.into(),
+            filter: self.panes[p].filter.as_ref().map_or(String::new(), |(text, _)| text.clone()).into(),
+            search: self.panes[p].found.as_ref().map_or(String::new(), |f| f.text.clone()).into(),
             page: {
                 let (page, pages) = self.panes[p].model.pages();
                 if pages > 1 { format!("{page}/{pages}") } else { String::new() }.into()
@@ -675,6 +893,17 @@ impl Controller {
     fn navigate(&mut self, p: usize, path: PathBuf, mode: Mode) {
         let show_hidden = self.config.show_hidden[p];
         let pane = &mut self.panes[p];
+        // Any listing ends the search: its results are not a folder that can be re-read.
+        // Back to the searched folder keeps the walk for the search bar still open.
+        pane.found = None;
+        if !matches!(mode, Mode::Return(_)) {
+            pane.finder = None;
+        }
+        // Opening a folder drops the filter (see `complete`); refreshes keep it.
+        let filter = match mode {
+            Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_) => None,
+            _ => pane.filter.as_ref().map(|(_, f)| f.clone()),
+        };
         pane.generation += 1;
         pane.pending = Some(mode);
         pane.worker.submit(Job {
@@ -684,6 +913,7 @@ impl Controller {
             column: pane.column,
             descending: pane.descending,
             show_hidden,
+            filter,
         });
         self.busy(p, true);
     }
@@ -711,6 +941,12 @@ impl Controller {
                     self.navigate(p, saved.path.clone(), Mode::Forward);
                 }
             }
+            // In search results ".." and F5 go back to the folder and search again.
+            2 if self.panes[p].found.is_some() => self.close_found(p),
+            3 if self.panes[p].found.is_some() => {
+                let text = self.panes[p].found.as_ref().map(|f| f.text.clone()).unwrap_or_default();
+                self.search_tree(p, &text);
+            }
             2 => {
                 if let Some(parent) = data.dir.parent() {
                     self.navigate(
@@ -733,8 +969,6 @@ impl Controller {
         {
             return;
         }
-        let source = self.data(p);
-        let show_hidden = self.config.show_hidden[p];
         let pane = &mut self.panes[p];
         pane.descending = if pane.column == column {
             !pane.descending
@@ -742,20 +976,245 @@ impl Controller {
             false
         };
         pane.column = column;
+        let order = if pane.descending { "降順" } else { "昇順" };
+        let key = ["名前", "サイズ", "更新日時", "拡張子"][column.min(3)];
+        self.rearrange(p);
+        self.message(format!("{key}の{order}で並べ替え"));
+    }
+    /// Sorts and filters the entries already in memory again (no disk read).
+    fn rearrange(&mut self, p: usize) {
+        let source = self.data(p);
+        let show_hidden = self.config.show_hidden[p];
+        let pane = &mut self.panes[p];
         pane.generation += 1;
         pane.pending = Some(Mode::Sort);
         pane.worker.submit(Job {
             generation: pane.generation,
             path: source.dir.clone(),
             source: Some(source),
-            column,
+            column: pane.column,
             descending: pane.descending,
             show_hidden,
+            filter: pane.filter.as_ref().map(|(_, f)| f.clone()),
         });
-        let order = if pane.descending { "降順" } else { "昇順" };
-        let key = ["名前", "サイズ", "更新日時", "拡張子"][column.min(3)];
         self.busy(p, true);
-        self.message(format!("{key}の{order}で並べ替え"));
+    }
+    /// Ctrl+Shift+F (empty text: Esc) sets or clears the filter of pane `p`.
+    fn set_filter(&mut self, p: usize, text: &str) {
+        let filter = listing::Pattern::new(text).map(|f| (text.trim().to_string(), f));
+        if filter.is_none() && self.panes[p].filter.is_none() {
+            return;
+        }
+        self.message(match &filter {
+            Some((text, _)) => format!("フィルター: {text}（Esc で解除）"),
+            None => "フィルターを解除しました".to_string(),
+        });
+        self.panes[p].filter = filter;
+        match &self.panes[p].pending {
+            // A folder is loading: re-read it with the new filter once it is in.
+            Some(mode) if !matches!(mode, Mode::Sort) => self.panes[p].stale = true,
+            _ => self.rearrange(p),
+        }
+        self.repaint(p);
+    }
+    /// The walk below the folder shown (or below the root of the results), started when the
+    /// search bar opens and reused for every query until `fresh` asks to read the disk again.
+    fn session(&mut self, p: usize, fresh: bool) -> bool {
+        let root = match &self.panes[p].found {
+            Some(found) => found.root.clone(),
+            None => self.data(p).dir.clone(),
+        };
+        if root.as_os_str().is_empty() {
+            return false;
+        }
+        if !fresh && self.panes[p].finder.as_ref().is_some_and(|s| s.root == root) {
+            return true;
+        }
+        self.searches += 1;
+        let id = self.searches;
+        let (show_hidden, follow) = (self.config.show_hidden[p], self.config.search_links);
+        let finder = finder::Finder::start(root.clone(), show_hidden, follow, self.index_limit, move |event| {
+            post(Reply::Finder(p, id, event))
+        });
+        self.panes[p].finder = Some(Session { id, finder, root, overflow: false });
+        true
+    }
+    /// Walks the tree again (F5, Alt+Z) and searches `text`.
+    fn search_tree(&mut self, p: usize, text: &str) {
+        if !self.session(p, true) {
+            return;
+        }
+        if let Some(found) = &mut self.panes[p].found {
+            found.text.clear();
+        }
+        self.query(p, text);
+    }
+    /// Typing in the recursive search bar: the query waits for a pause in the keys.
+    /// Past the index limit every query reads the disk, so it waits for Enter.
+    fn query_typed(&mut self, p: usize, text: &str) {
+        if self.panes[p].finder.as_ref().is_some_and(|s| s.overflow) {
+            return;
+        }
+        let text = text.to_string();
+        self.typing.start(slint::TimerMode::SingleShot, TYPING, move || {
+            if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+                let mut c = c.borrow_mut();
+                if c.finding.as_ref().is_some_and(|f| f.pane == p && f.mode == 3) {
+                    c.query(p, &text);
+                }
+            }
+        });
+    }
+    /// Shows what matches `text` below the folder in pane `p`; empty text goes back.
+    fn query(&mut self, p: usize, text: &str) {
+        let text = text.trim();
+        let Some(pattern) = listing::Pattern::new(text) else {
+            self.close_found(p);
+            return;
+        };
+        if self.panes[p].found.as_ref().is_some_and(|f| f.text == text) {
+            return;
+        }
+        if self.panes[p].pending.as_ref().is_some_and(|m| !matches!(m, Mode::Sort)) {
+            self.message("フォルダーの読み込み中です");
+            return;
+        }
+        if !self.session(p, false) {
+            return;
+        }
+        self.searches += 1;
+        let id = self.searches;
+        self.tree_search = text.to_string();
+        let (dir, saved) = (self.data(p).dir.clone(), self.saved(p));
+        let pane = &mut self.panes[p];
+        if let Some(session) = &pane.finder {
+            session.finder.query(id, pattern);
+        }
+        // A sort in flight is of the old results: its reply is dropped by the new generation.
+        pane.generation += 1;
+        pane.pending = None;
+        pane.stale = false;
+        match &mut pane.found {
+            Some(found) => {
+                found.id = id;
+                found.text = text.to_string();
+                found.backlog.clear();
+                found.running = true;
+                found.finished = None;
+                found.replace = true;
+            }
+            None => {
+                pane.filter = None;
+                pane.found = Some(Found {
+                    id,
+                    text: text.to_string(),
+                    root: dir,
+                    saved,
+                    backlog: Vec::new(),
+                    running: true,
+                    finished: None,
+                    replace: true,
+                });
+            }
+        }
+        self.busy(p, true);
+        self.repaint(p);
+    }
+    /// Leaves the search results for the folder as it was (Esc, "..", Backspace).
+    fn close_found(&mut self, p: usize) {
+        // The walk stays while the bar is open: the next keys search it again.
+        if !self.finding.as_ref().is_some_and(|f| f.pane == p && f.mode == 3) {
+            self.panes[p].finder = None;
+        }
+        let Some(found) = self.panes[p].found.take() else { return };
+        if found.running {
+            self.message("検索を中止しました");
+        }
+        self.navigate(p, found.root, Mode::Return(found.saved));
+    }
+    fn found(&mut self, p: usize, id: u64, batch: Vec<Entry>, done: Option<bool>) {
+        let pane = &mut self.panes[p];
+        let Some(found) = pane.found.as_mut().filter(|f| f.id == id) else { return };
+        found.backlog.extend(batch);
+        if done.is_some() {
+            found.running = false;
+            found.finished = done;
+        }
+        if pane.pending.is_none() {
+            self.flush_found(p);
+        }
+    }
+    /// Adds the results that came in to the list; once the query is answered, sorts them.
+    fn flush_found(&mut self, p: usize) {
+        let pane = &mut self.panes[p];
+        let Some(found) = pane.found.as_mut() else { return };
+        let batch = std::mem::take(&mut found.backlog);
+        let finished = found.finished.take();
+        let (text, running, root) = (found.text.clone(), found.running, found.root.clone());
+        let replace = found.replace && (!batch.is_empty() || finished.is_some());
+        if replace {
+            found.replace = false;
+        }
+        let model = &pane.model;
+        let filter = pane.filter.as_ref().map(|(_, f)| f);
+        if replace {
+            let (rows, unfiltered) = match filter {
+                Some(filter) => (batch.iter().filter(|e| filter.matches_entry(e)).cloned().collect(), Some(Arc::new(batch))),
+                None => (batch, None),
+            };
+            let volume = model.data.borrow().volume.clone();
+            let mut snapshot = Snapshot::new(root, rows, volume);
+            snapshot.unfiltered = unfiltered;
+            let mut selection = Selection::default();
+            selection.current = (!snapshot.rows.is_empty()).then_some(0);
+            model.special.set((snapshot.rows.is_empty() && snapshot.offset() == 1).then_some(Special::Parent));
+            *model.selection.borrow_mut() = selection;
+            *model.data.borrow_mut() = Arc::new(snapshot);
+            model.page_start.set(0);
+            model.notify.reset();
+        } else if !batch.is_empty() {
+            let first = {
+                let mut data = model.data.borrow_mut();
+                let snapshot = Arc::make_mut(&mut data);
+                let shown: Vec<Entry> = match (&mut snapshot.unfiltered, filter) {
+                    (Some(all), Some(filter)) => {
+                        let shown = batch.iter().filter(|e| filter.matches_entry(e)).cloned().collect();
+                        Arc::make_mut(all).extend(batch);
+                        shown
+                    }
+                    _ => batch,
+                };
+                let start = snapshot.rows.len();
+                let positions = Arc::make_mut(&mut snapshot.positions);
+                for (i, e) in shown.iter().enumerate() {
+                    positions.insert(e.path.clone(), start + i);
+                }
+                snapshot.rows.extend(shown);
+                if model.selection.borrow().current.is_none() && !snapshot.rows.is_empty() {
+                    model.selection.borrow_mut().current = Some(0);
+                    model.special.set(None);
+                }
+                start + snapshot.offset()
+            };
+            // Rows past the page shown change nothing on screen (a reset would lose clicks).
+            if first < model.page_start.get() + model.page_size.get().max(1) {
+                model.notify.reset();
+            }
+        }
+        match finished {
+            Some(limited) => {
+                let count = self.data(p).rows.len();
+                self.message(if limited {
+                    format!("検索: {text} … {} 件で打ち切りました（Esc で戻る）", finder::RESULT_LIMIT)
+                } else {
+                    format!("検索: {text} … {count} 件（Esc で戻る）")
+                });
+                // The final sort; its reply ends the busy state.
+                self.rearrange(p);
+            }
+            None => self.busy(p, running || self.panes[p].pending.is_some()),
+        }
+        self.repaint(p);
     }
     /// Breadcrumb click: open that ancestor with the folder we came from focused.
     fn crumb(&mut self, p: usize, i: usize) {
@@ -795,6 +1254,7 @@ impl Controller {
             ui.set_settings_open(true);
             ui.invoke_focus_settings();
         }
+        self.apply_opacity();
     }
     /// Rebuilds the rows, so edited fields show new values (browse / reset).
     fn settings_rows(&self) {
@@ -938,7 +1398,6 @@ impl Controller {
             if let Some(ui) = self.ui.upgrade() {
                 self.config.opacity = ui.get_settings_opacity() as f32 / 100.0;
             }
-            self.apply_opacity();
             self.config.colors = self.settings_colors.clone();
             self.config.extension_colors = self.settings_ext.clone();
             (self.config.font_family, self.config.font_size) = self.settings_font.clone();
@@ -950,6 +1409,7 @@ impl Controller {
             ui.set_settings_open(false);
             ui.invoke_focus_pane(self.active as i32);
         }
+        self.apply_opacity();
     }
     /// A splitter was released: keep every layout's positions.
     fn layout_committed(&mut self) {
@@ -1048,8 +1508,23 @@ impl Controller {
     fn handle(&mut self, reply: Reply) {
         match reply {
             Reply::Listing(p, generation, result) => self.complete(p, generation, result),
+            Reply::Finder(p, session, event) => {
+                let Some(current) = self.panes[p].finder.as_mut().filter(|s| s.id == session) else { return };
+                match event {
+                    finder::Event::Found(id, batch, done) => self.found(p, id, batch, done),
+                    finder::Event::Overflow => {
+                        current.overflow = true;
+                        self.message(format!(
+                            "{} 件を超えるため入力中の絞り込みを止めました。Enter で検索します",
+                            self.index_limit
+                        ));
+                    }
+                    finder::Event::Icons => self.repaint(p),
+                }
+            }
             Reply::Changed(p, dir) => {
-                if self.data(p).dir != dir {
+                // Search results stay as found; F5 searches again.
+                if self.data(p).dir != dir || self.panes[p].found.is_some() {
                     return;
                 }
                 if self.panes[p].pending.is_some() {
@@ -1076,7 +1551,7 @@ impl Controller {
                     }
                     Err(e) => self.message(format!("貼り付けできません: {e}")),
                 }
-                if self.data(p).dir == dir && self.panes[p].pending.is_none() {
+                if self.data(p).dir == dir && self.panes[p].pending.is_none() && self.panes[p].found.is_none() {
                     self.navigate(p, dir, Mode::Pasted(before, Arc::new(targets)));
                 }
             }
@@ -1108,7 +1583,7 @@ impl Controller {
             Reply::Made(p, dir, before, result) => match result {
                 Ok(path) => {
                     self.message(format!("完了: {}", display(&path)));
-                    if self.data(p).dir == dir && self.panes[p].pending.is_none() {
+                    if self.data(p).dir == dir && self.panes[p].pending.is_none() && self.panes[p].found.is_none() {
                         self.navigate(p, dir, Mode::Pasted(before, Arc::new(vec![path])));
                     }
                 }
@@ -1132,7 +1607,7 @@ impl Controller {
             return;
         }
         let mode = self.panes[p].pending.take().unwrap_or(Mode::Refresh);
-        let focus_list = matches!(&mode, Mode::New(_) | Mode::Back | Mode::Forward);
+        let focus_list = matches!(&mode, Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_));
         self.busy(p, false);
         let data = match result {
             Ok(data) => data,
@@ -1141,6 +1616,10 @@ impl Controller {
                 return;
             }
         };
+        if focus_list {
+            // The job for an opened folder ran without the filter.
+            self.panes[p].filter = None;
+        }
         let old = self.saved(p);
         let old_current = self.panes[p].model.selection.borrow().current;
         let changed = old.path != data.dir;
@@ -1156,6 +1635,7 @@ impl Controller {
                 saved
             }
             Mode::Refresh | Mode::Sort => Some(old.clone()),
+            Mode::Return(saved) => Some(saved),
             Mode::Pasted(before, targets) => {
                 let added: Vec<_> = data
                     .rows
@@ -1277,6 +1757,10 @@ impl Controller {
         if stale {
             self.navigate(p, data.dir.clone(), Mode::Refresh);
         }
+        // Results that came in during a sort or filter of the search results.
+        if self.panes[p].found.is_some() {
+            self.flush_found(p);
+        }
     }
     /// `row` is a model row. kind: 0 press, 1 release, 2 double click, 3 right click.
     fn pointer(&mut self, p: usize, row: usize, ctrl: bool, shift: bool, kind: i32) {
@@ -1375,7 +1859,21 @@ impl Controller {
         if data.dir.as_os_str().is_empty() {
             return;
         }
-        let mut taken: HashSet<String> = data.rows.iter().map(|e| e.name_fold.clone()).collect();
+        // Search results come from many folders: rename only, in the item's own folder.
+        let dir = match &kind {
+            NameKind::Rename(path) => path.parent().map_or_else(|| data.dir.clone(), Path::to_path_buf),
+            _ if self.panes[p].found.is_some() => {
+                self.message("検索結果では作成できません（Esc で戻る）");
+                return;
+            }
+            _ => data.dir.clone(),
+        };
+        let mut taken: HashSet<String> = data
+            .rows
+            .iter()
+            .filter(|e| e.path.parent() == Some(dir.as_path()))
+            .map(|e| e.name_fold.clone())
+            .collect();
         let unique = |name: &str, folder: bool, taken: &HashSet<String>| {
             if taken.contains(&name.to_lowercase()) {
                 paste::auto_name(name, folder, taken)
@@ -1395,7 +1893,7 @@ impl Controller {
         let stem = paste::stem_len(&initial, folder);
         self.naming = Some(Naming {
             pane: p,
-            dir: data.dir.clone(),
+            dir,
             kind,
             taken,
             before: data.positions.clone(),
@@ -1485,10 +1983,33 @@ impl Controller {
         let side = if p == 0 { "左" } else { "右" };
         let state = if self.config.show_hidden[p] { "表示" } else { "非表示" };
         self.message(format!("隠しファイルを{state}（{side}ペイン）"));
+        if let Some(text) = self.panes[p].found.as_ref().map(|f| f.text.clone()) {
+            self.search_tree(p, &text);
+            return;
+        }
+        self.panes[p].finder = None;
         let dir = self.data(p).dir.clone();
         if !dir.as_os_str().is_empty() {
             self.navigate(p, dir, Mode::Refresh);
         }
+    }
+    /// Edit > 検索でリンク先も辿る (saved); results on screen keep their walk until F5.
+    fn toggle_search_links(&mut self) {
+        self.config.search_links = !self.config.search_links;
+        self.save_config();
+        for pane in &mut self.panes {
+            if pane.found.is_none() {
+                pane.finder = None;
+            }
+        }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_search_links(self.config.search_links);
+        }
+        self.message(if self.config.search_links {
+            "検索でジャンクションとシンボリックリンクの先も辿ります"
+        } else {
+            "検索でジャンクションとシンボリックリンクの先は辿りません"
+        });
     }
     /// Path bar > パスのコピー.
     fn copy_path(&mut self, p: usize) {
@@ -1504,9 +2025,11 @@ impl Controller {
             Err(e) => self.message(e),
         }
     }
+    /// The settings dialog is always shown opaque; the configured opacity returns when it closes.
     fn apply_opacity(&self) {
-        if let Some(h) = self.ui.upgrade().and_then(|ui| hwnd(&ui)) {
-            shell::set_opacity(h, self.config.opacity);
+        let Some(ui) = self.ui.upgrade() else { return };
+        if let Some(h) = hwnd(&ui) {
+            shell::set_opacity(h, if ui.get_settings_open() { 1.0 } else { self.config.opacity });
         }
     }
     fn activate(&mut self, p: usize, index: usize) {
@@ -1551,6 +2074,10 @@ impl Controller {
             return;
         }
         if !self.asking.is_empty() {
+            return;
+        }
+        if self.panes[p].found.is_some() {
+            self.message("検索結果には貼り付けできません（Esc で戻る）");
             return;
         }
         let dir = data.dir.clone();
@@ -1684,6 +2211,20 @@ impl Controller {
                 return true;
             }
         }
+        // Ctrl+F search, Ctrl+Shift+F filter, Ctrl+Alt+Shift+F search below this folder,
+        // Ctrl+G / Ctrl+Shift+G next / previous match.
+        if ctrl && alt && shift && letter == "f" {
+            self.open_find(p, 3);
+            return true;
+        }
+        if ctrl && !alt && letter == "f" {
+            self.open_find(p, if shift { 2 } else { 1 });
+            return true;
+        }
+        if ctrl && !alt && letter == "g" {
+            self.find_next(p, !shift);
+            return true;
+        }
         if ctrl && !alt {
             match letter.as_str() {
                 "l" => {
@@ -1749,6 +2290,14 @@ impl Controller {
             return true;
         }
         if is(Key::Escape) {
+            if self.panes[p].filter.is_some() {
+                self.set_filter(p, "");
+                return true;
+            }
+            if self.panes[p].found.is_some() {
+                self.close_found(p);
+                return true;
+            }
             self.panes[p].model.selection.borrow_mut().clear();
             self.panes[p].prefix.clear();
             self.repaint(p);
@@ -2036,6 +2585,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         descending: false,
         prefix: String::new(),
         typed: Instant::now(),
+        filter: None,
+        finder: None,
+        found: None,
     });
     ui.set_p0_rows(ModelRc::from(panes[0].model.clone()));
     ui.set_p1_rows(ModelRc::from(panes[1].model.clone()));
@@ -2058,6 +2610,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         menu_pane: 0,
         naming: None,
+        finding: None,
+        search: String::new(),
+        tree_search: String::new(),
+        searches: 0,
+        typing: slint::Timer::default(),
+        index_limit: finder::INDEX_LIMIT,
     }));
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
     {
@@ -2193,9 +2751,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 11 => c.set_layout(3, false),
                 12 => c.set_layout(4, false),
                 13 => c.set_layout(3, true),
+                30 => c.open_find(p, 1),
+                31 => c.find_next(p, true),
+                32 => c.open_find(p, 2),
+                33 => c.set_filter(p, ""),
+                34 => c.open_find(p, 3),
+                35 => c.toggle_search_links(),
                 _ => {}
             }
         });
+    }
+    {
+        let c = controller.clone();
+        ui.on_find_edited(move |text| c.borrow_mut().find_edited(&text));
+    }
+    {
+        let c = controller.clone();
+        ui.on_find_done(move |ok, text| c.borrow_mut().find_done(ok, &text));
+    }
+    {
+        let c = controller.clone();
+        ui.on_find_next(move |forward| c.borrow_mut().find_next_typing(forward));
     }
     {
         let c = controller.clone();
@@ -2268,6 +2844,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(h) = handle {
                 shell::revoke_drop_target(h);
                 shell::dark_title_bar(h);
+                shell::window_icon(h);
                 if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
                     c.borrow().apply_opacity();
                 }
@@ -2290,6 +2867,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_pane_count(c.config.panes as i32);
         ui.set_three_columns(c.config.three_columns);
         ui.set_active_hidden(c.config.show_hidden[0]);
+        ui.set_search_links(c.config.search_links);
         c.sync_columns();
     }
     ui.invoke_focus_pane(0);

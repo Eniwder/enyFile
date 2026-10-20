@@ -52,6 +52,9 @@ pub struct Config {
     pub extension_colors: Vec<(String, slint::Color)>,
     pub font_family: String,
     pub font_size: f32,
+    /// Recursive search enters junctions and symbolic links to folders (off: cycles and
+    /// unexpectedly huge trees such as a link to a drive root are left alone).
+    pub search_links: bool,
 }
 fn default_extensions() -> Vec<(String, slint::Color)> {
     theme::EXTENSIONS
@@ -155,6 +158,7 @@ impl Config {
             .unwrap_or(theme::DEFAULT_FONT)
             .to_string();
         let font_size = raw["font"]["size"].as_f64().map_or(theme::DEFAULT_SIZE, |s| s as f32).clamp(8.0, 32.0);
+        let search_links = raw["search_links"].as_bool().unwrap_or(false);
         Self {
             file,
             raw,
@@ -174,6 +178,7 @@ impl Config {
             extension_colors,
             font_family,
             font_size,
+            search_links,
         }
     }
     pub fn default_colors() -> Vec<slint::Color> {
@@ -232,6 +237,7 @@ impl Config {
             );
         }
         self.raw["font"] = json!({ "family": self.font_family, "size": self.font_size });
+        self.raw["search_links"] = json!(self.search_links);
         self.raw["bookmarks"] = Value::Array(
             self.bookmarks
                 .iter()

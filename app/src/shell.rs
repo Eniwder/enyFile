@@ -465,6 +465,29 @@ pub fn dark_title_bar(hwnd: HWND) {
     };
 }
 
+/// Slint only sets the small icon (scaled from a PNG); use the exe's multi-size icon
+/// resource (build.rs) for both so the taskbar and Alt+Tab get crisp sizes too.
+pub fn window_icon(hwnd: HWND) {
+    use windows::Win32::{System::LibraryLoader::GetModuleHandleW, UI::WindowsAndMessaging::*};
+    let Ok(module) = (unsafe { GetModuleHandleW(None) }) else { return };
+    for (kind, cx, cy) in [(ICON_BIG, SM_CXICON, SM_CYICON), (ICON_SMALL, SM_CXSMICON, SM_CYSMICON)] {
+        let icon = unsafe {
+            LoadImageW(
+                Some(module.into()),
+                PCWSTR(1 as _),
+                IMAGE_ICON,
+                GetSystemMetrics(cx),
+                GetSystemMetrics(cy),
+                LR_DEFAULTCOLOR,
+            )
+        };
+        // Leaving the handle alive is fine: the window lives until the process exits.
+        if let Ok(icon) = icon {
+            unsafe { SendMessageW(hwnd, WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(icon.0 as isize))) };
+        }
+    }
+}
+
 struct Event(HANDLE);
 unsafe impl Send for Event {}
 unsafe impl Sync for Event {}

@@ -44,6 +44,9 @@ enyfile.exe "D:\Work" "E:\Backup" # 左右のフォルダーを指定
 | Enter / Backspace | 開く / 親フォルダーへ |
 | Tab | ペインの切り替え |
 | F2 | リネーム |
+| Ctrl+F / Ctrl+G | 検索 / 次を検索（`*` `?` 可） |
+| Ctrl+Shift+F / Esc | フィルター / 解除 |
+| Ctrl+Alt+Shift+F | フォルダー以下を検索（入力しながら絞り込み、Esc で戻る） |
 
 並べ替え、ペイン数の切り替え、設定画面など、そのほかの操作と画面の説明は [app/README.md](app/README.md) を参照してください。
 

@@ -7,6 +7,7 @@ use std::{
     os::windows::ffi::OsStrExt,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 use windows::{
     Win32::{
@@ -19,29 +20,33 @@ use windows::{
 
 pub type Pixels = SharedPixelBuffer<Rgba8Pixel>;
 
-/// Icon pixels by key, with the number of failed lookups (retried a few times: a lookup can
-/// fail while the Shell is busy, and a cached failure would leave a generic icon for good).
-fn store() -> &'static Mutex<HashMap<Arc<str>, (Option<Pixels>, u8)>> {
-    static STORE: OnceLock<Mutex<HashMap<Arc<str>, (Option<Pixels>, u8)>>> = OnceLock::new();
+/// Icon pixels by key, with the failed lookups so far and when the last one was made.
+/// A lookup can fail while the Shell is busy; a cached failure would leave a generic icon
+/// for good, so failures are retried, spaced out so that one folder full of the same kind
+/// (hundreds of .mp4) does not use up every attempt at once.
+type Lookup = (Option<Pixels>, u8, Instant);
+fn store() -> &'static Mutex<HashMap<Arc<str>, Lookup>> {
+    static STORE: OnceLock<Mutex<HashMap<Arc<str>, Lookup>>> = OnceLock::new();
     STORE.get_or_init(Default::default)
 }
-const ATTEMPTS: u8 = 3;
+const ATTEMPTS: u8 = 8;
+pub const RETRY: Duration = Duration::from_millis(700);
 pub fn get(key: &str) -> Option<Pixels> {
-    store().lock().unwrap().get(key).and_then(|(pixels, _)| pixels.clone())
+    store().lock().unwrap().get(key).and_then(|(pixels, _, _)| pixels.clone())
 }
-/// True when `key` has pixels or has failed too often to try again.
+/// True when `key` has pixels, failed too often, or failed a moment ago.
 fn settled(key: &str) -> bool {
     store()
         .lock()
         .unwrap()
         .get(key)
-        .is_some_and(|(pixels, failures)| pixels.is_some() || *failures >= ATTEMPTS)
+        .is_some_and(|(pixels, failures, last)| pixels.is_some() || *failures >= ATTEMPTS || last.elapsed() < RETRY)
 }
 fn record(key: &Arc<str>, pixels: Option<Pixels>) {
     let mut store = store().lock().unwrap();
-    let failures = store.get(key).map_or(0, |(_, f)| *f);
+    let failures = store.get(key).map_or(0, |(_, f, _)| *f);
     let failures = if pixels.is_some() { failures } else { failures + 1 };
-    store.insert(key.clone(), (pixels, failures));
+    store.insert(key.clone(), (pixels, failures, Instant::now()));
 }
 
 /// Files whose icon is stored in the file itself: these need a per-file lookup.

@@ -1,0 +1,2 @@
+// Explorer/taskbar pick the lowest icon ID as the exe's icon.
+1 ICON "icon.ico"

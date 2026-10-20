@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    ffi::OsString,
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
@@ -18,6 +19,8 @@ pub struct Entry {
     pub path: Arc<PathBuf>,
     pub name: String,
     pub name_fold: String,
+    /// Recursive search: the folder relative to the search root, e.g. "src\ui\"; empty otherwise.
+    pub location: String,
     /// Display split: "name" + "ext" (folders and dot-files have no extension).
     pub stem: String,
     pub ext: String,
@@ -41,46 +44,73 @@ impl Entry {
 /// Call on a thread with COM initialized (type names and icons come from the Shell).
 pub fn read(path: &Path, show_hidden: bool) -> Result<(PathBuf, Vec<Entry>), String> {
     let canonical = fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let rows = entries(&canonical, show_hidden)?;
+    Ok((canonical, rows))
+}
+/// What a folder read gives for one entry, before the Shell is asked for its type and icon.
+pub struct Raw {
+    pub name: OsString,
+    pub size: u64,
+    pub modified: SystemTime,
+    pub attributes: u32,
+    pub directory: bool,
+}
+/// The entries of `dir` without type names or icons (cheap enough to keep a whole tree).
+pub fn scan(dir: &Path, show_hidden: bool) -> Result<Vec<Raw>, String> {
     let mut rows = Vec::new();
-    for entry in fs::read_dir(&canonical).map_err(|e| e.to_string())? {
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
         // An entry can vanish between enumeration and stat; skip it rather than fail the folder.
         let Ok(entry) = entry else { continue };
         let Ok(meta) = entry.metadata() else { continue };
         if !show_hidden && meta.file_attributes() & 0x2 != 0 {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let wide_name = entry.file_name().encode_wide().chain(Some(0)).collect();
-        let directory = meta.is_dir();
-        let (stem, ext) = match name.rfind('.') {
-            Some(dot) if dot > 0 && !directory => (name[..dot].to_string(), name[dot + 1..].to_string()),
-            _ => (name.clone(), String::new()),
-        };
-        let type_icon = crate::icons::type_key(&ext, directory);
-        crate::icons::ensure_type(&type_icon, directory);
-        let path = Arc::new(entry.path());
-        let icon = if !directory && crate::icons::per_file(&ext) {
-            path.to_string_lossy().as_ref().into()
-        } else {
-            type_icon.clone()
-        };
-        rows.push(Entry {
-            path,
-            icon,
-            type_icon,
-            name_fold: name.to_lowercase(),
-            type_name: type_name(&ext, directory),
-            stem,
-            ext,
-            name,
+        rows.push(Raw {
+            name: entry.file_name(),
             size: meta.len(),
             modified: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
             attributes: meta.file_attributes(),
-            directory,
-            wide_name,
+            directory: meta.is_dir(),
         });
     }
-    Ok((canonical, rows))
+    Ok(rows)
+}
+fn entries(dir: &Path, show_hidden: bool) -> Result<Vec<Entry>, String> {
+    Ok(scan(dir, show_hidden)?.into_iter().map(|raw| entry(dir, raw)).collect())
+}
+/// The list entry for `raw` in `dir`. Call on a thread with COM initialized.
+pub fn entry(dir: &Path, raw: Raw) -> Entry {
+    let name = raw.name.to_string_lossy().into_owned();
+    let wide_name = raw.name.encode_wide().chain(Some(0)).collect();
+    let directory = raw.directory;
+    let (stem, ext) = match name.rfind('.') {
+        Some(dot) if dot > 0 && !directory => (name[..dot].to_string(), name[dot + 1..].to_string()),
+        _ => (name.clone(), String::new()),
+    };
+    let type_icon = crate::icons::type_key(&ext, directory);
+    crate::icons::ensure_type(&type_icon, directory);
+    let path = Arc::new(dir.join(&raw.name));
+    let icon = if !directory && crate::icons::per_file(&ext) {
+        path.to_string_lossy().as_ref().into()
+    } else {
+        type_icon.clone()
+    };
+    Entry {
+        path,
+        icon,
+        type_icon,
+        name_fold: name.to_lowercase(),
+        location: String::new(),
+        type_name: type_name(&ext, directory),
+        stem,
+        ext,
+        name,
+        size: raw.size,
+        modified: raw.modified,
+        attributes: raw.attributes,
+        directory,
+        wide_name,
+    }
 }
 
 /// Type names by extension, looked up once (by extension only, no disk access).
@@ -252,6 +282,76 @@ pub fn sort(rows: &mut [Entry], column: usize, descending: bool) {
     });
 }
 
+/// Search / filter text: `*` and `?` wildcards, several patterns separated by ';'.
+/// A pattern without wildcards matches anywhere in the name; case is ignored.
+/// A pattern with `\` or `/` matches the path below the search root instead:
+/// "src/*.rs" in any src folder, "\src\*.rs" in the one right under the root.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pattern(Vec<(Vec<char>, bool)>);
+impl Pattern {
+    pub fn new(text: &str) -> Option<Self> {
+        let parts: Vec<(Vec<char>, bool)> = text
+            .split(';')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                let p = p.to_lowercase().replace('/', "\\");
+                let p = if p.contains(['*', '?']) { p } else { format!("*{p}*") };
+                let path = p.contains('\\');
+                let p = if path && !p.starts_with(['*', '\\']) { format!("*\\{p}") } else { p };
+                (p.chars().collect(), path)
+            })
+            .collect();
+        (!parts.is_empty()).then_some(Self(parts))
+    }
+    /// `name_fold`: the lower-cased name (`Entry::name_fold`) of an entry right in the folder.
+    pub fn matches(&self, name_fold: &str) -> bool {
+        self.matches_in("", name_fold)
+    }
+    /// Like `matches`, with the entry's location for path patterns.
+    pub fn matches_entry(&self, entry: &Entry) -> bool {
+        self.matches_in(&entry.location.to_lowercase(), &entry.name_fold)
+    }
+    /// `location_fold`: the lower-cased folder below the search root ("src\ui\" or "").
+    pub fn matches_in(&self, location_fold: &str, name_fold: &str) -> bool {
+        let name: Vec<char> = name_fold.chars().collect();
+        let mut path = None;
+        self.0.iter().any(|(p, is_path)| {
+            if !is_path {
+                return wildcard(p, &name);
+            }
+            let path = path.get_or_insert_with(|| format!("\\{location_fold}{name_fold}").chars().collect::<Vec<_>>());
+            wildcard(p, path)
+        })
+    }
+}
+/// Greedy matching that backtracks to the last `*` only, so it stays linear-ish.
+fn wildcard(pattern: &[char], name: &[char]) -> bool {
+    let (mut p, mut n) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while n < name.len() {
+        match pattern.get(p) {
+            Some('*') => {
+                star = Some((p, n));
+                p += 1;
+            }
+            Some(&c) if c == '?' || c == name[n] => {
+                p += 1;
+                n += 1;
+            }
+            _ => match star {
+                Some((sp, sn)) => {
+                    p = sp + 1;
+                    n = sn + 1;
+                    star = Some((sp, sn + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
+}
+
 /// `all` + exceptions makes Ctrl+A independent of the number of directory entries.
 #[derive(Clone, Default, Debug)]
 pub struct Selection {
@@ -375,6 +475,7 @@ mod tests {
                 path: Arc::new(PathBuf::from(format!("C:/demo/{i}"))),
                 name: i.to_string(),
                 name_fold: i.to_string(),
+                location: String::new(),
                 stem: i.to_string(),
                 ext: String::new(),
                 size: i,
@@ -438,6 +539,39 @@ mod tests {
         assert_eq!(format_date(at(19), today), ("今日".into(), "09:05".into()));
         assert_eq!(format_date(at(15), today).0, "4 日以前");
         assert_eq!(format_date(at(1), today).0, "2026-10-01");
+    }
+    #[test]
+    fn wildcard_patterns() {
+        let m = |p: &str, n: &str| Pattern::new(p).unwrap().matches(&n.to_lowercase());
+        assert!(m("*.txt", "Readme.TXT"));
+        assert!(!m("*.txt", "notes.txt.bak"));
+        assert!(m("read", "README.md"));
+        assert!(m("r?ad*", "readme.md"));
+        assert!(!m("r?ad", "readme.md"));
+        assert!(m("*.jpg; *.png", "a.png"));
+        assert!(m("a*b*c", "aXXbYYbZc"));
+        assert!(!m("a*b*c", "aXXbYY"));
+        assert!(m("*", ""));
+        assert!(Pattern::new(" ; ").is_none());
+    }
+    #[test]
+    fn path_patterns() {
+        let m = |p: &str, location: &str, name: &str| {
+            let mut entry = rows()[0].clone();
+            entry.location = location.into();
+            entry.name_fold = name.to_lowercase();
+            Pattern::new(p).unwrap().matches_entry(&entry)
+        };
+        assert!(m("src/*.rs", r"app\src\", "main.rs"));
+        assert!(m(r"src\*.rs", r"src\", "main.rs"));
+        assert!(!m("src/*.rs", r"app\", "src.rs"));
+        assert!(m(r"\src\*.rs", r"src\", "main.rs"));
+        assert!(!m(r"\src\*.rs", r"app\src\", "main.rs"));
+        assert!(m("SRC/main", r"App\Src\", "Main.rs"));
+        assert!(m("main", r"app\src\", "main.rs"));
+        assert!(!m("app", r"app\src\", "main.rs"));
+        assert!(m("/main.rs", "", "main.rs"));
+        assert!(m("main; src/x", r"src\", "x.txt"));
     }
     #[test]
     fn select_all_does_not_select_later_files() {

@@ -39,6 +39,20 @@ fn idle(c: &Rc<RefCell<Controller>>) -> bool {
             .iter()
             .all(|p| p.pending.is_none() && !p.stale && !p.model.data.borrow().dir.as_os_str().is_empty())
 }
+/// The recursive search of pane 0 for `text` is answered and its results are sorted in.
+fn searched(c: &Rc<RefCell<Controller>>, text: &str) -> bool {
+    idle(c)
+        && c.borrow().panes[0]
+            .found
+            .as_ref()
+            .is_some_and(|f| f.text == text && !f.running && f.finished.is_none() && f.backlog.is_empty() && !f.replace)
+}
+/// Search results of pane 0 as "folder\name", in name order (the pane may sort descending).
+fn found(c: &Rc<RefCell<Controller>>) -> Vec<String> {
+    let mut found: Vec<String> = c.borrow().data(0).rows.iter().map(|e| format!("{}{}", e.location, e.name)).collect();
+    found.sort();
+    found
+}
 fn click(ui: &App, p: i32, i: i32, ctrl: bool) {
     ui.invoke_pointer(p, i, ctrl, false, 0);
     ui.invoke_pointer(p, i, false, false, 1);
@@ -86,6 +100,11 @@ struct State {
     hold: Duration,
     seen: Option<Instant>,
     held: Option<Instant>,
+    /// Menu bar hover sweep: pointer x and the menus seen open along the way.
+    sweep: f32,
+    menus: Vec<i32>,
+    /// The recursive search walk started with the search bar.
+    session: u64,
 }
 impl State {
     fn spawn(&mut self, args: &[&std::ffi::OsStr]) -> Result<(), String> {
@@ -120,6 +139,9 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
         ),
         seen: None,
         held: None,
+        sweep: 0.0,
+        menus: Vec::new(),
+        session: 0,
     });
     let finish = move |state: &mut State, error: Option<String>| {
         if let Some(mut probe) = state.probe.take() {
@@ -698,7 +720,244 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(saved["panes"] == 2, "pane count saved")?;
                     s.pass("column switches; 3 and 4 pane layouts with Tab");
                 }
-                39 => return Err("done".into()),
+                39 => {
+                    // Ctrl+F: incremental wildcard search in the 150-file folder; Ctrl+G next.
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    let current = || {
+                        let c = c.borrow();
+                        let data = c.data(0);
+                        let i = c.panes[0].model.selection.borrow().current;
+                        i.and_then(|i| data.rows.get(i)).map(|e| e.name.clone()).unwrap_or_default()
+                    };
+                    let key = |letter: &str, shift: bool| {
+                        let mut e = slint::language::KeyEvent::default();
+                        e.text = letter.into();
+                        e.modifiers.control = true;
+                        e.modifiers.shift = shift;
+                        ui.invoke_key_event(0, e);
+                    };
+                    {
+                        let mut c = c.borrow_mut();
+                        if c.panes[0].column != 0 || c.panes[0].descending {
+                            c.panes[0].column = 0;
+                            c.panes[0].descending = false;
+                            c.rearrange(0);
+                            return Ok(false);
+                        }
+                    }
+                    fkey(&ui, 0, slint::platform::Key::Home);
+                    fkey(&ui, 0, slint::platform::Key::DownArrow);
+                    expect(current() == "file001.txt", "cursor on the first file")?;
+                    // Through the window's key path: typing in the bar, Ctrl+G there, Esc.
+                    use slint::platform::WindowEvent;
+                    let press = |text: slint::SharedString| {
+                        ui.window().dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+                        ui.window().dispatch_event(WindowEvent::KeyReleased { text });
+                    };
+                    ui.invoke_focus_pane(0);
+                    window_ctrl_key(&ui, "f");
+                    expect(ui.get_find_mode() == 1, "Ctrl+F opens the search bar")?;
+                    for ch in "FILE12?.TXT".chars() {
+                        press(ch.to_string().into());
+                    }
+                    expect(current() == "file120.txt", "search moves the cursor while typing")?;
+                    window_ctrl_key(&ui, "g");
+                    expect(current() == "file121.txt", "Ctrl+G in the search bar: next match")?;
+                    press(slint::platform::Key::Escape.into());
+                    expect(ui.get_find_mode() == 0 && c.borrow().search == "FILE12?.TXT", "Esc ends the search and keeps it")?;
+                    key("g", false);
+                    expect(current() == "file122.txt", "Ctrl+G: next match")?;
+                    key("G", true);
+                    key("G", true);
+                    expect(current() == "file120.txt", "Ctrl+Shift+G: previous match")?;
+                    key("g", true);
+                    expect(current() == "file129.txt", "previous match wraps around")?;
+                    key("f", false);
+                    ui.invoke_find_edited("nothing*".into());
+                    expect(current() == "file129.txt" && ui.get_message().contains("見つかりません"), "no match keeps the cursor")?;
+                    ui.invoke_find_done(false, "nothing*".into());
+                    s.pass("Ctrl+F wildcard search, Ctrl+G / Ctrl+Shift+G");
+                    key("F", true);
+                    expect(ui.get_find_mode() == 2, "Ctrl+Shift+F opens the filter bar")?;
+                    ui.invoke_find_done(true, "*5.txt; file001".into());
+                }
+                40 => {
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    let shown = names(&c, 0);
+                    expect(shown.len() == 16 && shown.iter().all(|n| n.ends_with("5.txt") || n == "file001.txt"), "filter shows matching entries only")?;
+                    expect(ui.get_p0_info().filter == "*5.txt; file001" && ui.get_p0_info().files == "16", "filter shown in the info line")?;
+                    // Sorting keeps the filter and works on the memory copy.
+                    ui.invoke_sort(0, 0);
+                    s.pass("Ctrl+Shift+F filters with wildcards and ';'");
+                }
+                41 => {
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    expect(names(&c, 0).len() == 16, "sort keeps the filter")?;
+                    fkey(&ui, 0, slint::platform::Key::Escape);
+                }
+                42 => {
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    expect(names(&c, 0).len() == 150 && ui.get_p0_info().filter.is_empty(), "Esc clears the filter")?;
+                    s.pass("Esc clears the filter");
+                    c.borrow_mut().set_filter(0, "file00*");
+                }
+                43 => {
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    expect(names(&c, 0).len() == 9, "filter set again")?;
+                    ui.invoke_command(0, 2);
+                }
+                44 => {
+                    if !idle(&c) || c.borrow().data(0).dir.ends_with("many") {
+                        return Ok(false);
+                    }
+                    expect(c.borrow().panes[0].filter.is_none() && names(&c, 0).contains(&"many".to_string()), "opening another folder drops the filter")?;
+                    s.pass("filter is dropped when another folder opens");
+                    // Menu bar: click ファイル, then move along the bar; each menu opens on hover.
+                    use slint::platform::{PointerEventButton, WindowEvent};
+                    let at = slint::LogicalPosition::new(12.0, 12.0);
+                    ui.window().dispatch_event(WindowEvent::PointerMoved { position: at });
+                    ui.window().dispatch_event(WindowEvent::PointerPressed { position: at, button: PointerEventButton::Left });
+                    ui.window().dispatch_event(WindowEvent::PointerReleased { position: at, button: PointerEventButton::Left });
+                    expect(ui.get_open_menu() == 0, "click opens the File menu")?;
+                    s.sweep = 12.0;
+                }
+                45 => {
+                    use slint::platform::{PointerEventButton, WindowEvent};
+                    let open = ui.get_open_menu();
+                    if s.menus.last() != Some(&open) {
+                        s.menus.push(open);
+                    }
+                    if s.sweep < 280.0 {
+                        s.sweep += 8.0;
+                        let position = slint::LogicalPosition::new(s.sweep, 12.0);
+                        ui.window().dispatch_event(WindowEvent::PointerMoved { position });
+                        return Ok(false);
+                    }
+                    expect(s.menus == [0, 1, 2], &format!("hovering the bar switches menus (seen {:?})", s.menus))?;
+                    let size = ui.window().size().to_logical(ui.window().scale_factor());
+                    let away = slint::LogicalPosition::new(size.width / 2.0, size.height / 2.0);
+                    ui.window().dispatch_event(WindowEvent::PointerMoved { position: away });
+                    ui.window().dispatch_event(WindowEvent::PointerPressed { position: away, button: PointerEventButton::Left });
+                    ui.window().dispatch_event(WindowEvent::PointerReleased { position: away, button: PointerEventButton::Left });
+                    expect(ui.get_open_menu() == -1, "a click outside closes the menu")?;
+                    s.pass("menu bar: hover switches between open menus, outside click closes");
+                    // Ctrl+Alt+Shift+F: a small tree with a junction back to its own root.
+                    let tree = root.join("tree");
+                    for dir in ["a/b", "b"] {
+                        std::fs::create_dir_all(tree.join(dir)).map_err(|e| e.to_string())?;
+                    }
+                    for file in ["a/hit.rs", "b/hit.txt", "a/b/deep.txt"] {
+                        std::fs::write(tree.join(file), file).map_err(|e| e.to_string())?;
+                    }
+                    let made = std::process::Command::new("cmd")
+                        .args(["/c", "mklink", "/J"])
+                        .arg(tree.join("loop"))
+                        .arg(&tree)
+                        .output()
+                        .map_err(|e| e.to_string())?;
+                    expect(made.status.success(), "junction created for the search test")?;
+                    ui.invoke_navigate(0, display(&tree).into());
+                }
+                46 => {
+                    if !idle(&c) || !c.borrow().data(0).dir.ends_with("tree") {
+                        return Ok(false);
+                    }
+                    let mut e = slint::language::KeyEvent::default();
+                    e.text = "F".into();
+                    e.modifiers.control = true;
+                    e.modifiers.alt = true;
+                    e.modifiers.shift = true;
+                    ui.invoke_key_event(0, e);
+                    expect(ui.get_find_mode() == 3, "Ctrl+Alt+Shift+F opens the recursive search bar")?;
+                    s.session = c.borrow().panes[0].finder.as_ref().map(|f| f.id).ok_or("the walk starts with the bar")?;
+                    // Typing: only the text after the pause is searched.
+                    ui.invoke_find_edited("hi".into());
+                    ui.invoke_find_edited("hit*".into());
+                }
+                47 => {
+                    if !searched(&c, "hit*") {
+                        return Ok(false);
+                    }
+                    expect(found(&c) == ["a\\hit.rs", "b\\hit.txt"], &format!("results with their folder, the junction not entered: {:?}", found(&c)))?;
+                    expect(ui.get_p0_info().search == "hit*" && ui.get_find_mode() == 3, "results while typing, shown in the info line")?;
+                    s.pass("Ctrl+Alt+Shift+F searches below the folder while typing, junctions skipped");
+                    ui.invoke_find_edited("a/*.rs".into());
+                }
+                48 => {
+                    if !searched(&c, "a/*.rs") {
+                        return Ok(false);
+                    }
+                    expect(found(&c) == ["a\\hit.rs"], &format!("a path pattern with '/': {:?}", found(&c)))?;
+                    expect(c.borrow().panes[0].finder.as_ref().map(|f| f.id) == Some(s.session), "the next text reuses the walk")?;
+                    s.pass("changing the text searches the kept walk again");
+                    ui.invoke_find_done(true, "a/*.rs".into());
+                    expect(ui.get_find_mode() == 0 && c.borrow().panes[0].found.is_some(), "Enter keeps the results")?;
+                    c.borrow_mut().config.search_links = true;
+                    c.borrow_mut().search_tree(0, r"\A\B\deep");
+                }
+                49 => {
+                    if !searched(&c, r"\A\B\deep") {
+                        return Ok(false);
+                    }
+                    // Following links, the junction back to the root is still entered only once.
+                    expect(found(&c) == ["a\\b\\deep.txt"], &format!("a path pattern with '\\', link cycle cut: {:?}", found(&c)))?;
+                    c.borrow_mut().config.search_links = false;
+                    s.pass("path patterns with / and \\; a junction cycle is not followed");
+                    fkey(&ui, 0, slint::platform::Key::Escape);
+                }
+                50 => {
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    let names = names(&c, 0);
+                    expect(
+                        c.borrow().panes[0].found.is_none() && ["a", "b", "loop"].iter().all(|n| names.contains(&n.to_string())),
+                        "Esc goes back to the folder",
+                    )?;
+                    expect(c.borrow().panes[0].finder.is_none(), "closing the results drops the walk")?;
+                    // A tree bigger than the index limit: typing stops, Enter searches the disk.
+                    c.borrow_mut().index_limit = 2;
+                    c.borrow_mut().open_find(0, 3);
+                }
+                51 => {
+                    if !c.borrow().panes[0].finder.as_ref().is_some_and(|f| f.overflow) {
+                        return Ok(false);
+                    }
+                    ui.invoke_find_edited("hit*".into());
+                    expect(!c.borrow().typing.running(), "past the index limit typing does not search")?;
+                    ui.invoke_find_done(true, "hit*".into());
+                }
+                52 => {
+                    if !searched(&c, "hit*") {
+                        return Ok(false);
+                    }
+                    expect(found(&c) == ["a\\hit.rs", "b\\hit.txt"], &format!("past the index limit Enter walks the disk: {:?}", found(&c)))?;
+                    c.borrow_mut().index_limit = crate::finder::INDEX_LIMIT;
+                    s.pass("past the index limit the search runs on Enter");
+                    // Leaving the results stops the walk.
+                    let stop = c.borrow().panes[0].finder.as_ref().map(|f| f.finder.stopped()).ok_or("no walk")?;
+                    ui.invoke_command(0, 2);
+                    expect(stop.load(std::sync::atomic::Ordering::Relaxed), "\"..\" stops the walk")?;
+                }
+                53 => {
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    expect(c.borrow().panes[0].found.is_none() && c.borrow().data(0).dir.ends_with("tree"), "\"..\" in the results returns to the searched folder")?;
+                    s.pass("Esc / \"..\" leave the results and stop the walk");
+                    std::fs::remove_dir(root.join("tree").join("loop")).map_err(|e| e.to_string())?;
+                }
+                54 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)
