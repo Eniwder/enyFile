@@ -602,6 +602,22 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(model.page_start.get() == size, "wheel turns a page")?;
                     expect(ui.get_p0_info().page.starts_with("2/"), "page number shown")?;
                     s.pass("paged list: Right/Left and wheel turn pages, page number shown");
+                    // No page to turn to: the wheel leaves the cursor, Left/Right step one row.
+                    ui.invoke_page_step(0, false);
+                    let at = c.borrow().cursor_row(0);
+                    ui.invoke_page_step(0, false);
+                    expect(c.borrow().cursor_row(0) == at && model.page_start.get() == 0, "wheel up on the first page keeps the cursor")?;
+                    fkey(&ui, 0, slint::platform::Key::LeftArrow);
+                    expect(c.borrow().cursor_row(0) == at - 1, "Left on the first page steps up a row")?;
+                    fkey(&ui, 0, slint::platform::Key::End);
+                    let last = c.borrow().cursor_row(0);
+                    ui.invoke_page_step(0, true);
+                    expect(c.borrow().cursor_row(0) == last, "wheel down on the last page keeps the cursor")?;
+                    fkey(&ui, 0, slint::platform::Key::UpArrow);
+                    fkey(&ui, 0, slint::platform::Key::UpArrow);
+                    fkey(&ui, 0, slint::platform::Key::RightArrow);
+                    expect(c.borrow().cursor_row(0) == last - 1, "Right on the last page steps down a row")?;
+                    s.pass("first/last page: wheel stays, Left/Right step one row");
                     // Shift ranges stop at entries ("..", drive rows) and start where the move does.
                     use slint::platform::Key;
                     let entries = c.borrow().data(0).rows.len();
@@ -968,6 +984,9 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(found(&c) == ["a\\hit.rs"], &format!("a path pattern with '/': {:?}", found(&c)))?;
                     expect(c.borrow().panes[0].finder.as_ref().map(|f| f.id) == Some(s.session), "the next text reuses the walk")?;
                     s.pass("changing the text searches the kept walk again");
+                    ui.invoke_find_edited("".into());
+                    let kept = c.borrow().panes[0].found.as_ref().is_some_and(|f| f.text == "a/*.rs");
+                    expect(kept && !c.borrow().typing.running() && ui.get_find_mode() == 3, "erasing the text keeps the results and the bar")?;
                     ui.invoke_find_done(true, "a/*.rs".into());
                     expect(ui.get_find_mode() == 0 && c.borrow().panes[0].found.is_some(), "Enter keeps the results")?;
                     c.borrow_mut().config.search_links = true;
@@ -993,6 +1012,18 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         "Esc goes back to the folder",
                     )?;
                     expect(c.borrow().panes[0].finder.is_none(), "closing the results drops the walk")?;
+                    // Backspace on an empty field: the first press only warns, the second ends.
+                    c.borrow_mut().open_find(0, 2);
+                    let backspace = || {
+                        use slint::platform::{Key, WindowEvent};
+                        ui.window().dispatch_event(WindowEvent::KeyPressed { text: Key::Backspace.into() });
+                        ui.window().dispatch_event(WindowEvent::KeyReleased { text: Key::Backspace.into() });
+                    };
+                    backspace();
+                    expect(ui.get_find_mode() == 2, "one Backspace on an empty field keeps the bar")?;
+                    backspace();
+                    expect(ui.get_find_mode() == 0 && c.borrow().finding.is_none(), "a second Backspace ends it")?;
+                    s.pass("Backspace twice on an empty search field ends it");
                     // A tree bigger than the index limit: typing stops, Enter searches the disk.
                     c.borrow_mut().index_limit = 2;
                     c.borrow_mut().open_find(0, 3);

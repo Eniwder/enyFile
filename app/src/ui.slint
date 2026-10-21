@@ -955,7 +955,7 @@ export component App inherits Window {
     callback find-edited(string);
     callback find-done(bool, string);
     callback find-next(bool);
-    public function focus-find() { find-edit.text = root.find-text; find-edit.focus(); find-edit.select-all(); }
+    public function focus-find() { find-keys.empty-backspaces = 0; find-edit.text = root.find-text; find-edit.focus(); find-edit.select-all(); }
     // Menu bar menu shown: -1 none, 0 ファイル, 1 編集, 2 表示.
     out property <int> open-menu: -1;
     // A shown menu makes the window a little more opaque (Rust sets the window opacity).
@@ -1163,10 +1163,21 @@ export component App inherits Window {
                 border-color: find-edit.has-focus ? Theme.border-active : Theme.border;
                 if find-edit.text == "" : Text {
                     x: 6px; width: parent.width - 12px; height: parent.height;
-                    text: root.find-mode == 3 ? "* ? ; が使えます。/ か \\ を含むとフォルダー名も照合" : "* と ? が使えます。; で複数指定"; color: Theme.dim; vertical-alignment: center; overflow: elide;
+                    text: find-keys.empty-backspaces > 0 ? "もう一度 Backspace で終了"
+                        : root.find-mode == 3 ? "* ? ; が使えます。/ か \\ を含むとフォルダー名も照合" : "* と ? が使えます。; で複数指定";
+                    color: Theme.dim; vertical-alignment: center; overflow: elide;
                 }
-                FocusScope {
+                find-keys := FocusScope {
                     x: 6px; width: parent.width - 12px; height: parent.height; focus-on-click: false;
+                    // Erasing the text does not end the bar; Backspace twice on an empty field
+                    // does, as Esc would.
+                    in-out property <int> empty-backspaces;
+                    capture-key-pressed(e) => {
+                        if e.text != Key.Backspace || find-edit.text != "" { return reject; }
+                        self.empty-backspaces += 1;
+                        if self.empty-backspaces >= 2 { root.find-done(root.find-mode == 1, ""); }
+                        return accept;
+                    }
                     // Keys the text field leaves unhandled arrive here.
                     key-pressed(e) => {
                         if e.text == Key.Escape { root.find-done(root.find-mode == 1, find-edit.text); return accept; }
@@ -1180,7 +1191,7 @@ export component App inherits Window {
                         width: parent.width; height: parent.height;
                         vertical-alignment: center; single-line: true;
                         color: Theme.text; selection-background-color: Theme.selected-bg; selection-foreground-color: Theme.selected-text;
-                        edited => { root.find-edited(self.text); }
+                        edited => { find-keys.empty-backspaces = 0; root.find-edited(self.text); }
                         accepted => { root.find-done(true, self.text); }
                         // Clicking a search result keeps the results; the filter is cancelled.
                         changed has-focus => { if !self.has-focus && root.find-mode != 0 { root.find-done(root.find-mode != 2, self.text); } }

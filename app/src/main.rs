@@ -906,8 +906,14 @@ impl Controller {
         }
     }
     /// Mouse wheel: one page per notch, the cursor moves along.
+    /// On the first or last page there is no page to turn to, and the cursor stays put.
     fn page_step(&mut self, p: usize, forward: bool) {
         self.active(p);
+        let model = &self.panes[p].model;
+        let (page, rows, cursor) = (model.page_size.get().max(1), model.total(), self.cursor_row(p));
+        if rows == 0 || (!forward && cursor < page) || (forward && cursor / page == (rows - 1) / page) {
+            return;
+        }
         let key = if forward { slint::platform::Key::PageDown } else { slint::platform::Key::PageUp };
         let mut event = slint::language::KeyEvent::default();
         event.text = key.into();
@@ -1162,6 +1168,12 @@ impl Controller {
     /// Past the index limit every query reads the disk, so it waits for Enter.
     fn query_typed(&mut self, p: usize, text: &str) {
         if self.panes[p].finder.as_ref().is_some_and(|s| s.overflow) {
+            return;
+        }
+        // Erasing the text to type another keeps the results; Enter on it (or Esc, or
+        // Backspace twice) goes back to the folder.
+        if text.trim().is_empty() {
+            self.typing.stop();
             return;
         }
         let text = text.to_string();
@@ -2703,6 +2715,11 @@ impl Controller {
             Some(0)
         } else if is(Key::End) {
             Some(rows - 1)
+        } else if is(Key::LeftArrow) && cursor < page {
+            // No page before: Left steps up a row (Right steps down on the last page).
+            Some(cursor.saturating_sub(1))
+        } else if is(Key::RightArrow) && cursor / page == (rows - 1) / page {
+            Some((cursor + 1).min(rows - 1))
         } else if is(Key::PageUp) || is(Key::LeftArrow) {
             Some(cursor.saturating_sub(page))
         } else if is(Key::PageDown) || is(Key::RightArrow) {
