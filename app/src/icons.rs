@@ -202,6 +202,12 @@ fn icon_pixels(icon: HICON) -> Option<Pixels> {
             if GetObjectW(HGDIOBJ(bitmap.0), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut _)) == 0 {
                 return None;
             }
+            // Icons are at most 256 px (a monochrome mask is twice as tall); anything else is
+            // refused, which also keeps w * h * 4 far from overflowing.
+            let size = 1..=1024;
+            if !size.contains(&bm.bmWidth) || !size.contains(&bm.bmHeight.saturating_abs()) {
+                return None;
+            }
             let (w, h) = (bm.bmWidth as u32, bm.bmHeight.unsigned_abs());
             let mut bmi = BITMAPINFO::default();
             bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -253,6 +259,15 @@ mod tests {
             assert_eq!(local(place), ok, "{place}");
         }
         assert_eq!(expand("%SystemRoot%-%%-%x"), format!("{windows}-%%-%x"));
+    }
+    /// Audit #9: the size check still lets real icons through.
+    #[test]
+    fn type_icons_still_load() {
+        let _com = crate::shell::Apartment::new().unwrap();
+        for (probe, attributes) in [("x.txt", FILE_ATTRIBUTE_NORMAL), ("folder", FILE_ATTRIBUTE_DIRECTORY)] {
+            let pixels = shell_icon(probe, attributes, SHGFI_USEFILEATTRIBUTES).unwrap();
+            assert!((16..=256).contains(&pixels.width()) && pixels.width() == pixels.height(), "{probe}");
+        }
     }
     #[test]
     fn url_shortcut_places() {
