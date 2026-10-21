@@ -29,9 +29,10 @@ pub struct Request {
     pub extended: bool,
 }
 pub enum Outcome {
-    /// Verbs the app handles itself, so its own conflict and rename dialogs are used.
-    Paste,
-    Rename,
+    /// Verbs the app handles itself, so its own conflict and rename dialogs are used:
+    /// the folder to paste into, the item to rename.
+    Paste(PathBuf),
+    Rename(PathBuf),
     Done,
     Failed(String),
 }
@@ -216,10 +217,9 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
             Outcome::Done
         } else {
             let id = (command - FIRST) as usize;
-            match verb(&menu, id).as_str() {
-                "paste" => Outcome::Paste,
-                "rename" => Outcome::Rename,
-                _ => {
+            match own_verb(&verb(&menu, id), &request.target) {
+                Some(outcome) => outcome,
+                None => {
                     let info = CMINVOKECOMMANDINFOEX {
                         cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
                         fMask: 0x4000 /* CMIC_MASK_UNICODE */ | CMIC_MASK_PTINVOKE,
@@ -241,5 +241,43 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
         let _ = DestroyMenu(popup);
         let _ = SetForegroundWindow(HWND(request.owner as *mut _));
         outcome
+    }
+}
+
+/// Verbs the app runs itself, on the menu's own target (not on what the pane shows by the
+/// time the menu returns). None: let the Shell run the verb.
+fn own_verb(verb: &str, target: &Target) -> Option<Outcome> {
+    let single = match target {
+        Target::Items(paths) if paths.len() == 1 => Some(&paths[0]),
+        _ => None,
+    };
+    Some(match (verb, target) {
+        ("paste", Target::Background(dir)) => Outcome::Paste(dir.clone()),
+        ("paste", _) => single.map_or(Outcome::Done, |folder| Outcome::Paste(folder.clone())),
+        // A drive's label is not a name our dialog can change.
+        ("rename", _) => single.filter(|p| p.parent().is_some()).map_or(Outcome::Done, |p| Outcome::Rename(p.clone())),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    /// Audit #5: Paste goes into the folder right-clicked, Rename renames the item right-clicked.
+    #[test]
+    fn own_verbs_use_the_menu_target() {
+        let one = |p: &str| Target::Items(vec![PathBuf::from(p)]);
+        let two = Target::Items(vec![PathBuf::from(r"C:\a"), PathBuf::from(r"C:\b")]);
+        let is = |o: Option<Outcome>, path: &str| matches!(o, Some(Outcome::Paste(p) | Outcome::Rename(p)) if p == Path::new(path));
+        let done = |o: Option<Outcome>| matches!(o, Some(Outcome::Done));
+        assert!(is(own_verb("paste", &one(r"C:\dir\sub")), r"C:\dir\sub"));
+        assert!(matches!(own_verb("paste", &Target::Background(PathBuf::from(r"C:\dir"))), Some(Outcome::Paste(p)) if p == Path::new(r"C:\dir")));
+        assert!(done(own_verb("paste", &two)));
+        assert!(matches!(own_verb("rename", &one(r"C:\dir\a.txt")), Some(Outcome::Rename(p)) if p == Path::new(r"C:\dir\a.txt")));
+        assert!(done(own_verb("rename", &one(r"\\?\D:\"))));
+        assert!(done(own_verb("rename", &one(r"D:\"))));
+        assert!(done(own_verb("rename", &two)));
+        assert!(own_verb("delete", &one(r"C:\dir\a.txt")).is_none());
     }
 }

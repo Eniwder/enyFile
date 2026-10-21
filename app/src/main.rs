@@ -1835,14 +1835,8 @@ impl Controller {
             Reply::Menu(outcome) => {
                 let p = self.menu_pane;
                 match outcome {
-                    ctxmenu::Outcome::Paste => self.paste(p),
-                    ctxmenu::Outcome::Rename => {
-                        let data = self.data(p);
-                        let current = self.panes[p].model.selection.borrow().current;
-                        if let Some(entry) = current.and_then(|i| data.rows.get(i)) {
-                            self.open_name(p, NameKind::Rename(entry.path.as_ref().clone()));
-                        }
-                    }
+                    ctxmenu::Outcome::Paste(dir) => self.paste_into(p, Some(dir)),
+                    ctxmenu::Outcome::Rename(path) => self.open_name(p, NameKind::Rename(path)),
                     ctxmenu::Outcome::Done => {}
                     ctxmenu::Outcome::Failed(e) => self.message(format!("メニューを実行できません: {e}")),
                 }
@@ -2360,6 +2354,10 @@ impl Controller {
         }
     }
     fn paste(&mut self, p: usize) {
+        self.paste_into(p, None);
+    }
+    /// `dir`: a folder chosen from a context menu; otherwise the pane's folder.
+    fn paste_into(&mut self, p: usize, dir: Option<PathBuf>) {
         let data = self.data(p);
         if data.dir.as_os_str().is_empty() {
             return;
@@ -2367,11 +2365,11 @@ impl Controller {
         if !self.asking.is_empty() {
             return;
         }
-        if self.panes[p].found.is_some() {
+        if self.panes[p].found.is_some() && dir.as_ref().is_none_or(|d| *d == data.dir) {
             self.message("検索結果には貼り付けできません（Esc で戻る）");
             return;
         }
-        let dir = data.dir.clone();
+        let dir = dir.unwrap_or_else(|| data.dir.clone());
         let before = data.positions.clone();
         self.operations += 1;
         self.message(format!("貼り付け中 → {}", display(&dir)));
