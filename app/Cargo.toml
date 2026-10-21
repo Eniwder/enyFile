@@ -23,3 +23,7 @@ path = "src/bin/shellprobe.rs"
 
 [profile.release]
 strip = true
+
+[profile.dev]
+opt-level = 1
+incremental = true

@@ -986,14 +986,15 @@ export component App inherits Window {
         FlatButton { width: 36px; text: "△"; font-size: 17px; tint: Theme.key; nudge: -1.33px; clicked => { root.command(root.active-pane, 2); } }
         Rectangle { width: 14px; Rectangle { x: 6px; y: 6px; width: 1px; height: parent.height - 12px; background: Theme.border; } }
         // Home: the active pane's start folder (File > 設定 > 起動時の左 / 右).
-        IconButton { glyph: "\u{E80F}"; tint: #e8e8e8; nudge: 0px; clicked => { root.home(); } }
-        IconButton { glyph: "\u{E7F4}"; tint: #79aee8; nudge: 2.67px; clicked => { root.place(0); } }
+        IconButton { glyph: "\u{E80F}"; tint: #e8e8e8; glyph-size: 19px; nudge: -1px; clicked => { root.home(); } }
+        IconButton { glyph: "\u{E7F4}"; tint: #79aee8; nudge: 1.67px; clicked => { root.place(0); } }
         IconButton { glyph: "\u{E7C3}"; tint: #e6c86a; glyph-size: 15px; nudge: 0px; clicked => { root.place(1); } }
-        IconButton { glyph: "\u{EB9F}"; tint: #9bc86a; nudge: 0px; clicked => { root.place(2); } }
-        IconButton { glyph: "\u{E714}"; tint: #e0904a; nudge: 0px; clicked => { root.place(3); } }
-        IconButton { glyph: "\u{E8D6}"; tint: #b48ae0; nudge: 0px; clicked => { root.place(4); } }
+        IconButton { glyph: "\u{EB9F}"; tint: #9bc86a; glyph-size: 18px; nudge: 0px; clicked => { root.place(2); } }
+        IconButton { glyph: "\u{E714}"; tint: #e0904a; nudge: 0.5px; clicked => { root.place(3); } }
+        IconButton { glyph: "\u{E8D6}"; tint: #b48ae0; glyph-size: 17px; nudge: -1px; clicked => { root.place(4); } }
         IconButton {
             glyph: "\u{E728}"; tint: #e86a8a;
+            glyph-size: 18px;
             clicked => { bookmark-menu.show(); }
             bookmark-menu := PopupWindow {
                 y: parent.height; width: 380px;
