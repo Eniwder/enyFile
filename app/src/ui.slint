@@ -494,9 +494,18 @@ component Pane inherits Rectangle {
                 Text { text: row.kind; color: item.fg; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
             }
             TouchArea {
+                // Dragging out starts once per press, after the pointer moves a few pixels.
+                property <bool> drag-started;
+                moved => {
+                    if self.pressed && !self.drag-started && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                        self.drag-started = true;
+                        root.pointer(index, false, false, 4);
+                    }
+                }
                 pointer-event(e) => {
                     if e.button == PointerEventButton.left {
                         if e.kind == PointerEventKind.down {
+                            self.drag-started = false;
                             keys.focus();
                             root.pointer(index, e.modifiers.control, e.modifiers.shift, 0);
                         } else if e.kind == PointerEventKind.up {

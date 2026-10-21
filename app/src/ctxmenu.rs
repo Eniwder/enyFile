@@ -6,9 +6,9 @@ use std::{cell::RefCell, path::PathBuf, sync::mpsc};
 use windows::{
     Win32::{
         Foundation::*,
-        System::{Com::CoTaskMemFree, LibraryLoader::GetModuleHandleW},
+        System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Shell::{Common::ITEMIDLIST, *},
+            Shell::*,
             WindowsAndMessaging::*,
         },
     },
@@ -133,28 +133,8 @@ fn wide(path: &std::path::Path) -> Vec<u16> {
     crate::shell::shell_path(path).as_os_str().encode_wide().chain(Some(0)).collect()
 }
 unsafe fn items_menu(paths: &[PathBuf]) -> windows::core::Result<IContextMenu> {
-    unsafe {
-        let mut pidls: Vec<*const ITEMIDLIST> = Vec::new();
-        let mut failed = None;
-        for path in paths {
-            let mut pidl = std::ptr::null_mut();
-            match SHParseDisplayName(PCWSTR(wide(path).as_ptr()), None, &mut pidl, 0, None) {
-                Ok(()) => pidls.push(pidl),
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
-            }
-        }
-        let array = match failed {
-            None => SHCreateShellItemArrayFromIDLists(&pidls),
-            Some(e) => Err(e),
-        };
-        for pidl in pidls {
-            CoTaskMemFree(Some(pidl as *const _));
-        }
-        array?.BindToHandler(None, &BHID_SFUIObject)
-    }
+    let array = crate::shell::item_array(paths).map_err(|e| windows::core::Error::new(E_FAIL, e))?;
+    unsafe { array.BindToHandler(None, &BHID_SFUIObject) }
 }
 unsafe fn background_menu(dir: &std::path::Path, hwnd: HWND) -> windows::core::Result<IContextMenu> {
     unsafe {

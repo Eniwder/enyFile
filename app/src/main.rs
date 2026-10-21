@@ -569,6 +569,9 @@ struct Controller {
     typing: slint::Timer,
     /// `finder::INDEX_LIMIT`; the smoke test lowers it.
     index_limit: usize,
+    /// The smoke test: what a drag would carry, instead of starting the system drag loop
+    /// (which would drop on whatever window is under the idle mouse).
+    drag_probe: Option<Vec<PathBuf>>,
     naming: Option<Naming>,
     compare: Option<Comparing>,
     /// The pane active before the current one: what Ctrl+Shift+D compares with.
@@ -2104,10 +2107,46 @@ impl Controller {
                 self.show_menu(p, ctxmenu::Target::Items(items), shift);
                 return;
             }
+            4 => {
+                // Pressing a selected item kept the selection whole: drag all of it.
+                selection.deferred = None;
+                if !selection.contains(&data.rows[index].path) {
+                    selection.select(&data.rows, index, false, false, false);
+                }
+                drop(selection);
+                self.repaint(p);
+                self.drag_out(p);
+                return;
+            }
             _ => {}
         }
         drop(selection);
         self.repaint(p);
+    }
+    /// Starts the system drag loop after this callback returns: it runs a modal message loop,
+    /// during which other callbacks need the controller.
+    fn drag_out(&mut self, p: usize) {
+        let paths = self.selected_paths(p);
+        if let Some(probe) = &mut self.drag_probe {
+            *probe = paths;
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else { return };
+        let (Some(hwnd), false) = (hwnd(&ui), paths.is_empty()) else { return };
+        let ui = ui.as_weak();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            let result = shell::drag_out(&paths);
+            let Some(ui) = ui.upgrade() else { return };
+            // The drag loop took the button release: the row still counts as pressed.
+            let (x, y) = shell::cursor_in(hwnd);
+            let scale = ui.window().scale_factor();
+            let position = slint::LogicalPosition::new(x as f32 / scale, y as f32 / scale);
+            let button = slint::platform::PointerEventButton::Left;
+            ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
+            if let Err(e) = result {
+                ui.set_message(format!("ドラッグできません: {e}").into());
+            }
+        });
     }
     /// Enter / double click on "..", or on a drive in the drive list.
     fn enter_special(&mut self, p: usize, special: Special) {
@@ -2952,6 +2991,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         searches: 0,
         typing: slint::Timer::default(),
         index_limit: finder::INDEX_LIMIT,
+        drag_probe: None,
         compare: None,
         previous: 1,
         demo: demo.is_some(),

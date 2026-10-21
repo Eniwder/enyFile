@@ -620,6 +620,30 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     fkey(&ui, 0, Key::Home);
                     fkey(&ui, 0, Key::DownArrow);
                     s.pass("Shift+PageUp/PageDown/Home/End select entries only, from where the move starts");
+                    // Dragging out (the probe stands in for the system drag loop).
+                    let all = names(&c, 0);
+                    let probe = || -> Vec<String> {
+                        let c = c.borrow();
+                        c.drag_probe.iter().flatten().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect()
+                    };
+                    c.borrow_mut().drag_probe = Some(Vec::new());
+                    click(&ui, 0, 1, false);
+                    ui.invoke_pointer(0, 3, false, true, 0);
+                    ui.invoke_pointer(0, 3, false, false, 1);
+                    ui.invoke_pointer(0, 2, false, false, 0);
+                    ui.invoke_pointer(0, 2, false, false, 4);
+                    ui.invoke_pointer(0, 2, false, false, 1);
+                    expect(probe() == all[..3] && selected(&c, 0).len() == 3, "dragging a selected item carries the whole selection")?;
+                    ui.invoke_pointer(0, 6, false, false, 0);
+                    ui.invoke_pointer(0, 6, false, false, 4);
+                    ui.invoke_pointer(0, 6, false, false, 1);
+                    expect(probe() == [all[5].clone()] && selected(&c, 0) == [all[5].clone()], "dragging an unselected item selects and carries it")?;
+                    ui.invoke_pointer(0, 0, false, false, 0);
+                    ui.invoke_pointer(0, 0, false, false, 4);
+                    expect(probe() == [all[5].clone()], "\"..\" is not dragged")?;
+                    c.borrow_mut().drag_probe = None;
+                    fkey(&ui, 0, Key::DownArrow);
+                    s.pass("drag out: the selection, or the item pressed");
                     ui.invoke_open_settings();
                     ui.set_settings_tab(1);
                 }

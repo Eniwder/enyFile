@@ -319,6 +319,54 @@ fn item(path: &Path) -> Result<IShellItem, String> {
     unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }
         .map_err(|e| format!("{}: {e}", shell_path(path).display()))
 }
+/// Items from several folders (search results) as one Shell selection.
+pub fn item_array(paths: &[PathBuf]) -> Result<IShellItemArray, String> {
+    let mut pidls: Vec<*const windows::Win32::UI::Shell::Common::ITEMIDLIST> = Vec::new();
+    let mut failed = None;
+    for path in paths {
+        let wide = match wide(path) {
+            Ok(wide) => wide,
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        };
+        let mut pidl = std::ptr::null_mut();
+        match unsafe { SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None) } {
+            Ok(()) => pidls.push(pidl),
+            Err(e) => {
+                failed = Some(format!("{}: {e}", shell_path(path).display()));
+                break;
+            }
+        }
+    }
+    let array = match failed {
+        None => unsafe { SHCreateShellItemArrayFromIDLists(&pidls) }.map_err(|e| e.to_string()),
+        Some(e) => Err(e),
+    };
+    for pidl in pidls {
+        unsafe { CoTaskMemFree(Some(pidl as *const _)) };
+    }
+    array
+}
+/// Drags `paths` out to another app (a browser's upload field, Explorer, ...) as Explorer
+/// does: the Shell's own data object, copy / move / link left to the drop target, which
+/// also carries out a move. Blocks in the system's drag loop; call on the window's thread
+/// with nothing borrowed. Returns the effect the target chose.
+pub fn drag_out(paths: &[PathBuf]) -> Result<DROPEFFECT, String> {
+    let data: IDataObject = unsafe { item_array(paths)?.BindToHandler(None, &BHID_DataObject) }.map_err(|e| e.to_string())?;
+    let allowed = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0 | DROPEFFECT_LINK.0);
+    unsafe { SHDoDragDrop(None, &data, None::<&IDropSource>, allowed) }.map_err(|e| e.to_string())
+}
+/// The mouse position in `hwnd`'s client area, in physical pixels.
+pub fn cursor_in(hwnd: HWND) -> (i32, i32) {
+    let mut point = POINT::default();
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point);
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
+    }
+    (point.x, point.y)
+}
 fn finish(op: &IFileOperation) -> Result<bool, String> {
     unsafe {
         let performed = op.PerformOperations();
