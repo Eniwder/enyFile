@@ -311,6 +311,11 @@ impl Plan {
         if self.changed() {
             return Err("確認中に貼り付け先が変わったため中止しました".into());
         }
+        // All up front: a refusal halfway through would leave the deletions done.
+        let paths = self.remove.iter().chain(self.ops.iter().flat_map(|op| [&op.source, &op.dir]));
+        for path in paths {
+            crate::shell::os_path(path)?;
+        }
         let mut ids = crate::pathid::Idents::default();
         for (path, planned) in self.remove.iter().zip(&self.remove_ids) {
             if crate::pathid::ident(path) != *planned {

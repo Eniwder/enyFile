@@ -176,6 +176,15 @@ fn verb(menu: &IContextMenu, id: usize) -> String {
 
 fn show(hwnd: HWND, request: Request) -> Outcome {
     const FIRST: u32 = 1;
+    // `wide` strips `\\?\`; refuse names that would then mean another file (or folder,
+    // for New and Paste on the background).
+    let checked = match &request.target {
+        Target::Items(paths) => paths.iter().try_for_each(|p| crate::shell::os_path(p).map(drop)),
+        Target::Background(dir) => crate::shell::os_path(dir).map(drop),
+    };
+    if let Err(e) = checked {
+        return Outcome::Failed(e);
+    }
     unsafe {
         let menu = match &request.target {
             Target::Items(paths) => items_menu(paths),

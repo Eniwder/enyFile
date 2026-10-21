@@ -1707,7 +1707,11 @@ impl Controller {
     }
     /// Adds the active pane's folder; it can be renamed or reordered in the edit dialog.
     fn add_bookmark(&mut self) {
-        let dir = shell::shell_path(&self.data(self.active).dir);
+        // The saved path has no `\\?\`, so it must still name this folder without it.
+        let dir = match shell::os_path(&self.data(self.active).dir) {
+            Ok(dir) => dir,
+            Err(e) => return self.message(e),
+        };
         if dir.as_os_str().is_empty() {
             return;
         }

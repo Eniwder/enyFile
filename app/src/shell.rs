@@ -46,12 +46,41 @@ pub fn shell_path(path: &Path) -> PathBuf {
     }
     PathBuf::from(OsString::from_wide(&wide[4..]))
 }
-fn wide(path: &Path) -> Vec<u16> {
-    shell_path(path)
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect()
+/// [`shell_path`] for paths handed to the Shell or Win32. Refused when dropping `\\?\` makes
+/// Win32 normalization point elsewhere (`victim.` becomes `victim`, `nul.txt` a device):
+/// failing is better than touching a different file.
+pub fn os_path(path: &Path) -> Result<PathBuf, String> {
+    let plain = shell_path(path);
+    if plain.as_os_str() != path.as_os_str() {
+        let odd = path.components().find_map(|c| match c {
+            std::path::Component::Normal(name) => win32_alters(&name.to_string_lossy()).then_some(name),
+            std::path::Component::CurDir | std::path::Component::ParentDir => Some(c.as_os_str()),
+            _ => None,
+        });
+        if let Some(name) = odd {
+            return Err(format!("Windows の通常のパスでは扱えない名前です: {}", name.to_string_lossy()));
+        }
+    }
+    Ok(plain)
+}
+/// Win32 strips trailing dots and spaces, and maps reserved device names even with an extension.
+fn win32_alters(name: &str) -> bool {
+    if name.ends_with(['.', ' ']) {
+        return true;
+    }
+    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_uppercase();
+    let numbered = |prefix: &str| {
+        base.strip_prefix(prefix).is_some_and(|n| {
+            let mut chars = n.chars();
+            matches!((chars.next(), chars.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
+        })
+    };
+    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || numbered("COM")
+        || numbered("LPT")
+}
+fn wide(path: &Path) -> Result<Vec<u16>, String> {
+    Ok(os_path(path)?.as_os_str().encode_wide().chain(Some(0)).collect())
 }
 fn format(name: PCWSTR) -> u32 {
     unsafe { RegisterClipboardFormatW(name) }
@@ -83,18 +112,18 @@ fn global(bytes: &[u8]) -> Result<HGLOBAL, String> {
 }
 
 /// DROPFILES header (pFiles=20, fWide=1) followed by double-NUL-terminated UTF-16 paths.
-pub fn hdrop_bytes(paths: &[PathBuf]) -> Vec<u8> {
+pub fn hdrop_bytes(paths: &[PathBuf]) -> Result<Vec<u8>, String> {
     let mut bytes = vec![0u8; 20];
     bytes[..4].copy_from_slice(&20u32.to_le_bytes());
     bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
     for path in paths {
-        for unit in shell_path(path).as_os_str().encode_wide() {
+        for unit in os_path(path)?.as_os_str().encode_wide() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         bytes.extend_from_slice(&[0, 0]);
     }
     bytes.extend_from_slice(&[0, 0]);
-    bytes
+    Ok(bytes)
 }
 
 struct Clipboard;
@@ -132,9 +161,11 @@ impl Drop for Clipboard {
 /// Copy/Cut as Explorer expects: CF_HDROP plus "Preferred DropEffect" (COPY|LINK or MOVE).
 /// The data is fully rendered, so it outlives this process and needs no COM callbacks.
 pub fn set_clipboard(owner: HWND, paths: &[PathBuf], cut: bool) -> Result<(), String> {
+    // Before emptying: a refused path leaves the clipboard as it was.
+    let hdrop = hdrop_bytes(paths)?;
     let clipboard = Clipboard::open(Some(owner), 5)?;
     unsafe { EmptyClipboard() }.map_err(|e| e.to_string())?;
-    clipboard.put(CF_HDROP.0 as u32, &hdrop_bytes(paths))?;
+    clipboard.put(CF_HDROP.0 as u32, &hdrop)?;
     let effect = if cut {
         DROPEFFECT_MOVE
     } else {
@@ -257,7 +288,8 @@ fn operation(flags: FILEOPERATION_FLAGS) -> Result<IFileOperation, String> {
     }
 }
 fn item(path: &Path) -> Result<IShellItem, String> {
-    unsafe { SHCreateItemFromParsingName(PCWSTR(wide(path).as_ptr()), None) }
+    let wide = wide(path)?;
+    unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }
         .map_err(|e| format!("{}: {e}", shell_path(path).display()))
 }
 fn finish(op: &IFileOperation) -> Result<bool, String> {
@@ -395,12 +427,13 @@ pub fn delete(paths: &[PathBuf], permanent: bool) -> Result<bool, String> {
 }
 
 pub fn open(path: &Path) -> Result<(), String> {
+    let path = wide(path)?;
     let _ole = Apartment::new()?;
     let result = unsafe {
         ShellExecuteW(
             None,
             w!("open"),
-            PCWSTR(wide(path).as_ptr()),
+            PCWSTR(path.as_ptr()),
             PCWSTR::null(),
             PCWSTR::null(),
             SW_SHOWNORMAL,
@@ -515,6 +548,7 @@ impl Drop for Watch {
 /// Calls `changed` after a burst of changes settles (250 ms quiet, at most 1 s while busy).
 /// The handle is opened on the watcher thread, so a slow share never blocks the UI.
 pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch> {
+    let dir = wide(&dir).ok()?;
     let stop = Arc::new(Event(unsafe { CreateEventW(None, true, false, None) }.ok()?));
     let thread_stop = stop.clone();
     std::thread::spawn(move || {
@@ -523,7 +557,7 @@ pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch>
             | FILE_NOTIFY_CHANGE_SIZE
             | FILE_NOTIFY_CHANGE_LAST_WRITE;
         let Ok(change) =
-            (unsafe { FindFirstChangeNotificationW(PCWSTR(wide(&dir).as_ptr()), false, filter) })
+            (unsafe { FindFirstChangeNotificationW(PCWSTR(dir.as_ptr()), false, filter) })
         else {
             return;
         };
@@ -560,12 +594,63 @@ mod tests {
         let bytes = hdrop_bytes(&[
             PathBuf::from(r"\\?\C:\demo\日本語_😀.txt"),
             PathBuf::from(r"\\?\UNC\server\share\a.txt"),
-        ]);
+        ])
+        .unwrap();
         let wide: Vec<u16> = bytes[20..]
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
             .collect();
         let text = String::from_utf16(&wide).unwrap();
         assert_eq!(text, "C:\\demo\\日本語_😀.txt\0\\\\server\\share\\a.txt\0\0");
+    }
+    #[test]
+    fn os_path_refuses_names_win32_would_change() {
+        for ok in [r"\\?\C:\a\b.txt", r"\\?\UNC\server\share\a.b", r"C:\plain\victim.", r"\\?\C:\a\console.txt", r"\\?\C:\COM10"] {
+            assert!(os_path(Path::new(ok)).is_ok(), "{ok}");
+        }
+        assert_eq!(os_path(Path::new(r"\\?\UNC\s\share\a")).unwrap(), Path::new(r"\\s\share\a"));
+        for bad in [
+            r"\\?\C:\a\victim.",
+            r"\\?\C:\a\victim ",
+            r"\\?\C:\a.\b.txt",
+            r"\\?\C:\a\nul.txt",
+            r"\\?\C:\a\Com1",
+            r"\\?\C:\a\lpt² .log",
+            r"\\?\C:\a\CONOUT$",
+            r"\\?\C:\a\..\b",
+            r"\\?\UNC\server\share\x.",
+        ] {
+            let error = os_path(Path::new(bad)).unwrap_err();
+            assert!(error.starts_with("Windows の通常のパスでは扱えない名前です"), "{bad}");
+        }
+        assert!(hdrop_bytes(&[PathBuf::from(r"\\?\C:\a\victim.")]).is_err());
+    }
+    /// Audit #2: deleting `victim.` must not delete its neighbour `victim`.
+    #[test]
+    fn trailing_dot_never_reaches_the_neighbour() {
+        let root = std::env::temp_dir().join(format!("enyfile-shell-dot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let (victim, dotted) = (root.join("victim"), root.join("victim."));
+        std::fs::write(&victim, "keep me").unwrap();
+        std::fs::write(&dotted, "junk").unwrap();
+        let _ole = Apartment::new().unwrap();
+        assert!(item(&dotted).is_err());
+        let plan = crate::paste::Plan {
+            remove: vec![dotted.clone()],
+            remove_ids: vec![crate::pathid::ident(&dotted)],
+            ..Default::default()
+        };
+        assert!(transfer(&plan).unwrap_err().contains("victim."));
+        let copy = crate::paste::Plan {
+            ops: vec![crate::paste::Op { source: dotted.clone(), dir: root.join("out"), name: None, fresh: true }],
+            ..Default::default()
+        };
+        assert!(transfer(&copy).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        assert_eq!(std::fs::read_to_string(&dotted).unwrap(), "junk");
+        let _ = std::fs::remove_file(&dotted);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
