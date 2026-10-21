@@ -951,7 +951,6 @@ export component App inherits Window {
     // 3 search below the folder (Ctrl+Alt+Shift+F).
     in property <int> find-mode;
     // Edit menu check: the recursive search enters junctions and symbolic links.
-    in property <bool> search-links;
     in property <string> find-text;
     callback find-edited(string);
     callback find-done(bool, string);
@@ -1294,7 +1293,6 @@ export component App inherits Window {
             MenuEntry { text: "フィルター (Ctrl+Shift+F)"; clicked => { root.close-menu(); root.menu-command(32); } }
             MenuEntry { text: "フィルターの解除 (Esc)"; clicked => { root.close-menu(); root.menu-command(33); } }
             MenuEntry { text: "フォルダー以下を検索 (Ctrl+Alt+Shift+F)"; clicked => { root.close-menu(); root.menu-command(34); } }
-            MenuEntry { text: "検索でリンク先も辿る"; check: root.search-links ? 1 : 0; clicked => { root.close-menu(); root.menu-command(35); } }
         }
     }
     if root.open-menu == 2 : Rectangle {

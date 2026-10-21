@@ -62,7 +62,8 @@ pub struct Config {
     pub font_family: String,
     pub font_size: f32,
     /// Recursive search enters junctions and symbolic links to folders (off: cycles and
-    /// unexpectedly huge trees such as a link to a drive root are left alone).
+    /// unexpectedly huge trees such as a link to a drive root are left alone). Not in the
+    /// menus: config.json only.
     pub search_links: bool,
     /// Shift+letter: the folder last shown on each drive ("D:"), saved on exit.
     pub drive_dirs: std::collections::BTreeMap<String, PathBuf>,

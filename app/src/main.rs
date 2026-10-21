@@ -2377,24 +2377,6 @@ impl Controller {
             self.navigate(p, dir, Mode::Refresh);
         }
     }
-    /// Edit > 検索でリンク先も辿る (saved); results on screen keep their walk until F5.
-    fn toggle_search_links(&mut self) {
-        self.config.search_links = !self.config.search_links;
-        self.save_config();
-        for pane in &mut self.panes {
-            if pane.found.is_none() {
-                pane.finder = None;
-            }
-        }
-        if let Some(ui) = self.ui.upgrade() {
-            ui.set_search_links(self.config.search_links);
-        }
-        self.message(if self.config.search_links {
-            "検索でジャンクションとシンボリックリンクの先も辿ります"
-        } else {
-            "検索でジャンクションとシンボリックリンクの先は辿りません"
-        });
-    }
     /// Path bar > パスのコピー.
     fn copy_path(&mut self, p: usize) {
         let path = display(&self.data(p).dir);
@@ -2979,7 +2961,7 @@ fn sandbox() -> Result<PathBuf, Box<dyn std::error::Error>> {
     }
     Ok(root)
 }
-/// Shows what 編集 > 検索でリンク先も辿る changes: Ctrl+Alt+Shift+F for "資料" in
+/// Shows what config.json "search_links" changes: Ctrl+Alt+Shift+F for "資料" in
 /// 検索の起点 finds one file without it and two with it; the link back to the start folder
 /// is never entered either way.
 fn link_example(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -2991,8 +2973,8 @@ fn link_example(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(
         dir.join("説明.txt"),
         "「検索の起点」を開いて Ctrl+Alt+Shift+F で「資料」を検索する。\r\n\
-         編集 > 検索でリンク先も辿る がオフ: 資料 1.txt だけ（リンクは結果に出るが中に入らない）。\r\n\
-         オン: 「起点の外へのリンク」を通って 資料 2.txt も見つかる。\r\n\
+         既定（config.json の \"search_links\": false）: 資料 1.txt だけ（リンクは結果に出るが中に入らない）。\r\n\
+         \"search_links\": true にして再起動: 「起点の外へのリンク」を通って 資料 2.txt も見つかる。\r\n\
          「起点へ戻るリンク」は走査済みの範囲を指すので、どちらでも中に入らない（循環しない）。\r\n",
     )?;
     for (link, target) in [("起点の外へのリンク", dir.join("起点の外")), ("起点へ戻るリンク", start.clone())] {
@@ -3258,7 +3240,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 32 => c.open_find(p, 2),
                 33 => c.set_filter(p, ""),
                 34 => c.open_find(p, 3),
-                35 => c.toggle_search_links(),
                 40 => c.toggle_compare(),
                 _ => {}
             }
@@ -3389,7 +3370,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_pane_count(c.config.panes as i32);
         ui.set_three_columns(c.config.three_columns);
         ui.set_active_hidden(c.config.show_hidden[0]);
-        ui.set_search_links(c.config.search_links);
         c.sync_columns();
     }
     ui.invoke_focus_pane(0);
