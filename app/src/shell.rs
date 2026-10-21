@@ -306,21 +306,101 @@ fn finish(op: &IFileOperation) -> Result<bool, String> {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct Transferred {
+    pub aborted: bool,
+    /// Replaced items still under their temporary name: the new item already took the
+    /// name when the paste stopped, or deleting the old one failed.
+    pub kept: Vec<PathBuf>,
+}
 /// Runs a plan whose conflicts the user already resolved: the copy engine never prompts.
-/// Items being replaced are deleted first, without the Recycle Bin (the user's choice).
-/// Returns whether anything was aborted. Call on a thread that owns an [`Apartment`].
-pub fn transfer(plan: &crate::paste::Plan) -> Result<bool, String> {
-    // The last check before anything is deleted or overwritten.
+/// Items being replaced are renamed aside first, and deleted (without the Recycle Bin, the
+/// user's choice) only once the paste succeeded; otherwise they get their names back.
+/// Call on a thread that owns an [`Apartment`].
+pub fn transfer(plan: &crate::paste::Plan) -> Result<Transferred, String> {
+    // The last check before anything is renamed or overwritten.
     plan.verify()?;
-    if !plan.remove.is_empty() {
-        let op = operation(FOF_NOCONFIRMATION)?;
-        for path in &plan.remove {
-            unsafe { op.DeleteItem(&item(path)?, None) }.map_err(|e| e.to_string())?;
+    let aside = set_aside(&plan.remove)?;
+    match paste_ops(plan) {
+        Ok(false) => Ok(Transferred { aborted: false, kept: delete_aside(&aside) }),
+        Ok(true) => Ok(Transferred { aborted: true, kept: restore(&aside) }),
+        Err(e) => Err(with_kept(e, &restore(&aside))),
+    }
+}
+/// Appended to a failure: where replaced items were left, so the user can find them.
+pub fn with_kept(message: String, kept: &[PathBuf]) -> String {
+    if kept.is_empty() {
+        return message;
+    }
+    let names: Vec<_> = kept.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy()).collect();
+    format!("{message}（置換前のフォルダーが残っています: {}）", names.join("、"))
+}
+/// Same-folder renames: instant, and they fail rather than replace an existing item.
+fn rename_plain(from: &Path, to: &Path) -> windows::core::Result<()> {
+    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(Some(0)).collect() };
+    unsafe { MoveFileExW(PCWSTR(wide(from).as_ptr()), PCWSTR(wide(to).as_ptr()), MOVE_FILE_FLAGS(0)) }
+}
+/// `name~enyfile-old` (then `-2`, `-3`...): recognizable if a crash leaves it behind.
+fn set_aside(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let mut aside = Vec::new();
+    for path in paths {
+        let mut renamed = Err(String::new());
+        for n in 1..100 {
+            let mut name = path.file_name().unwrap_or_default().to_os_string();
+            name.push(if n == 1 { "~enyfile-old".to_string() } else { format!("~enyfile-old-{n}") });
+            let temp = path.with_file_name(name);
+            match rename_plain(path, &temp) {
+                Ok(()) => {
+                    renamed = Ok(temp);
+                    break;
+                }
+                Err(e) if [ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS].iter().any(|c| e.code() == c.to_hresult()) => {}
+                Err(e) => {
+                    renamed = Err(e.message());
+                    break;
+                }
+            }
         }
-        if finish(&op)? {
-            return Ok(true);
+        match renamed {
+            Ok(temp) => aside.push((path.clone(), temp)),
+            Err(e) => {
+                let e = format!("置換するフォルダーを退避できません: {}: {e}", shell_path(path).display());
+                return Err(with_kept(e, &restore(&aside)));
+            }
         }
     }
+    Ok(aside)
+}
+/// Back to the original names. One the new item already took stays aside: after a move
+/// it holds the moved data, so neither side may be deleted. Returns what stayed aside.
+fn restore(aside: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
+    let mut kept: Vec<PathBuf> = aside
+        .iter()
+        .rev()
+        .filter(|(path, temp)| rename_plain(temp, path).is_err())
+        .map(|(_, temp)| temp.clone())
+        .collect();
+    kept.reverse();
+    kept
+}
+/// Returns what could not be deleted.
+fn delete_aside(aside: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
+    if aside.is_empty() {
+        return Vec::new();
+    }
+    let deleted = operation(FOF_NOCONFIRMATION).and_then(|op| {
+        for (_, temp) in aside {
+            unsafe { op.DeleteItem(&item(temp)?, None) }.map_err(|e| e.to_string())?;
+        }
+        finish(&op)
+    });
+    if deleted == Ok(false) {
+        return Vec::new();
+    }
+    aside.iter().map(|(_, temp)| temp.clone()).filter(|temp| std::fs::symlink_metadata(temp).is_ok()).collect()
+}
+/// The copies and moves themselves; Ok(true) when aborted.
+fn paste_ops(plan: &crate::paste::Plan) -> Result<bool, String> {
     if plan.ops.is_empty() {
         return Ok(false);
     }
@@ -651,6 +731,67 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
         assert_eq!(std::fs::read_to_string(&dotted).unwrap(), "junk");
         let _ = std::fs::remove_file(&dotted);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    fn tree(tag: &str, files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("enyfile-shell-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        for file in files {
+            let path = root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, file).unwrap();
+        }
+        root
+    }
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+    fn replace_plan(root: &Path) -> crate::paste::Plan {
+        let mut ask = |_: crate::paste::Question| (crate::paste::Answer::Replace, false);
+        crate::paste::plan(&[root.join(r"src\Folder")], &root.join("dst"), false, &mut ask).unwrap().unwrap()
+    }
+    /// Audit #3: the replaced folder is deleted only after the paste succeeded.
+    #[test]
+    fn replace_deletes_the_old_folder_last() {
+        let root = tree("replace", &[r"src\Folder\new.txt", r"dst\Folder\old.txt"]);
+        let _ole = Apartment::new().unwrap();
+        let plan = replace_plan(&root);
+        assert_eq!(plan.remove, [root.join(r"dst\Folder")]);
+        let done = transfer(&plan).unwrap();
+        assert!(!done.aborted && done.kept.is_empty());
+        assert_eq!(names(&root.join("dst")), ["Folder"]);
+        assert_eq!(names(&root.join(r"dst\Folder")), ["new.txt"]);
+        assert_eq!(names(&root.join(r"src\Folder")), ["new.txt"]);
+        // A paste that fails gives the replaced folder its name back.
+        std::fs::write(root.join(r"src\Folder\new.txt"), "newer").unwrap();
+        let mut failing = replace_plan(&root);
+        failing.ops.push(crate::paste::Op { source: root.join("missing"), dir: root.join("dst"), name: None, fresh: false });
+        assert!(transfer(&failing).is_err());
+        assert_eq!(names(&root.join("dst")), ["Folder"]);
+        assert_eq!(std::fs::read_to_string(root.join(r"dst\Folder\new.txt")).unwrap(), r"src\Folder\new.txt");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn set_aside_and_restore() {
+        let root = tree("aside", &[r"A\a.txt", r"A~enyfile-old\taken.txt", r"B\b.txt"]);
+        let (a, b) = (root.join("A"), root.join("B"));
+        // A taken temporary name moves on to the next one.
+        let aside = set_aside(&[a.clone(), b.clone()]).unwrap();
+        assert_eq!(aside[0].1, root.join("A~enyfile-old-2"));
+        assert_eq!(names(&root), ["A~enyfile-old", "A~enyfile-old-2", "B~enyfile-old"]);
+        // Once the new item holds the name, the old one stays aside: neither is lost.
+        std::fs::create_dir(&b).unwrap();
+        assert_eq!(restore(&aside), [root.join("B~enyfile-old")]);
+        assert_eq!(names(&root), ["A", "A~enyfile-old", "B", "B~enyfile-old"]);
+        // A failure partway puts the earlier ones back.
+        let error = set_aside(&[a.clone(), root.join("missing")]).unwrap_err();
+        assert!(error.contains("missing"), "{error}");
+        assert_eq!(names(&root), ["A", "A~enyfile-old", "B", "B~enyfile-old"]);
+        assert_eq!(names(&a), ["a.txt"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -337,7 +337,9 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     }
                     expect(std::fs::read_to_string(root.join("right/Folder A/inner.txt")).ok().as_deref() == Some("new"), "replaced folder content")?;
                     expect(root.join("right/Folder A/sub/deep.txt").exists(), "replaced folder complete")?;
-                    s.pass("folder replace: existing folder removed, incoming copied");
+                    let aside = std::fs::read_dir(root.join("right")).map_err(|e| e.to_string())?.flatten().any(|e| e.file_name().to_string_lossy().contains("~enyfile-old"));
+                    expect(!aside, "old folder set aside, then deleted")?;
+                    s.pass("folder replace: existing folder set aside and deleted, incoming copied");
                     // Restore the clipboard the Explorer-side steps expect.
                     click(&ui, 0, index(&c, 0, "a.txt")?, false);
                     click(&ui, 0, index(&c, 0, "日本語 ファイル.txt")?, true);

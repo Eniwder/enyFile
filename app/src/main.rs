@@ -1802,7 +1802,7 @@ impl Controller {
                 match result {
                     Ok(outcome) => {
                         let verb = if outcome.moved { "移動" } else { "コピー" };
-                        self.message(if outcome.cancelled {
+                        let message = if outcome.cancelled {
                             "貼り付けを取り消しました".to_string()
                         } else if outcome.aborted {
                             format!("{verb}は途中で中止されました")
@@ -1812,7 +1812,8 @@ impl Controller {
                             format!("{verb}しました（一部スキップ） → {}", display(&dir))
                         } else {
                             format!("{verb}しました → {}", display(&dir))
-                        });
+                        };
+                        self.message(shell::with_kept(message, &outcome.kept));
                     }
                     Err(e) => self.message(format!("貼り付けできません: {e}")),
                 }
@@ -2742,6 +2743,8 @@ struct PasteOutcome {
     cancelled: bool,
     /// Folders left out because the destination was the folder itself or inside it.
     inside: usize,
+    /// Replaced folders left under a temporary name (see `shell::transfer`).
+    kept: Vec<PathBuf>,
 }
 type AnswerTx = mpsc::SyncSender<(paste::Answer, bool)>;
 /// Paste worker: read the clipboard, plan (asking the UI about each conflict), then run.
@@ -2783,14 +2786,14 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
         return Ok((Vec::new(), cancelled));
     };
     // `transfer` verifies the plan against the disk right before it changes anything.
-    let aborted = shell::transfer(&plan)?;
+    let shell::Transferred { aborted, kept } = shell::transfer(&plan)?;
     if moved && !aborted {
         plan.remove_emptied();
         if !plan.skipped {
             shell::finish_cut(&paths);
         }
     }
-    let outcome = PasteOutcome { moved, aborted, skipped: plan.skipped, cancelled: false, inside: plan.inside };
+    let outcome = PasteOutcome { moved, aborted, skipped: plan.skipped, cancelled: false, inside: plan.inside, kept };
     Ok((plan.targets, outcome))
 }
 
