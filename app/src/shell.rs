@@ -731,7 +731,7 @@ mod tests {
         };
         assert!(transfer(&plan).unwrap_err().contains("victim."));
         let copy = crate::paste::Plan {
-            ops: vec![crate::paste::Op { source: dotted.clone(), dir: root.join("out"), name: None, fresh: true }],
+            ops: vec![crate::paste::Op { source: dotted.clone(), dir: root.join("out"), name: None, fresh: true, overwrites: None }],
             ..Default::default()
         };
         assert!(transfer(&copy).is_err());
@@ -776,7 +776,7 @@ mod tests {
         // A paste that fails gives the replaced folder its name back.
         std::fs::write(root.join(r"src\Folder\new.txt"), "newer").unwrap();
         let mut failing = replace_plan(&root);
-        failing.ops.push(crate::paste::Op { source: root.join("missing"), dir: root.join("dst"), name: None, fresh: false });
+        failing.ops.push(crate::paste::Op { source: root.join("missing"), dir: root.join("dst"), name: None, fresh: false, overwrites: None });
         assert!(transfer(&failing).is_err());
         assert_eq!(names(&root.join("dst")), ["Folder"]);
         assert_eq!(std::fs::read_to_string(root.join(r"dst\Folder\new.txt")).unwrap(), r"src\Folder\new.txt");
@@ -794,7 +794,7 @@ mod tests {
             crate::paste::plan(&[source], &root.join(dir), moved, &mut ask).unwrap().unwrap()
         };
         let mut failing = nested_plan("c", false);
-        failing.ops.push(crate::paste::Op { source: root.join("missing"), dir: root.join("c"), name: None, fresh: false });
+        failing.ops.push(crate::paste::Op { source: root.join("missing"), dir: root.join("c"), name: None, fresh: false, overwrites: None });
         assert!(transfer(&failing).is_err());
         assert_eq!(names(&root.join("c")), ["Folder"]);
         assert_eq!(names(&root.join(r"c\Folder")), ["Folder", "outer.txt"]);

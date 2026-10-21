@@ -8,7 +8,7 @@ use std::{
     time::SystemTime,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Meta {
     pub directory: bool,
     pub size: u64,
@@ -62,6 +62,9 @@ pub struct Op {
     pub name: Option<String>,
     /// The target did not exist when planned; executing must not overwrite one.
     pub fresh: bool,
+    /// The existing file as it was when the user chose to overwrite it; executing must not
+    /// overwrite anything else (another app may have changed it while the dialog was open).
+    pub overwrites: Option<Meta>,
 }
 impl Op {
     pub fn target(&self) -> PathBuf {
@@ -156,6 +159,7 @@ impl Planner<'_> {
             dir: dir.to_path_buf(),
             name,
             fresh,
+            overwrites: None,
         };
         if top {
             self.plan.targets.push(op.target());
@@ -232,7 +236,8 @@ impl Planner<'_> {
             Answer::Skip => self.plan.skipped = true,
             Answer::Newer if from.modified <= to.modified => self.plan.skipped = true,
             Answer::Overwrite | Answer::Newer if kind == Kind::File => {
-                self.push(source, dir, None, false, top)
+                self.push(source, dir, None, false, top);
+                self.plan.ops.last_mut().unwrap().overwrites = Some(to);
             }
             Answer::Rename(new) => {
                 self.names(dir)?.insert(fold(&new));
@@ -301,10 +306,13 @@ fn below(inner: &Path, outer: &Path) -> Option<PathBuf> {
     (!rest.as_os_str().is_empty()).then(|| rest.to_path_buf())
 }
 impl Plan {
-    /// Something appeared where we planned to create a new item: executing would overwrite
-    /// it without the user having chosen that.
+    /// Something appeared where we planned to create a new item, or a file to overwrite is
+    /// no longer the one the user saw: executing would overwrite what nobody chose to.
     pub fn changed(&self) -> bool {
-        self.ops.iter().any(|op| op.fresh && op.target().exists())
+        self.ops.iter().any(|op| match &op.overwrites {
+            Some(seen) => meta(&op.target()).as_ref() != Some(seen),
+            None => op.fresh && op.target().exists(),
+        })
     }
     /// Checked right before anything is renamed or written, with the disk as it is now
     /// (the user may have taken a while to answer): why the paste must not run, or for each
@@ -494,11 +502,34 @@ mod tests {
         let bad = Plan {
             remove: vec![root.join(r"w\Folder\Folder")],
             remove_ids: vec![crate::pathid::ident(&nested)],
-            ops: vec![Op { source: nested, dir: root.join("x"), name: None, fresh: false }],
+            ops: vec![Op { source: nested, dir: root.join("x"), name: None, fresh: false, overwrites: None }],
             ..Plan::default()
         };
         assert!(bad.verify().unwrap_err().contains("貼り付け元を削除"));
         assert!(root.join(r"w\Folder\Folder\inner.txt").exists());
+    }
+    /// Audit #4: a file changed after the user chose to overwrite it is not overwritten.
+    #[test]
+    fn overwrite_only_what_was_confirmed() {
+        let f = fixture("confirmed");
+        let existing = f.0.join("dst/a.txt");
+        for answer in [Answer::Overwrite, Answer::Newer] {
+            // "Newer" needs the incoming file to be newer when asked.
+            let newer = SystemTime::now() + std::time::Duration::from_secs(60);
+            std::fs::File::options().write(true).open(f.0.join("src/a.txt")).unwrap().set_modified(newer).unwrap();
+            let plan = plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| (answer.clone(), false)).unwrap().unwrap();
+            assert_eq!(plan.ops.len(), 1);
+            assert!(!plan.changed() && plan.verify().is_ok(), "{answer:?}");
+            // Saved by another app while the dialog was open: same size, new time.
+            let later = SystemTime::now() + std::time::Duration::from_secs(120);
+            std::fs::File::options().write(true).open(&existing).unwrap().set_modified(later).unwrap();
+            assert!(plan.changed() && plan.verify().is_err(), "{answer:?}");
+            std::fs::write(&existing, "a-old").unwrap();
+        }
+        // Deleted meanwhile: also not what the user chose to overwrite.
+        let plan = plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| (Answer::Overwrite, false)).unwrap().unwrap();
+        std::fs::remove_file(&existing).unwrap();
+        assert!(plan.changed());
     }
     /// A folder pasted into itself or below itself is left out before any question.
     #[test]
@@ -514,7 +545,7 @@ mod tests {
         .unwrap();
         assert_eq!((plan.inside, asked), (1, 0));
         assert_eq!(names(&plan), ["sub/a.txt"]);
-        let into_itself = Plan { ops: vec![Op { source: folder.clone(), dir: folder.clone(), name: None, fresh: true }], ..Plan::default() };
+        let into_itself = Plan { ops: vec![Op { source: folder.clone(), dir: folder.clone(), name: None, fresh: true, overwrites: None }], ..Plan::default() };
         assert!(into_itself.verify().is_err());
     }
     #[test]
