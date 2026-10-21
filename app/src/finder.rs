@@ -44,7 +44,7 @@ impl Finder {
         let stop = Arc::new(AtomicBool::new(false));
         let walk = Walk {
             queue: VecDeque::from([root.clone()]),
-            walked: vec![root.clone()],
+            walked: Vec::new(),
             root,
             show_hidden,
             follow,
@@ -131,9 +131,15 @@ struct Walk {
     query: Option<Query>,
 }
 impl Walk {
+    /// Link targets are compared in canonical form (`\\?\`, long names), so the root that
+    /// starts the walked list must be too, or a link back to it is entered once.
+    fn canonical_root(&self) -> PathBuf {
+        std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone())
+    }
     fn run(mut self) {
         // File type names and icons come from the Shell, which needs COM on this thread.
         let _com = crate::shell::Apartment::new();
+        self.walked = vec![self.canonical_root()];
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 return;
@@ -142,7 +148,7 @@ impl Walk {
                 self.query = Some(Query { id, pattern, pos: 0, count: 0, batch: Vec::new(), sent: None, done: false, icons: Vec::new() });
                 if self.overflow {
                     self.queue = VecDeque::from([self.root.clone()]);
-                    self.walked = vec![self.root.clone()];
+                    self.walked = vec![self.canonical_root()];
                 }
             }
             let open = self.query.as_ref().is_some_and(|q| !q.done);
