@@ -370,9 +370,19 @@ pub fn with_kept(message: String, kept: &[PathBuf]) -> String {
     format!("{message}（置換前のフォルダーが残っています: {}）", names.join("、"))
 }
 /// Same-folder renames: instant, and they fail rather than replace an existing item.
+/// A virus scanner or the indexer may hold something inside open for a moment (the copy
+/// engine's own deletes wait that out too), so a busy item is retried for about a second.
 fn rename_plain(from: &Path, to: &Path) -> windows::core::Result<()> {
     let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(Some(0)).collect() };
-    unsafe { MoveFileExW(PCWSTR(wide(from).as_ptr()), PCWSTR(wide(to).as_ptr()), MOVE_FILE_FLAGS(0)) }
+    let (from, to) = (wide(from), wide(to));
+    let busy = [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_ACCESS_DENIED];
+    for _ in 0..10 {
+        match unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) } {
+            Err(e) if busy.iter().any(|c| e.code() == c.to_hresult()) => std::thread::sleep(Duration::from_millis(100)),
+            done => return done,
+        }
+    }
+    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) }
 }
 /// `name~enyfile-old` (then `-2`, `-3`...): recognizable if a crash leaves it behind.
 fn set_aside(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
@@ -870,6 +880,24 @@ mod tests {
         let error = set_aside(&[a.clone(), root.join("missing")]).unwrap_err();
         assert!(error.contains("missing"), "{error}");
         assert_eq!(names(&root), ["A", "A~enyfile-old", "B", "B~enyfile-old"]);
+        assert_eq!(names(&a), ["a.txt"]);
+        // A file held open inside for a moment (a scanner) is waited out; held for good, the
+        // set-aside fails and nothing is renamed.
+        let hold = || {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::File::options().read(true).share_mode(0).open(a.join("a.txt")).unwrap()
+        };
+        let held = hold();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let aside = set_aside(&[a.clone()]).unwrap();
+        release.join().unwrap();
+        assert!(restore(&aside).is_empty());
+        let held = hold();
+        assert!(set_aside(&[a.clone()]).is_err());
+        drop(held);
         assert_eq!(names(&a), ["a.txt"]);
         let _ = std::fs::remove_dir_all(&root);
     }

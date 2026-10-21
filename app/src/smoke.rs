@@ -180,7 +180,9 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
             return;
         }
         if started.elapsed() > Duration::from_secs(90) {
-            finish(&mut s, Some("timeout".into()));
+            // The status line usually says why the step never completed.
+            let message = c.borrow().ui.upgrade().map(|ui| ui.get_message().to_string()).unwrap_or_default();
+            finish(&mut s, Some(format!("timeout (message: {message})")));
             s.step = usize::MAX;
             return;
         }
