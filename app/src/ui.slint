@@ -958,6 +958,9 @@ export component App inherits Window {
     public function focus-find() { find-edit.text = root.find-text; find-edit.focus(); find-edit.select-all(); }
     // Menu bar menu shown: -1 none, 0 ファイル, 1 編集, 2 表示.
     out property <int> open-menu: -1;
+    // A shown menu makes the window a little more opaque (Rust sets the window opacity).
+    callback menu-shown();
+    changed open-menu => { root.menu-shown(); }
     function show-menu(menu: int) { root.open-menu = menu; menu-keys.focus(); }
     function close-menu() { root.open-menu = -1; root.focus-pane(root.active-pane); }
     init => { Palette.color-scheme = ColorScheme.dark; }
@@ -1291,7 +1294,6 @@ export component App inherits Window {
             MenuEntry { text: "更新日時で並べ替え (Ctrl+Shift+T)"; clicked => { root.close-menu(); root.sort(root.active-pane, 2); } }
             MenuEntry { text: "拡張子で並べ替え (Ctrl+Shift+E)"; clicked => { root.close-menu(); root.sort(root.active-pane, 3); } }
             Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "隠しファイルの表示 (Alt+Z)"; check: root.active-hidden ? 1 : 0; clicked => { root.close-menu(); root.menu-command(2); } }
             MenuEntry { text: "ペインの比較 (Ctrl+Shift+D)"; clicked => { root.close-menu(); root.menu-command(40); } }
             Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
             MenuEntry { text: "サイズの表示"; check: root.columns.size ? 1 : 0; clicked => { root.close-menu(); root.menu-command(20); } }
@@ -1299,6 +1301,7 @@ export component App inherits Window {
             MenuEntry { text: "時刻の表示"; check: root.columns.time ? 1 : 0; clicked => { root.close-menu(); root.menu-command(22); } }
             MenuEntry { text: "属性の表示"; check: root.columns.attr ? 1 : 0; clicked => { root.close-menu(); root.menu-command(23); } }
             MenuEntry { text: "種類の表示"; check: root.columns.kind ? 1 : 0; clicked => { root.close-menu(); root.menu-command(24); } }
+            MenuEntry { text: "隠しファイルの表示 (Alt+Z)"; check: root.active-hidden ? 1 : 0; clicked => { root.close-menu(); root.menu-command(2); } }
             Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
             MenuEntry { text: "2 ペイン (Ctrl+Shift+2)"; check: root.pane-count == 2 ? 1 : 0; clicked => { root.close-menu(); root.menu-command(10); } }
             MenuEntry { text: "3 ペイン 横長 (Ctrl+Shift+3 2回)"; check: root.pane-count == 3 && !root.three-columns ? 1 : 0; clicked => { root.close-menu(); root.menu-command(11); } }

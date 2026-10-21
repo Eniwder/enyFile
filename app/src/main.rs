@@ -2355,12 +2355,19 @@ impl Controller {
             Err(e) => self.message(e),
         }
     }
-    /// The settings and name dialogs are always shown opaque; the configured opacity returns when they close.
+    /// The settings and name dialogs are always shown opaque, and an open menu a step more
+    /// opaque than the window; the configured opacity returns when they close.
     fn apply_opacity(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         if let Some(h) = hwnd(&ui) {
-            let opaque = ui.get_settings_open() || ui.get_name_open();
-            shell::set_opacity(h, if opaque { 1.0 } else { self.config.opacity });
+            let opacity = if ui.get_settings_open() || ui.get_name_open() {
+                1.0
+            } else if ui.get_open_menu() >= 0 {
+                (self.config.opacity + 0.1).min(1.0)
+            } else {
+                self.config.opacity
+            };
+            shell::set_opacity(h, opacity);
         }
     }
     fn activate(&mut self, p: usize, index: usize) {
@@ -2898,7 +2905,37 @@ fn sandbox() -> Result<PathBuf, Box<dyn std::error::Error>> {
         }
         std::fs::write(root.join("right").join("file 1.txt"), "right side")?;
     }
+    let links = root.join("left").join("リンクの例");
+    if !links.exists() {
+        link_example(&links)?;
+    }
     Ok(root)
+}
+/// Shows what 編集 > 検索でリンク先も辿る changes: Ctrl+Alt+Shift+F for "資料" in
+/// 検索の起点 finds one file without it and two with it; the link back to the start folder
+/// is never entered either way.
+fn link_example(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let start = dir.join("検索の起点");
+    std::fs::create_dir_all(start.join("ふつうのフォルダー"))?;
+    std::fs::create_dir_all(dir.join("起点の外"))?;
+    std::fs::write(start.join("ふつうのフォルダー").join("資料 1.txt"), "検索の起点の中")?;
+    std::fs::write(dir.join("起点の外").join("資料 2.txt"), "リンク先（検索の起点の外）")?;
+    std::fs::write(
+        dir.join("説明.txt"),
+        "「検索の起点」を開いて Ctrl+Alt+Shift+F で「資料」を検索する。\r\n\
+         編集 > 検索でリンク先も辿る がオフ: 資料 1.txt だけ（リンクは結果に出るが中に入らない）。\r\n\
+         オン: 「起点の外へのリンク」を通って 資料 2.txt も見つかる。\r\n\
+         「起点へ戻るリンク」は走査済みの範囲を指すので、どちらでも中に入らない（循環しない）。\r\n",
+    )?;
+    for (link, target) in [("起点の外へのリンク", dir.join("起点の外")), ("起点へ戻るリンク", start.clone())] {
+        // Junctions need no administrator rights, unlike symbolic links. No console flash.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut mklink = std::process::Command::new("cmd");
+        mklink.args(["/c", "mklink", "/J"]).arg(start.join(link)).arg(target).creation_flags(CREATE_NO_WINDOW);
+        mklink.output()?;
+    }
+    Ok(())
 }
 /// Start folder when none is configured: the sandbox while developing,
 /// otherwise the Desktop (left, 0) and Documents (right, 1).
@@ -3048,6 +3085,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let c = controller.clone();
         ui.on_open_settings(move || c.borrow_mut().open_settings());
+    }
+    {
+        let c = controller.clone();
+        ui.on_menu_shown(move || {
+            if let Ok(c) = c.try_borrow() {
+                c.apply_opacity();
+            }
+        });
     }
     {
         let c = controller.clone();
@@ -3273,4 +3318,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     slint::run_event_loop()?;
     CONTROLLER.with(|c| c.borrow_mut().take());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// The sandbox's link example shows what following links changes in a search.
+    #[test]
+    fn link_example_search() {
+        let dir = std::env::temp_dir().join(format!("enyfile-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        link_example(&dir).unwrap();
+        let start = dir.join("検索の起点");
+        for (follow, expected) in [(false, vec!["資料 1.txt"]), (true, vec!["資料 1.txt", "資料 2.txt"])] {
+            let (tx, rx) = mpsc::channel();
+            let finder = finder::Finder::start(start.clone(), false, follow, finder::INDEX_LIMIT, move |event| tx.send(event).is_ok());
+            finder.query(1, listing::Pattern::new("資料").unwrap());
+            let mut found = Vec::new();
+            loop {
+                match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                    finder::Event::Found(1, batch, done) => {
+                        found.extend(batch.into_iter().map(|e| e.name.to_string()));
+                        if done.is_some() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            found.sort();
+            assert_eq!(found, expected, "follow: {follow}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
