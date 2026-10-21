@@ -231,9 +231,36 @@ fn write_dword(data: &IDataObject, cf: u32, value: u32) {
     }
 }
 
+/// DragQueryFileW trusts the block: the list must start inside it and end with a double
+/// NUL before its end. Another process supplies it, so check first.
+fn hdrop_valid(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(..20) else { return false };
+    let at = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    let wide = header[16..20] != [0; 4];
+    let Some(list) = bytes.get(at..).filter(|_| at >= 20) else { return false };
+    // The list ends at the first empty name.
+    let ends = |units: &[u16]| units.first() == Some(&0) || units.windows(2).any(|w| w == [0, 0]);
+    if wide {
+        ends(&list.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>())
+    } else {
+        ends(&list.iter().map(|&b| u16::from(b)).collect::<Vec<_>>())
+    }
+}
 fn hdrop_paths(data: &IDataObject) -> Option<Vec<PathBuf>> {
     unsafe {
         let mut medium = data.GetData(&etc(CF_HDROP.0 as u32)).ok()?;
+        let valid = medium.tymed == TYMED_HGLOBAL.0 as u32 && {
+            let h = medium.u.hGlobal;
+            let ptr = GlobalLock(h);
+            let valid = !ptr.is_null() && hdrop_valid(std::slice::from_raw_parts(ptr.cast::<u8>(), GlobalSize(h)));
+            let _ = GlobalUnlock(h);
+            valid
+        };
+        if !valid {
+            // Left to the copy engine, like Shell items without paths.
+            ReleaseStgMedium(&mut medium);
+            return None;
+        }
         let drop = HDROP(medium.u.hGlobal.0);
         let mut paths = Vec::new();
         for i in 0..DragQueryFileW(drop, u32::MAX, None) {
@@ -689,6 +716,27 @@ mod tests {
             .collect();
         let text = String::from_utf16(&wide).unwrap();
         assert_eq!(text, "C:\\demo\\日本語_😀.txt\0\\\\server\\share\\a.txt\0\0");
+    }
+    /// Audit #6: a CF_HDROP block from another process is checked before DragQueryFileW.
+    #[test]
+    fn hdrop_blocks_are_checked() {
+        let good = hdrop_bytes(&[PathBuf::from(r"C:\a.txt"), PathBuf::from(r"C:\b")]).unwrap();
+        assert!(hdrop_valid(&good));
+        assert!(hdrop_valid(&hdrop_bytes(&[]).unwrap()));
+        assert!(!hdrop_valid(&good[..good.len() - 2]), "no double NUL");
+        assert!(!hdrop_valid(&good[..19]), "short header");
+        let mut beyond = good.clone();
+        beyond[..4].copy_from_slice(&(good.len() as u32 + 2).to_le_bytes());
+        assert!(!hdrop_valid(&beyond), "list starts past the end");
+        let mut inside = good.clone();
+        inside[..4].copy_from_slice(&4u32.to_le_bytes());
+        assert!(!hdrop_valid(&inside), "list overlaps the header");
+        // ANSI lists (fWide = 0) end with two zero bytes.
+        let mut ansi = good[..20].to_vec();
+        ansi[16..20].copy_from_slice(&0u32.to_le_bytes());
+        ansi.extend_from_slice(b"C:\\a.txt\0\0");
+        assert!(hdrop_valid(&ansi));
+        assert!(!hdrop_valid(&ansi[..ansi.len() - 1]));
     }
     #[test]
     fn os_path_refuses_names_win32_would_change() {
