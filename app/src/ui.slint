@@ -318,6 +318,12 @@ component Pane inherits Rectangle {
     callback copy-path();
     property <length> menu-x;
     changed page-size => { root.page-resized(root.page-size); }
+    // The full name of the cursor row when the list cuts it short (window coordinates).
+    out property <bool> tip-shown;
+    out property <string> tip-text;
+    out property <length> tip-x;
+    out property <length> tip-y;
+    changed rows => { root.tip-shown = false; }
     public function focus-list() { root.editing = false; keys.focus(); }
     public function focus-path() { root.editing = true; address.focus(); address.select-all(); }
     background: Theme.pane;
@@ -449,8 +455,22 @@ component Pane inherits Rectangle {
                 }
                 // Search results: the folder below the search root, dimmed, before the name.
                 // It gives way first when the name needs the room.
-                HorizontalLayout {
+                name-area := HorizontalLayout {
                     horizontal-stretch: 1; min-width: 40px; spacing: 0px;
+                    // The cursor row with its name cut short: after a second the whole name
+                    // shows over the list (App draws it, so it may run past the pane).
+                    property <bool> tip-wanted: row.current && root.active && self.preferred-width > self.width + 0.5px;
+                    changed tip-wanted => { if !self.tip-wanted { root.tip-shown = false; } }
+                    Timer {
+                        interval: 1s;
+                        running: name-area.tip-wanted;
+                        triggered => {
+                            root.tip-text = row.location + row.name + (row.ext != "" ? "." + row.ext : "");
+                            root.tip-x = name-area.absolute-position.x;
+                            root.tip-y = item.absolute-position.y;
+                            root.tip-shown = true;
+                        }
+                    }
                     if row.location != "" : Text { text: row.location; color: item.lit || row.selected ? item.fg : Theme.dim; overflow: elide; max-width: self.preferred-width; min-width: 16px; horizontal-stretch: 0; vertical-alignment: center; }
                     Text { text: root.compact && row.ext != "" ? row.name + "." + row.ext : row.name; color: item.name-color; overflow: elide; horizontal-stretch: 1; min-width: row.location != "" ? min(self.preferred-width, 160px) : 40px; vertical-alignment: center; }
                 }
@@ -1159,6 +1179,18 @@ export component App inherits Window {
             visible: root.find-mode == 0;
             text: root.message; color: Theme.dim; overflow: elide; vertical-alignment: center;
         }
+    }
+    // A cut-short name in full, over the row of the active pane (only it can show one).
+    // Kept inside the window: shifted left when it would run past the right edge.
+    property <bool> tip-shown: p0.tip-shown || p1.tip-shown || p2.tip-shown || p3.tip-shown;
+    if root.tip-shown : Rectangle {
+        property <string> text: p0.tip-shown ? p0.tip-text : p1.tip-shown ? p1.tip-text : p2.tip-shown ? p2.tip-text : p3.tip-text;
+        property <length> at-x: p0.tip-shown ? p0.tip-x : p1.tip-shown ? p1.tip-x : p2.tip-shown ? p2.tip-x : p3.tip-x;
+        width: tip-label.preferred-width + 12px; height: root.row-h;
+        x: max(0px, min(self.at-x - 6px, root.width - self.width));
+        y: p0.tip-shown ? p0.tip-y : p1.tip-shown ? p1.tip-y : p2.tip-shown ? p2.tip-y : p3.tip-y;
+        background: Theme.dialog; border-width: 1px; border-color: Theme.border-active;
+        tip-label := Text { x: 6px; height: parent.height; text: parent.text; color: Theme.text; vertical-alignment: center; }
     }
     // Find bar: Ctrl+F moves the cursor while typing (Ctrl+G next, Enter / Esc end),
     // Ctrl+Shift+F filters on Enter (Esc cancels).
