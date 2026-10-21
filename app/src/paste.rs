@@ -38,15 +38,13 @@ pub enum Answer {
     Skip,
     Rename(String),
     Merge,
-    /// Delete the existing folder (not via the Recycle Bin), then paste. Folders only.
+    /// Set the existing folder aside, paste, then delete it (not via the Recycle Bin).
+    /// Folders only; the incoming folder may lie inside the existing one.
     Replace,
     Cancel,
 }
 pub struct Question {
     pub kind: Kind,
-    /// False when the incoming folder lies inside the existing one: replacing would delete
-    /// the very folder being pasted. The dialog shows the button disabled.
-    pub replace: bool,
     pub moved: bool,
     pub source: PathBuf,
     pub target: PathBuf,
@@ -76,7 +74,7 @@ impl Op {
 #[derive(Default)]
 pub struct Plan {
     pub moved: bool,
-    /// Existing items deleted (not recycled) before pasting (Replace), with the object each
+    /// Existing items replaced (deleted, not recycled, after pasting), with the object each
     /// one was when the user chose to replace it.
     pub remove: Vec<PathBuf>,
     pub remove_ids: Vec<Option<crate::pathid::Ident>>,
@@ -205,19 +203,16 @@ impl Planner<'_> {
             (false, false) => Kind::File,
             _ => Kind::Mismatch,
         };
-        let replace = !(kind == Kind::Folder && self.ids.within(source, &target));
         let names = self.names(dir)?;
         let taken = names.clone();
         let auto = auto_name(&name, from.directory, &taken);
-        // "Replace, apply to all" does not reach a conflict where Replace is not offered.
-        let rule = self.rules.get(&kind).filter(|rule| replace || **rule != Answer::Replace);
+        let rule = self.rules.get(&kind);
         let answer = match rule {
             Some(Answer::Rename(_)) => Answer::Rename(auto),
             Some(rule) => rule.clone(),
             None => {
                 let (answer, all) = (self.ask)(Question {
                     kind,
-                    replace,
                     moved: self.plan.moved,
                     source: source.to_path_buf(),
                     target: target.clone(),
@@ -261,7 +256,7 @@ impl Planner<'_> {
                     self.plan.targets.push(target);
                 }
             }
-            Answer::Replace if kind == Kind::Folder && replace => {
+            Answer::Replace if kind == Kind::Folder => {
                 self.plan.remove_ids.push(crate::pathid::ident(&target));
                 self.plan.remove.push(target);
                 self.push(source, dir, None, false, top);
@@ -299,19 +294,27 @@ pub fn plan(
     }
     Ok(Some(planner.plan))
 }
+/// `inner` relative to `outer`, both resolved as the file system names them now.
+fn below(inner: &Path, outer: &Path) -> Option<PathBuf> {
+    let (inner, outer) = (std::fs::canonicalize(inner).ok()?, std::fs::canonicalize(outer).ok()?);
+    let rest = inner.strip_prefix(&outer).ok()?;
+    (!rest.as_os_str().is_empty()).then(|| rest.to_path_buf())
+}
 impl Plan {
     /// Something appeared where we planned to create a new item: executing would overwrite
     /// it without the user having chosen that.
     pub fn changed(&self) -> bool {
         self.ops.iter().any(|op| op.fresh && op.target().exists())
     }
-    /// Checked right before anything is deleted or written, with the disk as it is now
-    /// (the user may have taken a while to answer): Ok, or why the paste must not run.
-    pub fn verify(&self) -> Result<(), String> {
+    /// Checked right before anything is renamed or written, with the disk as it is now
+    /// (the user may have taken a while to answer): why the paste must not run, or for each
+    /// op whose source lies inside an item being replaced, that item's index in `remove` and
+    /// the path below it, to find the source again once the item is set aside.
+    pub fn verify(&self) -> Result<Vec<Option<(usize, PathBuf)>>, String> {
         if self.changed() {
             return Err("確認中に貼り付け先が変わったため中止しました".into());
         }
-        // All up front: a refusal halfway through would leave the deletions done.
+        // All up front: a refusal halfway through would leave items set aside.
         let paths = self.remove.iter().chain(self.ops.iter().flat_map(|op| [&op.source, &op.dir]));
         for path in paths {
             crate::shell::os_path(path)?;
@@ -321,15 +324,25 @@ impl Plan {
             if crate::pathid::ident(path) != *planned {
                 return Err(format!("置換するフォルダーが確認後に変わったため中止しました: {}", path.display()));
             }
-            // Deleting it would delete what is being pasted.
-            if let Some(op) = self.ops.iter().find(|op| ids.within(&op.source, path)) {
-                return Err(format!("貼り付け元を削除することになるため中止しました: {}", op.source.display()));
-            }
         }
         if let Some(op) = self.ops.iter().find(|op| ids.within(&op.dir, &op.source)) {
             return Err(format!("フォルダーをその中へは貼り付けられません: {}", op.source.display()));
         }
-        Ok(())
+        let mut inside = Vec::new();
+        for op in &self.ops {
+            let Some(i) = self.remove.iter().position(|path| ids.within(&op.source, path)) else {
+                inside.push(None);
+                continue;
+            };
+            // Replacing an item with itself deletes it; a source we cannot find again below
+            // the set-aside item would be lost the same way.
+            let below = (!ids.same(&op.source, &self.remove[i])).then(|| below(&op.source, &self.remove[i])).flatten();
+            match below {
+                Some(rest) => inside.push(Some((i, rest))),
+                None => return Err(format!("貼り付け元を削除することになるため中止しました: {}", op.source.display())),
+            }
+        }
+        Ok(inside)
     }
     /// After a move: remove merged source folders that ended up empty (skipped items stay).
     pub fn remove_emptied(&self) {
@@ -449,20 +462,20 @@ mod tests {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
         std::fs::write(root.join(r"w\Folder\Folder\inner.txt"), "inner").unwrap();
-        // (a) Folder\Folder pasted next to Folder, after "Replace, apply to all" for B:
-        // the rule does not reach it, Replace is offered disabled, and even a Replace
-        // answer is not carried out.
+        // (a) Folder\Folder pasted next to Folder, with "Replace, apply to all" from B: it
+        // is replaced too, and verify says where to find the source once Folder is set
+        // aside (shell::tests::replace_with_a_folder_inside_it runs it).
         let nested = crate::shell::shell_path(&root.join(r"w\Folder\Folder"));
-        let mut offered = Vec::new();
-        let replaced = plan(&[root.join(r"x\B"), nested.clone()], &root.join("w"), false, &mut |q| {
-            offered.push(q.replace);
+        let mut asked = 0;
+        let replaced = plan(&[root.join(r"x\B"), nested.clone()], &root.join("w"), false, &mut |_| {
+            asked += 1;
             (Answer::Replace, true)
         })
         .unwrap()
         .unwrap();
-        assert_eq!(offered, [true, false]);
-        assert_eq!(replaced.remove, [root.join(r"w\B")]);
-        assert!(replaced.skipped && replaced.verify().is_ok());
+        assert_eq!(asked, 1);
+        assert_eq!(replaced.remove, [root.join(r"w\B"), root.join(r"w\Folder")]);
+        assert_eq!(replaced.verify().unwrap(), [None, Some((1, PathBuf::from("Folder")))]);
         // (b) An item already in the destination: a copy is duplicated without a question,
         // a move does nothing.
         let here = root.join(r"dst\a.txt");
@@ -477,11 +490,11 @@ mod tests {
         assert_eq!(questions, 1, "only src/a.txt is asked about");
         let moved = plan(&[here.clone()], &root.join("dst"), true, &mut |_| unreachable!()).unwrap().unwrap();
         assert!(moved.ops.is_empty() && moved.remove.is_empty());
-        // A hand-made plan that removes the source's folder is refused before anything runs.
+        // A hand-made plan that replaces the source with itself is refused before anything runs.
         let bad = Plan {
-            remove: vec![root.join(r"w\Folder")],
-            remove_ids: vec![crate::pathid::ident(&root.join(r"w\Folder"))],
-            ops: vec![Op { source: nested, dir: root.join("w"), name: None, fresh: false }],
+            remove: vec![root.join(r"w\Folder\Folder")],
+            remove_ids: vec![crate::pathid::ident(&nested)],
+            ops: vec![Op { source: nested, dir: root.join("x"), name: None, fresh: false }],
             ..Plan::default()
         };
         assert!(bad.verify().unwrap_err().contains("貼り付け元を削除"));

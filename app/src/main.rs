@@ -2402,7 +2402,6 @@ impl Controller {
         };
         let name = q.target.file_name().unwrap().to_string_lossy().into_owned();
         let info = AskInfo {
-            replace: q.replace,
             kind: match q.kind {
                 paste::Kind::File => 0,
                 paste::Kind::Folder => 1,
@@ -2438,7 +2437,7 @@ impl Controller {
             (2, _) => Answer::Skip,
             (3, _) if self.validate(&name).is_empty() => Answer::Rename(name),
             (4, Kind::Folder) => Answer::Merge,
-            (5, Kind::Folder) if q.replace => Answer::Replace,
+            (5, Kind::Folder) => Answer::Replace,
             (6, _) => Answer::Cancel,
             _ => return,
         };

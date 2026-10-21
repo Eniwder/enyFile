@@ -319,9 +319,16 @@ pub struct Transferred {
 /// Call on a thread that owns an [`Apartment`].
 pub fn transfer(plan: &crate::paste::Plan) -> Result<Transferred, String> {
     // The last check before anything is renamed or overwritten.
-    plan.verify()?;
+    let inside = plan.verify()?;
     let aside = set_aside(&plan.remove)?;
-    match paste_ops(plan) {
+    // A source inside a replaced item (Folder\Folder replacing Folder) moved aside with it.
+    let sources: Vec<PathBuf> = plan
+        .ops
+        .iter()
+        .zip(inside)
+        .map(|(op, inside)| inside.map_or_else(|| op.source.clone(), |(i, rest)| aside[i].1.join(rest)))
+        .collect();
+    match paste_ops(plan, &sources) {
         Ok(false) => Ok(Transferred { aborted: false, kept: delete_aside(&aside) }),
         Ok(true) => Ok(Transferred { aborted: true, kept: restore(&aside) }),
         Err(e) => Err(with_kept(e, &restore(&aside))),
@@ -400,7 +407,7 @@ fn delete_aside(aside: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     aside.iter().map(|(_, temp)| temp.clone()).filter(|temp| std::fs::symlink_metadata(temp).is_ok()).collect()
 }
 /// The copies and moves themselves; Ok(true) when aborted.
-fn paste_ops(plan: &crate::paste::Plan) -> Result<bool, String> {
+fn paste_ops(plan: &crate::paste::Plan, sources: &[PathBuf]) -> Result<bool, String> {
     if plan.ops.is_empty() {
         return Ok(false);
     }
@@ -409,14 +416,14 @@ fn paste_ops(plan: &crate::paste::Plan) -> Result<bool, String> {
     ))?;
     let mut folders = std::collections::HashMap::new();
     unsafe {
-        for step in &plan.ops {
+        for (step, source) in plan.ops.iter().zip(sources) {
             if !folders.contains_key(&step.dir) {
                 folders.insert(step.dir.clone(), item(&step.dir)?);
             }
             let name: Option<Vec<u16>> =
                 step.name.as_ref().map(|n| n.encode_utf16().chain(Some(0)).collect());
             let name = name.as_ref().map_or(PCWSTR::null(), |n| PCWSTR(n.as_ptr()));
-            let source = item(&step.source)?;
+            let source = item(source)?;
             if plan.moved {
                 op.MoveItem(&source, &folders[&step.dir], name, None)
             } else {
@@ -773,6 +780,30 @@ mod tests {
         assert!(transfer(&failing).is_err());
         assert_eq!(names(&root.join("dst")), ["Folder"]);
         assert_eq!(std::fs::read_to_string(root.join(r"dst\Folder\new.txt")).unwrap(), r"src\Folder\new.txt");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// Audit #1 after #3: Folder\Folder replaces Folder (contents one level up), taken from
+    /// where Folder was set aside; a failure puts everything back.
+    #[test]
+    fn replace_with_a_folder_inside_it() {
+        let root = tree("nested", &[r"c\Folder\outer.txt", r"c\Folder\Folder\inner.txt", r"m\Folder\outer.txt", r"m\Folder\Folder\inner.txt"]);
+        let _ole = Apartment::new().unwrap();
+        let nested_plan = |dir: &str, moved: bool| {
+            let source = shell_path(&root.join(dir).join(r"Folder\Folder"));
+            let mut ask = |_: crate::paste::Question| (crate::paste::Answer::Replace, false);
+            crate::paste::plan(&[source], &root.join(dir), moved, &mut ask).unwrap().unwrap()
+        };
+        let mut failing = nested_plan("c", false);
+        failing.ops.push(crate::paste::Op { source: root.join("missing"), dir: root.join("c"), name: None, fresh: false });
+        assert!(transfer(&failing).is_err());
+        assert_eq!(names(&root.join("c")), ["Folder"]);
+        assert_eq!(names(&root.join(r"c\Folder")), ["Folder", "outer.txt"]);
+        for (dir, moved) in [("c", false), ("m", true)] {
+            let done = transfer(&nested_plan(dir, moved)).unwrap();
+            assert!(!done.aborted && done.kept.is_empty(), "{dir}");
+            assert_eq!(names(&root.join(dir)), ["Folder"], "{dir}");
+            assert_eq!(names(&root.join(dir).join("Folder")), ["inner.txt"], "{dir}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
