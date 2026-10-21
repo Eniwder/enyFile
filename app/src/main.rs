@@ -105,6 +105,11 @@ impl RowsModel {
             (drive < self.drives.borrow().len()).then_some(Slot::Drive(drive))
         }
     }
+    /// The first entry row met going from `from` toward `to`, both included.
+    fn entry_toward(&self, from: usize, to: usize) -> Option<usize> {
+        let rows: Box<dyn Iterator<Item = usize>> = if from <= to { Box::new(from..=to) } else { Box::new((to..=from).rev()) };
+        rows.into_iter().find(|&row| matches!(self.slot(row), Some(Slot::Entry(_))))
+    }
     fn special_row(&self, special: Special) -> usize {
         let data = self.data.borrow();
         match special {
@@ -2058,7 +2063,9 @@ impl Controller {
                     0 | 3 => {
                         model.special.set(Some(special));
                         if !ctrl && !shift {
-                            model.selection.borrow_mut().clear();
+                            let mut selection = model.selection.borrow_mut();
+                            selection.clear();
+                            selection.anchor = None;
                         }
                         self.repaint(p);
                         if kind == 3 {
@@ -2657,12 +2664,26 @@ impl Controller {
         } else {
             None
         };
-        if let Some(row) = target {
+        if let Some(mut row) = target {
             self.panes[p].prefix.clear();
+            // Shift extends over entries only: a move that would end on "..", a drive or a
+            // comparison gap stops at the last entry on the way (Shift+End: the last entry).
+            if shift && !matches!(model.slot(row), Some(Slot::Entry(_))) {
+                row = model.entry_toward(row, cursor).unwrap_or(row);
+            }
             match model.slot(row) {
                 Some(Slot::Entry(index)) => {
+                    let mut selection = model.selection.borrow_mut();
+                    // Leaving "..", a drive or a gap: the range starts at the first entry
+                    // in the direction of the move, not where an earlier range started.
+                    if shift && special.is_some() {
+                        if let Some(Slot::Entry(first)) = model.entry_toward(cursor, row).and_then(|r| model.slot(r)) {
+                            selection.anchor = Some(first);
+                        }
+                    }
                     model.special.set(None);
-                    model.selection.borrow_mut().select(&data.rows, index, ctrl, shift, false);
+                    selection.select(&data.rows, index, ctrl, shift, false);
+                    drop(selection);
                     self.reveal(p, index);
                 }
                 Some(slot) => {
@@ -2672,7 +2693,9 @@ impl Controller {
                         _ => Special::Parent,
                     }));
                     if !ctrl && !shift {
-                        model.selection.borrow_mut().clear();
+                        let mut selection = model.selection.borrow_mut();
+                        selection.clear();
+                        selection.anchor = None;
                     }
                     self.reveal_row(p, row);
                 }

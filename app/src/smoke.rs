@@ -81,6 +81,12 @@ fn fkey(ui: &App, p: i32, key: slint::platform::Key) {
     event.text = key.into();
     ui.invoke_key_event(p, event);
 }
+fn shift_key(ui: &App, p: i32, key: slint::platform::Key) {
+    let mut event = slint::language::KeyEvent::default();
+    event.text = key.into();
+    event.modifiers.shift = true;
+    ui.invoke_key_event(p, event);
+}
 /// Through the window's real key path (FocusScope + tracked modifiers), not the callback.
 fn window_ctrl_key(ui: &App, letter: &str) {
     use slint::platform::{Key, WindowEvent};
@@ -596,6 +602,24 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(model.page_start.get() == size, "wheel turns a page")?;
                     expect(ui.get_p0_info().page.starts_with("2/"), "page number shown")?;
                     s.pass("paged list: Right/Left and wheel turn pages, page number shown");
+                    // Shift ranges stop at entries ("..", drive rows) and start where the move does.
+                    use slint::platform::Key;
+                    let entries = c.borrow().data(0).rows.len();
+                    let selected_count = || c.borrow().panes[0].model.selection.borrow().count();
+                    fkey(&ui, 0, Key::Home);
+                    shift_key(&ui, 0, Key::PageDown);
+                    expect(selected_count() == size && c.borrow().cursor_row(0) == size, "Shift+PageDown from \"..\" selects the first page")?;
+                    shift_key(&ui, 0, Key::End);
+                    expect(selected_count() == entries && c.borrow().cursor_row(0) == entries, "Shift+End selects to the last entry, not a drive")?;
+                    shift_key(&ui, 0, Key::Home);
+                    expect(selected_count() == 1 && c.borrow().cursor_row(0) == 1, "Shift+Home stops at the first entry")?;
+                    click(&ui, 0, 5, false);
+                    fkey(&ui, 0, Key::Home);
+                    shift_key(&ui, 0, Key::DownArrow);
+                    expect(selected(&c, 0) == [names(&c, 0)[0].clone()], "a range from \"..\" ignores the earlier anchor")?;
+                    fkey(&ui, 0, Key::Home);
+                    fkey(&ui, 0, Key::DownArrow);
+                    s.pass("Shift+PageUp/PageDown/Home/End select entries only, from where the move starts");
                     ui.invoke_open_settings();
                     ui.set_settings_tab(1);
                 }
