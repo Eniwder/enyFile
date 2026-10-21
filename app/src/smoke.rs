@@ -81,6 +81,18 @@ fn fkey(ui: &App, p: i32, key: slint::platform::Key) {
     event.text = key.into();
     ui.invoke_key_event(p, event);
 }
+fn shift_letter(ui: &App, p: i32, letter: &str) {
+    let mut event = slint::language::KeyEvent::default();
+    event.text = letter.into();
+    event.modifiers.shift = true;
+    ui.invoke_key_event(p, event);
+}
+/// The system drive and its Windows folder, when the test data is on another drive.
+fn other_drive(root: &Path) -> Option<(String, PathBuf)> {
+    let system = PathBuf::from(std::env::var_os("SystemRoot")?);
+    let drive = crate::drive_of(&system)?;
+    (crate::drive_of(root)? != drive).then_some((drive, system))
+}
 fn shift_key(ui: &App, p: i32, key: slint::platform::Key) {
     let mut event = slint::language::KeyEvent::default();
     event.text = key.into();
@@ -126,6 +138,8 @@ struct State {
     session: u64,
     /// Sort order of pane 0 before a comparison.
     sort: (usize, bool),
+    /// Toolbar Home was pressed (step 41 waits for it).
+    homed: bool,
 }
 impl State {
     fn spawn(&mut self, args: &[&std::ffi::OsStr]) -> Result<(), String> {
@@ -164,6 +178,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
         menus: Vec::new(),
         session: 0,
         sort: (0, false),
+        homed: false,
     });
     let finish = move |state: &mut State, error: Option<String>| {
         if let Some(mut probe) = state.probe.take() {
@@ -742,8 +757,60 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     expect(text == display(&c.borrow().data(0).dir), "path bar copy puts the path on the clipboard")?;
                     s.pass("path copy");
+                    // Shift+letter on another drive opens the folder last shown there.
+                    if let Some((drive, system)) = other_drive(&root) {
+                        c.borrow_mut().config.drive_dirs.insert(drive.clone(), system);
+                        shift_letter(&ui, 1, &drive[..1]);
+                    }
                 }
                 38 => {
+                    let Some((drive, system)) = other_drive(&root) else { return Ok(true) };
+                    let dir = c.borrow().data(1).dir.clone();
+                    if !idle(&c) || crate::drive_of(&dir).as_deref() != Some(drive.as_str()) {
+                        return Ok(false);
+                    }
+                    expect(display(&dir).eq_ignore_ascii_case(&display(&system)), &format!("the remembered folder: {}", display(&dir)))?;
+                    s.pass("Shift+letter opens the folder last shown on that drive");
+                    ui.invoke_navigate(1, display(&root).into());
+                }
+                39 => {
+                    let Some((drive, _)) = other_drive(&root) else { return Ok(true) };
+                    if !idle(&c) || !c.borrow().data(1).dir.ends_with(root.file_name().unwrap_or_default()) {
+                        return Ok(false);
+                    }
+                    // A remembered folder that is gone: the drive root.
+                    let gone = PathBuf::from(format!(r"{drive}\enyfile-smoke-gone"));
+                    c.borrow_mut().config.drive_dirs.insert(drive.clone(), gone);
+                    shift_letter(&ui, 1, &drive[..1]);
+                }
+                40 => {
+                    let Some((drive, _)) = other_drive(&root) else { return Ok(true) };
+                    let dir = c.borrow().data(1).dir.clone();
+                    if !idle(&c) || crate::drive_of(&dir).as_deref() != Some(drive.as_str()) {
+                        return Ok(false);
+                    }
+                    expect(dir.parent().is_none(), "a vanished folder falls back to the drive root")?;
+                    s.pass("Shift+letter falls back to the root when the folder is gone");
+                }
+                41 => {
+                    if !idle(&c) {
+                        return Ok(false);
+                    }
+                    // Toolbar Home: the active pane's start folder; then back to the test data's
+                    // drive root, where step 37 left pane 1.
+                    if !s.homed {
+                        c.borrow_mut().config.start[1] = Some(root.join("right"));
+                        c.borrow_mut().active(1);
+                        s.homed = true;
+                        ui.invoke_home();
+                        return Ok(false);
+                    }
+                    expect(c.borrow().data(1).dir.ends_with("right") && c.borrow().data(0).dir.ends_with("many"), "Home opens the start folder in the active pane only")?;
+                    s.pass("toolbar Home opens the active pane's start folder");
+                    let here = crate::drive_of(&root).unwrap_or_default();
+                    ui.invoke_navigate(1, format!(r"{here}\").into());
+                }
+                42 => {
                     // Edit menu, in the 150-file folder of pane 0.
                     ui.invoke_focus_pane(0);
                     c.borrow_mut().active(0);
@@ -804,7 +871,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(saved["panes"] == 2, "pane count saved")?;
                     s.pass("column switches; 3 and 4 pane layouts with Tab");
                 }
-                39 => {
+                43 => {
                     // Ctrl+F: incremental wildcard search in the 150-file folder; Ctrl+G next.
                     if !idle(&c) {
                         return Ok(false);
@@ -867,7 +934,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_find_mode() == 2, "Ctrl+Shift+F opens the filter bar")?;
                     ui.invoke_find_done(true, "*5.txt; file001".into());
                 }
-                40 => {
+                44 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -878,14 +945,14 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_sort(0, 0);
                     s.pass("Ctrl+Shift+F filters with wildcards and ';'");
                 }
-                41 => {
+                45 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
                     expect(names(&c, 0).len() == 16, "sort keeps the filter")?;
                     fkey(&ui, 0, slint::platform::Key::Escape);
                 }
-                42 => {
+                46 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -893,14 +960,14 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("Esc clears the filter");
                     c.borrow_mut().set_filter(0, "file00*");
                 }
-                43 => {
+                47 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
                     expect(names(&c, 0).len() == 9, "filter set again")?;
                     ui.invoke_command(0, 2);
                 }
-                44 => {
+                48 => {
                     if !idle(&c) || c.borrow().data(0).dir.ends_with("many") {
                         return Ok(false);
                     }
@@ -915,7 +982,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_open_menu() == 0, "click opens the File menu")?;
                     s.sweep = 12.0;
                 }
-                45 => {
+                49 => {
                     use slint::platform::{PointerEventButton, WindowEvent};
                     let open = ui.get_open_menu();
                     if s.menus.last() != Some(&open) {
@@ -952,7 +1019,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(made.status.success(), "junction created for the search test")?;
                     ui.invoke_navigate(0, display(&tree).into());
                 }
-                46 => {
+                50 => {
                     if !idle(&c) || !c.borrow().data(0).dir.ends_with("tree") {
                         return Ok(false);
                     }
@@ -968,7 +1035,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_find_edited("hi".into());
                     ui.invoke_find_edited("hit*".into());
                 }
-                47 => {
+                51 => {
                     if !searched(&c, "hit*") {
                         return Ok(false);
                     }
@@ -977,7 +1044,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("Ctrl+Alt+Shift+F searches below the folder while typing, junctions skipped");
                     ui.invoke_find_edited("a/*.rs".into());
                 }
-                48 => {
+                52 => {
                     if !searched(&c, "a/*.rs") {
                         return Ok(false);
                     }
@@ -992,7 +1059,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     c.borrow_mut().config.search_links = true;
                     c.borrow_mut().search_tree(0, r"\A\B\deep");
                 }
-                49 => {
+                53 => {
                     if !searched(&c, r"\A\B\deep") {
                         return Ok(false);
                     }
@@ -1002,7 +1069,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("path patterns with / and \\; a junction cycle is not followed");
                     fkey(&ui, 0, slint::platform::Key::Escape);
                 }
-                50 => {
+                54 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -1028,7 +1095,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     c.borrow_mut().index_limit = 2;
                     c.borrow_mut().open_find(0, 3);
                 }
-                51 => {
+                55 => {
                     if !c.borrow().panes[0].finder.as_ref().is_some_and(|f| f.overflow) {
                         return Ok(false);
                     }
@@ -1036,7 +1103,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(!c.borrow().typing.running(), "past the index limit typing does not search")?;
                     ui.invoke_find_done(true, "hit*".into());
                 }
-                52 => {
+                56 => {
                     if !searched(&c, "hit*") {
                         return Ok(false);
                     }
@@ -1048,7 +1115,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_command(0, 2);
                     expect(stop.load(std::sync::atomic::Ordering::Relaxed), "\"..\" stops the walk")?;
                 }
-                53 => {
+                57 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -1069,7 +1136,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_navigate(0, display(&root.join("cmpL")).into());
                     ui.invoke_navigate(1, display(&root.join("cmpR")).into());
                 }
-                54 => {
+                58 => {
                     if !idle(&c) || !c.borrow().data(0).dir.ends_with("cmpL") || !c.borrow().data(1).dir.ends_with("cmpR") {
                         return Ok(false);
                     }
@@ -1077,7 +1144,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ctrl_shift_key(&ui, 0, "D");
                     expect(c.borrow().compare.as_ref().is_some_and(|k| k.panes == [0, 1]), "Ctrl+Shift+D compares the two panes")?;
                 }
-                55 => {
+                59 => {
                     if !idle(&c) || c.borrow().panes[0].model.compare.borrow().is_none() {
                         return Ok(false);
                     }
@@ -1103,7 +1170,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     std::fs::write(&made, "o").map_err(|e| e.to_string())?;
                     std::fs::File::options().write(true).open(&made).and_then(|f| f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000))).map_err(|e| e.to_string())?;
                 }
-                56 => {
+                60 => {
                     if !idle(&c) || c.borrow().compare.as_ref().is_none_or(|k| k.counts[0] != 0) {
                         return Ok(false);
                     }
@@ -1112,7 +1179,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ctrl_shift_key(&ui, 0, "D");
                     expect(c.borrow().compare.is_none(), "third Ctrl+Shift+D ends the comparison")?;
                 }
-                57 => {
+                61 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -1121,7 +1188,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect((c.borrow().panes[0].column, c.borrow().panes[0].descending) == s.sort, "the sort order is back")?;
                     s.pass("the comparison ends with the folders and sort order as before");
                 }
-                58 => return Err("done".into()),
+                62 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)

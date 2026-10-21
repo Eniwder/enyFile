@@ -486,6 +486,8 @@ struct Pane {
     column: usize,
     descending: bool,
     prefix: String,
+    /// Shift+letter opened a remembered folder: the drive root to open if it is gone.
+    fallback: Option<PathBuf>,
     typed: Instant,
     /// Ctrl+Shift+F: the text and its pattern. Cleared when another folder opens.
     filter: Option<(String, listing::Pattern)>,
@@ -572,12 +574,23 @@ struct Controller {
     /// The smoke test: what a drag would carry, instead of starting the system drag loop
     /// (which would drop on whatever window is under the idle mouse).
     drag_probe: Option<Vec<PathBuf>>,
+    /// The cursor in the folder last shown on each drive (`config.drive_dirs`).
+    drive_cursors: HashMap<String, Option<Arc<PathBuf>>>,
     naming: Option<Naming>,
     compare: Option<Comparing>,
     /// The pane active before the current one: what Ctrl+Shift+D compares with.
     previous: usize,
     /// `--demo`: drives and volume names (this machine's) are not shown.
     demo: bool,
+}
+/// "D:" for a path on drive D (with or without `\\?\`); None for network shares.
+fn drive_of(path: &Path) -> Option<String> {
+    let plain = shell::shell_path(path);
+    let mut chars = plain.to_str()?.chars();
+    match (chars.next(), chars.next()) {
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic() => Some(format!("{}:", letter.to_ascii_uppercase())),
+        _ => None,
+    }
 }
 fn display(path: &Path) -> String {
     shell::shell_path(path).to_string_lossy().into_owned()
@@ -1004,6 +1017,7 @@ impl Controller {
     fn navigate(&mut self, p: usize, path: PathBuf, mode: Mode) {
         let show_hidden = self.config.show_hidden[p];
         let pane = &mut self.panes[p];
+        pane.fallback = None;
         // Any listing ends the search: its results are not a folder that can be re-read.
         // Back to the searched folder keeps the walk for the search bar still open.
         pane.found = None;
@@ -1471,6 +1485,17 @@ impl Controller {
         self.navigate(p, target.clone(), Mode::New(focus));
     }
     /// Toolbar places (desktop, documents, pictures, videos, music) open in the active pane.
+    /// Toolbar Home: the active pane's start folder (panes 3 and 4 share the left and right
+    /// ones, as at startup).
+    fn home(&mut self) {
+        let p = self.active;
+        let side = p % 2;
+        let start = self.config.start[side].clone().map_or_else(|| default_start(side).map_err(|e| e.to_string()), Ok);
+        match start {
+            Ok(path) => self.navigate(p, path, Mode::New(None)),
+            Err(e) => self.message(e),
+        }
+    }
     fn place(&mut self, i: usize) {
         match self.config.place(i) {
             Some(path) => self.navigate(self.active, path, Mode::New(None)),
@@ -1893,6 +1918,11 @@ impl Controller {
         let data = match result {
             Ok(data) => data,
             Err(e) => {
+                // A remembered folder that is gone: the drive's root instead.
+                if let Some(root) = self.panes[p].fallback.take() {
+                    self.navigate(p, root, Mode::New(None));
+                    return;
+                }
                 self.message(format!("フォルダを開けません: {e}"));
                 return;
             }
@@ -1906,6 +1936,18 @@ impl Controller {
         let old = self.saved(p);
         let old_current = self.panes[p].model.selection.borrow().current;
         let changed = old.path != data.dir;
+        if changed && self.panes[p].found.is_none() {
+            // Shift+letter returns to the folder (and cursor) last shown on that drive.
+            if let Some(drive) = drive_of(&old.path) {
+                self.config.drive_dirs.insert(drive.clone(), old.path.clone());
+                self.drive_cursors.insert(drive, old.current.clone());
+            }
+            if let Some(drive) = drive_of(&data.dir) {
+                self.config.drive_dirs.insert(drive.clone(), data.dir.clone());
+                self.drive_cursors.remove(&drive);
+            }
+        }
+        self.panes[p].fallback = None;
         let restore = match mode {
             Mode::Back => {
                 let saved = self.panes[p].back.pop();
@@ -2785,7 +2827,16 @@ impl Controller {
         if shift && !ctrl && !alt && letter.len() == 1 && letter.chars().all(|c| c.is_ascii_alphabetic()) {
             let prefix = format!("{}:", letter.to_uppercase());
             if let Some(root) = self.drives.iter().find(|d| d.root.to_string_lossy().starts_with(&prefix)).map(|d| d.root.clone()) {
-                self.navigate(p, root, Mode::New(None));
+                // The folder last shown on that drive; already on the drive, its root.
+                let last = self.config.drive_dirs.get(&prefix).filter(|_| drive_of(&data.dir).as_deref() != Some(prefix.as_str()));
+                match last.cloned() {
+                    Some(dir) => {
+                        let cursor = self.drive_cursors.get(&prefix).cloned().flatten();
+                        self.navigate(p, dir, Mode::New(cursor));
+                        self.panes[p].fallback = Some(root);
+                    }
+                    None => self.navigate(p, root, Mode::New(None)),
+                }
                 return true;
             }
         }
@@ -2982,6 +3033,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None if demo.is_some() => demo::start_folders(own_root.unwrap()),
         // No arguments: the configured start folders, else the development sandbox.
         None if args.is_empty() => {
+            // Developing: the sandbox (and its samples) is there even with start folders set.
+            if app_dir().is_some() {
+                let _ = sandbox();
+            }
             let [start_left, start_right] = config.start.clone();
             let left = match start_left { Some(p) => p, None => default_start(0)? };
             let right = match start_right { Some(p) => p, None => default_start(1)? };
@@ -3013,6 +3068,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         column: 0,
         descending: false,
         prefix: String::new(),
+        fallback: None,
         typed: Instant::now(),
         filter: None,
         finder: None,
@@ -3046,6 +3102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         typing: slint::Timer::default(),
         index_limit: finder::INDEX_LIMIT,
         drag_probe: None,
+        drive_cursors: HashMap::new(),
         compare: None,
         previous: 1,
         demo: demo.is_some(),
@@ -3070,6 +3127,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let c = controller.clone();
         ui.on_place(move |i| c.borrow_mut().place(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_home(move || c.borrow_mut().home());
     }
     {
         let c = controller.clone();
@@ -3279,6 +3340,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.window().on_close_requested(move || {
             if let Ok(mut c) = c.try_borrow_mut() {
                 c.remember_window();
+                // The folders last shown on each drive change all the time; written once here.
+                c.save_config();
             }
             slint::CloseRequestResponse::HideWindow
         });

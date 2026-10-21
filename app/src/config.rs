@@ -64,6 +64,8 @@ pub struct Config {
     /// Recursive search enters junctions and symbolic links to folders (off: cycles and
     /// unexpectedly huge trees such as a link to a drive root are left alone).
     pub search_links: bool,
+    /// Shift+letter: the folder last shown on each drive ("D:"), saved on exit.
+    pub drive_dirs: std::collections::BTreeMap<String, PathBuf>,
     /// Where the window was when it was last closed; None = Slint's default placement.
     pub window: Option<Placement>,
 }
@@ -170,6 +172,10 @@ impl Config {
             .to_string();
         let font_size = raw["font"]["size"].as_f64().map_or(theme::DEFAULT_SIZE, |s| s as f32).clamp(8.0, 32.0);
         let search_links = raw["search_links"].as_bool().unwrap_or(false);
+        let drive_dirs = raw["drive_dirs"]
+            .as_object()
+            .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), PathBuf::from(v.as_str()?)))).collect())
+            .unwrap_or_default();
         let w = &raw["window"];
         let int = |key: &str| w[key].as_i64().and_then(|v| i32::try_from(v).ok());
         let size = |key: &str| w[key].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|&v| v >= 100);
@@ -199,6 +205,7 @@ impl Config {
             font_family,
             font_size,
             search_links,
+            drive_dirs,
             window,
         }
     }
@@ -259,6 +266,7 @@ impl Config {
         }
         self.raw["font"] = json!({ "family": self.font_family, "size": self.font_size });
         self.raw["search_links"] = json!(self.search_links);
+        self.raw["drive_dirs"] = Value::Object(self.drive_dirs.iter().map(|(k, v)| (k.clone(), json!(v.to_string_lossy()))).collect());
         if let Some(w) = self.window {
             self.raw["window"] = json!({ "x": w.x, "y": w.y, "width": w.width, "height": w.height, "maximized": w.maximized });
         }

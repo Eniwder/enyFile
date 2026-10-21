@@ -13,8 +13,9 @@ if exist "%ROOT%.tools\cargo\bin\cargo.exe" (
     set "OFFLINE=--offline"
 )
 
-rem A running copy locks the exe, so a rebuild would fail: just start another one.
-tasklist /fi "imagename eq enyfile.exe" 2>nul | find /i "enyfile.exe" >nul && goto run
+rem A running copy of this exe locks it, so a rebuild would fail: just start another one.
+rem (Only this build counts: an installed enyfile.exe elsewhere does not block it.)
+powershell -NoProfile -Command "if (Get-Process enyfile -ErrorAction SilentlyContinue | Where-Object Path -eq $env:EXE) { exit 0 } else { exit 1 }" >nul 2>nul && goto run
 
 where cargo >nul 2>nul || goto run
 echo Building enyFile...
