@@ -639,7 +639,7 @@ component ColorEditor inherits Rectangle {
     }
 }
 
-// File > 設定: tabs for paths, colors and font. Empty path = the Windows default folder.
+// File > 設定: tabs for paths, colors, font and other options. Empty path = the Windows default folder.
 component SettingsDialog inherits Rectangle {
     in property <[PlaceRow]> places;
     in property <[ColorRow]> colors;
@@ -648,6 +648,7 @@ component SettingsDialog inherits Rectangle {
     in-out property <string> font-family;
     in-out property <int> font-size;
     in-out property <int> window-opacity;
+    in-out property <bool> search-links;
     callback edited(int, string);
     callback browse(int);
     callback reset(int);
@@ -689,7 +690,7 @@ component SettingsDialog inherits Rectangle {
                 padding: 14px; spacing: 10px;
                 HorizontalLayout {
                     spacing: 2px; alignment: start;
-                    for name[i] in ["パス", "カラー", "表示"] : Rectangle {
+                    for name[i] in ["パス", "カラー", "表示", "その他"] : Rectangle {
                         width: tab-label.preferred-width + 28px; height: 28px;
                         background: root.tab == i ? Theme.pane : Theme.bar;
                         border-width: 1px; border-color: root.tab == i ? Theme.border-active : Theme.border;
@@ -808,6 +809,16 @@ component SettingsDialog inherits Rectangle {
                             }
                         }
                     }
+                    // その他
+                    if root.tab == 3 : VerticalLayout {
+                        spacing: 12px; alignment: start;
+                        Text { text: "フォルダー以下の検索 (Ctrl+Alt+Shift+F)"; font-weight: 700; color: Theme.text; }
+                        CheckBox { text: "ジャンクションとシンボリックリンクの先も検索する"; checked <=> root.search-links; }
+                        Text {
+                            text: "オフ（既定）: リンクのフォルダーは結果に出すだけで中に入らない。\nオン: 中も検索する。検索済みの範囲を指すリンクには入らないので循環はしないが、ドライブ全体を指すリンクなどで範囲が大きくなることがある。";
+                            color: Theme.dim; wrap: word-wrap;
+                        }
+                    }
                 }
                 HorizontalLayout {
                     spacing: 6px; alignment: end;
@@ -913,6 +924,7 @@ export component App inherits Window {
     in property <string> settings-font-family;
     in property <int> settings-font-size;
     in-out property <int> settings-opacity: 100;
+    in-out property <bool> settings-search-links;
     callback color-base(int, color);
     callback color-ext(int, string, color);
     callback color-ext-delete(int);
@@ -1332,6 +1344,7 @@ export component App inherits Window {
         font-family: root.settings-font-family;
         font-size: root.settings-font-size;
         window-opacity <=> root.settings-opacity;
+        search-links <=> root.settings-search-links;
         color-base(i, c) => { root.color-base(i, c); }
         color-ext(i, e, c) => { root.color-ext(i, e, c); }
         color-ext-delete(i) => { root.color-ext-delete(i); }

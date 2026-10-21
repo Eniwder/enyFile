@@ -724,9 +724,14 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_open_settings();
                     ui.invoke_setting_edited(5, display(&root.join("left")).into());
                     ui.set_settings_opacity(80);
+                    expect(!ui.get_settings_search_links(), "following links is off by default")?;
+                    ui.set_settings_search_links(true);
                     ui.invoke_settings_done(true);
                     let saved = config()?;
                     expect(saved["opacity"] == 0.8, "opacity saved")?;
+                    expect(saved["search_links"] == true && c.borrow().config.search_links, "その他: following links saved")?;
+                    // Later steps search with links not followed.
+                    c.borrow_mut().config.search_links = false;
                     expect(saved["start"]["left"].as_str().is_some_and(|l| l.ends_with("left")), "start folder saved")?;
                     let layered = {
                         use windows::Win32::UI::WindowsAndMessaging::*;

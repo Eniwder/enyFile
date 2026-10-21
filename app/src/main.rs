@@ -1520,6 +1520,7 @@ impl Controller {
             ui.set_settings_font_family(self.settings_font.0.clone().into());
             ui.set_settings_font_size(self.settings_font.1.round() as i32);
             ui.set_settings_opacity((self.config.opacity * 100.0).round() as i32);
+            ui.set_settings_search_links(self.config.search_links);
         }
         if let Some(ui) = self.ui.upgrade() {
             ui.set_settings_open(true);
@@ -1679,6 +1680,16 @@ impl Controller {
             self.config.start = [left, right];
             if let Some(ui) = self.ui.upgrade() {
                 self.config.opacity = ui.get_settings_opacity() as f32 / 100.0;
+                let follow = ui.get_settings_search_links();
+                if follow != self.config.search_links {
+                    self.config.search_links = follow;
+                    // The next search walks again; results on screen keep theirs until F5.
+                    for pane in &mut self.panes {
+                        if pane.found.is_none() {
+                            pane.finder = None;
+                        }
+                    }
+                }
             }
             self.config.colors = self.settings_colors.clone();
             self.config.extension_colors = self.settings_ext.clone();
@@ -2961,7 +2972,7 @@ fn sandbox() -> Result<PathBuf, Box<dyn std::error::Error>> {
     }
     Ok(root)
 }
-/// Shows what config.json "search_links" changes: Ctrl+Alt+Shift+F for "資料" in
+/// Shows what 設定 > その他 (following links) changes: Ctrl+Alt+Shift+F for "資料" in
 /// 検索の起点 finds one file without it and two with it; the link back to the start folder
 /// is never entered either way.
 fn link_example(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -2973,8 +2984,8 @@ fn link_example(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(
         dir.join("説明.txt"),
         "「検索の起点」を開いて Ctrl+Alt+Shift+F で「資料」を検索する。\r\n\
-         既定（config.json の \"search_links\": false）: 資料 1.txt だけ（リンクは結果に出るが中に入らない）。\r\n\
-         \"search_links\": true にして再起動: 「起点の外へのリンク」を通って 資料 2.txt も見つかる。\r\n\
+         ファイル > 設定 > その他 の「ジャンクションとシンボリックリンクの先も検索する」がオフ（既定）: 資料 1.txt だけ（リンクは結果に出るが中に入らない）。\r\n\
+         オン: 「起点の外へのリンク」を通って 資料 2.txt も見つかる。\r\n\
          「起点へ戻るリンク」は走査済みの範囲を指すので、どちらでも中に入らない（循環しない）。\r\n",
     )?;
     for (link, target) in [("起点の外へのリンク", dir.join("起点の外")), ("起点へ戻るリンク", start.clone())] {
