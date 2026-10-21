@@ -353,9 +353,16 @@ impl Plan {
         Ok(inside)
     }
     /// After a move: remove merged source folders that ended up empty (skipped items stay).
+    /// A junction or folder symlink is left alone: removing the link succeeds whatever its
+    /// target holds, and the user moved the contents, not the link.
     pub fn remove_emptied(&self) {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
         for dir in &self.merged {
-            let _ = std::fs::remove_dir(dir);
+            let link = std::fs::symlink_metadata(dir).map_or(true, |m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0);
+            if !link {
+                let _ = std::fs::remove_dir(dir);
+            }
         }
     }
 }
@@ -530,6 +537,29 @@ mod tests {
         let plan = plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| (Answer::Overwrite, false)).unwrap().unwrap();
         std::fs::remove_file(&existing).unwrap();
         assert!(plan.changed());
+    }
+    /// Audit #10: a merged source folder that is a junction keeps its link after a move.
+    #[test]
+    fn emptied_junction_is_kept() {
+        let f = fixture("junction");
+        let root = crate::shell::shell_path(&std::fs::canonicalize(&f.0).unwrap());
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::fs::write(root.join(r"elsewhere\inner.txt"), "real").unwrap();
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(root.join(r"src\J")).arg(root.join("elsewhere")).output().unwrap();
+        assert!(made.status.success());
+        std::fs::create_dir_all(root.join(r"dst\J")).unwrap();
+        std::fs::write(root.join(r"dst\J\inner.txt"), "old").unwrap();
+        // Merge J, skip its only file: nothing moves, and J is "emptied" only through the link.
+        let mut ask = |q: Question| (if q.kind == Kind::Folder { Answer::Merge } else { Answer::Skip }, false);
+        let moved = plan(&[root.join(r"src\J")], &root.join("dst"), true, &mut ask).unwrap().unwrap();
+        assert_eq!(moved.merged, [root.join(r"src\J")]);
+        moved.remove_emptied();
+        assert!(std::fs::symlink_metadata(root.join(r"src\J")).is_ok(), "junction removed");
+        assert!(root.join(r"src\J\inner.txt").is_file());
+        // Even when the move really emptied the target, the link itself is not ours to remove.
+        std::fs::remove_file(root.join(r"elsewhere\inner.txt")).unwrap();
+        moved.remove_emptied();
+        assert!(std::fs::symlink_metadata(root.join(r"src\J")).is_ok(), "empty junction removed");
     }
     /// A folder pasted into itself or below itself is left out before any question.
     #[test]
