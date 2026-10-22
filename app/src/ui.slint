@@ -1,4 +1,4 @@
-import { CheckBox, ComboBox, LineEdit, ListView, Palette, Slider, SpinBox } from "std-widgets.slint";
+import { CheckBox, ComboBox, LineEdit, ListView, Palette, ScrollView, Slider, SpinBox } from "std-widgets.slint";
 
 // All colors in one place so themes (and later transparency) can be switched.
 export global Theme {
@@ -560,6 +560,8 @@ component AgentPanel inherits Rectangle {
     callback cancel();
     callback fresh();
     callback recall(bool, string) -> string;
+    // The log shows its end and follows new lines (false once scrolled back).
+    out property <bool> following: true;
     callback close();
     public function focus-input() { input.focus(); }
     background: Theme.pane;
@@ -580,16 +582,25 @@ component AgentPanel inherits Rectangle {
         }
         Rectangle {
             vertical-stretch: 1;
-            log := ListView {
+            // ScrollView, not ListView: ListView only guesses the height of rows it has not
+            // made, and the guess changing on every wheel step pulled the view to the end.
+            // The log is short (AGENT_LINES), so every row is made and the height is exact.
+            log := ScrollView {
                 width: parent.width; height: parent.height;
-                // New lines keep the end in view.
-                changed content-height => { self.content-y = min(0px, self.visible-height - self.content-height); }
-                for line in root.lines : HorizontalLayout {
-                    padding-left: 6px; padding-right: 10px; padding-top: 1px; padding-bottom: 1px;
-                    Text {
-                        text: line.text; wrap: word-wrap;
-                        color: line.kind == 0 ? Theme.accent : line.kind == 1 ? Theme.dim : line.kind == 3 ? Theme.error : line.kind == 4 ? Theme.key : Theme.text;
-                        font-weight: line.kind == 0 ? 700 : 400;
+                // New lines keep the end in view while it is in view; scrolled back, the
+                // view stays where it is until it is at the end again.
+                changed content-height => { if root.following { self.content-y = min(0px, self.visible-height - self.content-height); } }
+                changed content-y => { root.following = self.content-y <= self.visible-height - self.content-height + 4px; }
+                VerticalLayout {
+                    // As wide as the view: long lines wrap instead of scrolling sideways.
+                    width: log.visible-width; alignment: start;
+                    for line in root.lines : HorizontalLayout {
+                        padding-left: 6px; padding-right: 10px; padding-top: 1px; padding-bottom: 1px;
+                        Text {
+                            text: line.text; wrap: word-wrap;
+                            color: line.kind == 0 ? Theme.accent : line.kind == 1 ? Theme.dim : line.kind == 3 ? Theme.error : line.kind == 4 ? Theme.key : Theme.text;
+                            font-weight: line.kind == 0 ? 700 : 400;
+                        }
                     }
                 }
             }
@@ -656,7 +667,7 @@ component AgentPanel inherits Rectangle {
                     width: parent.width; height: parent.height;
                     vertical-alignment: center; single-line: true;
                     color: Theme.text; selection-background-color: Theme.selected-bg; selection-foreground-color: Theme.selected-text;
-                    accepted => { if root.send(self.text) { self.text = ""; } }
+                    accepted => { if root.send(self.text) { self.text = ""; root.following = true; } }
                 }
             }
         }
@@ -1176,6 +1187,7 @@ export component App inherits Window {
     callback agent-recall(bool, string) -> string;
     // On the history line while the panel is closed and a run goes on.
     in property <string> agent-badge;
+    out property <bool> agent-following: agent-panel.following;
     public function focus-agent() { agent-panel.focus-input(); }
     callback color-base(int, color);
     callback color-ext(int, string, color);

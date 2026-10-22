@@ -1269,6 +1269,17 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(prompt.contains("under the cursor") && prompt.contains("size.txt"), "with nothing selected, the cursor item is passed")?;
                     expect(agent_texts(&c).iter().any(|l| l.ends_with("カーソル: size.txt")), "the log says the cursor item was passed")?;
                     s.pass("follow-up continues the conversation with the same sandbox; cursor item when nothing is selected; ↑ ↓ recall");
+                    // The wheel over the log goes back through the conversation (and stays).
+                    for i in 0..80 {
+                        c.borrow().agent_push(1, format!("filler {i}"));
+                    }
+                    expect(ui.get_agent_following(), "the log follows its end")?;
+                    let size = ui.window().size().to_logical(ui.window().scale_factor());
+                    let room = size.height - 86.0;
+                    let panel = (room * ui.get_agent_split()).min(room - 120.0).max(100.0);
+                    let position = slint::LogicalPosition::new(size.width / 2.0, size.height - 24.0 - panel + 60.0);
+                    ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+                    ui.window().dispatch_event(slint::platform::WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: 120.0 });
                     let program = fake_agent(&root, true)?;
                     c.borrow_mut().config.agent_path = Some(program);
                     expect(ui.invoke_agent_send("slow".into()), "the slow request is sent")?;
@@ -1281,6 +1292,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     if !std::fs::read_to_string(root.join("agent-prompt.txt")).is_ok_and(|p| p.contains("slow")) {
                         return Ok(false);
                     }
+                    expect(!ui.get_agent_following(), "the wheel scrolled the log back from its end")?;
                     ui.invoke_agent_cancel();
                     s.cancelled = Some(Instant::now());
                 }

@@ -152,7 +152,7 @@ echo {\"type\":\"item.started\",\"item\":{\"id\":\"1\",\"type\":\"command_execut
 ping -n 3 127.0.0.1 >nul\r\n\
 mkdir 256\r\ncopy *.jpg 256 >nul\r\ncopy *.png 256 >nul\r\n\
 echo {\"type\":\"item.completed\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"powershell.exe -Command Get-ChildItem *.jpg,*.png | ForEach-Object { magick $_.Name -resize 256x256 256/$($_.Name) }\",\"exit_code\":0,\"status\":\"completed\"}}\r\n\
-echo {\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"5 枚を 256×256 に縮小して 256 フォルダーに保存しました。元の画像はそのままです。\"}}\r\n";
+echo {\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"5 枚を 256×256 に縮小して 256 フォルダーに保存しました。元の画像はそのままです。縦横比の違う画像は 256×256 に収まるよう引き伸ばしています。縦横比を保ちたいときは「縦横比を維持して」と続けて指示してください。ファイル名は元と同じです。\"}}\r\n";
 
 type Act = Box<dyn Fn(&App, &Rc<RefCell<Controller>>)>;
 enum Step {
