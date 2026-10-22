@@ -59,6 +59,11 @@ pub fn ident(path: &Path) -> Option<Ident> {
     }
 }
 
+/// The volume `path` lies on (links followed), if it can be opened.
+pub fn volume(path: &Path) -> Option<u64> {
+    ident(path).map(|i| i.volume)
+}
+
 /// Text form for the fallback: no `\\?\` prefix, no trailing separator, lower case.
 fn text(path: &Path) -> String {
     let plain = crate::shell::shell_path(path);

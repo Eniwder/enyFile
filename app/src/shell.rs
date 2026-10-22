@@ -85,6 +85,20 @@ fn win32_alters(name: &str) -> bool {
 fn wide(path: &Path) -> Result<Vec<u16>, String> {
     Ok(os_path(path)?.as_os_str().encode_wide().chain(Some(0)).collect())
 }
+/// The `\\?\` form, for Win32 calls on paths that may exceed MAX_PATH (the exe does not
+/// declare itself long-path aware). A plain path is normalized first, as Win32 would.
+fn verbatim(path: &Path) -> PathBuf {
+    let text: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if text.starts_with(&r"\\?\".encode_utf16().collect::<Vec<_>>()) {
+        return path.to_path_buf();
+    }
+    let full: Vec<u16> = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).as_os_str().encode_wide().collect();
+    let out: Vec<u16> = match full.strip_prefix(&[92, 92][..]) {
+        Some(unc) => r"\\?\UNC\".encode_utf16().chain(unc.iter().copied()).collect(),
+        None => r"\\?\".encode_utf16().chain(full).collect(),
+    };
+    PathBuf::from(OsString::from_wide(&out))
+}
 fn format(name: PCWSTR) -> u32 {
     unsafe { RegisterClipboardFormatW(name) }
 }
@@ -465,6 +479,7 @@ pub struct Transferred {
 pub fn transfer(plan: &crate::paste::Plan) -> Result<Transferred, String> {
     // The last check before anything is renamed or overwritten.
     let inside = plan.verify()?;
+    let direct = beyond_shell(plan, &inside)?;
     let aside = set_aside(&plan.remove)?;
     // A source inside a replaced item (Folder\Folder replacing Folder) moved aside with it.
     let sources: Vec<PathBuf> = plan
@@ -473,7 +488,7 @@ pub fn transfer(plan: &crate::paste::Plan) -> Result<Transferred, String> {
         .zip(inside)
         .map(|(op, inside)| inside.map_or_else(|| op.source.clone(), |(i, rest)| aside[i].1.join(rest)))
         .collect();
-    match paste_ops(plan, &sources) {
+    match paste_ops(plan, &sources, &direct) {
         Ok((false, false)) => Ok(Transferred { kept: delete_aside(&aside), ..Default::default() }),
         Ok((aborted, missed)) => Ok(Transferred { aborted, missed, kept: restore(&aside) }),
         Err(e) => Err(with_kept(e, &restore(&aside))),
@@ -491,16 +506,83 @@ pub fn with_kept(message: String, kept: &[PathBuf]) -> String {
 /// A virus scanner or the indexer may hold something inside open for a moment (the copy
 /// engine's own deletes wait that out too), so a busy item is retried for about a second.
 fn rename_plain(from: &Path, to: &Path) -> windows::core::Result<()> {
-    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(Some(0)).collect() };
+    move_plain(from, to, MOVE_FILE_FLAGS(0))
+}
+/// A move within one volume (no copy fallback), for renames and for items the copy engine
+/// cannot reach. A folder moves as one rename, however deep it goes.
+fn move_plain(from: &Path, to: &Path, flags: MOVE_FILE_FLAGS) -> windows::core::Result<()> {
+    let wide = |p: &Path| -> Vec<u16> { verbatim(p).as_os_str().encode_wide().chain(Some(0)).collect() };
     let (from, to) = (wide(from), wide(to));
     let busy = [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_ACCESS_DENIED];
     for _ in 0..10 {
-        match unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) } {
+        match unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), flags) } {
             Err(e) if busy.iter().any(|c| e.code() == c.to_hresult()) => std::thread::sleep(Duration::from_millis(100)),
             done => return done,
         }
     }
-    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVE_FILE_FLAGS(0)) }
+    unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), flags) }
+}
+/// Longest path (UTF-16 units) the copy engine handles. It has no long-path support, even
+/// with long paths enabled in Windows: past this it fails partway, leaving a split tree.
+const SHELL_MAX: usize = 259;
+/// CreateDirectory keeps room for an 8.3 file name inside a new folder.
+const FOLDER_ROOM: usize = 12;
+/// How far the deepest item below folder `dir` reaches past its path, counting
+/// [`FOLDER_ROOM`] for folders. Links are not followed. Stops once past `limit`.
+fn reach(dir: &Path, limit: usize) -> usize {
+    use std::os::windows::fs::MetadataExt;
+    let mut deepest = FOLDER_ROOM;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if deepest > limit {
+            break;
+        }
+        let attributes = entry.metadata().map_or(0, |m| m.file_attributes());
+        let here = 1 + entry.file_name().encode_wide().count();
+        let below = if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+            0
+        } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            FOLDER_ROOM
+        } else {
+            reach(&entry.path(), limit.saturating_sub(here))
+        };
+        deepest = deepest.max(here + below);
+    }
+    deepest
+}
+/// For each op, whether it goes past [`SHELL_MAX`] and is moved here instead of by the copy
+/// engine. Checked before anything changes: a long copy, or a long move to another volume,
+/// refuses the whole paste. `inside` is from [`crate::paste::Plan::verify`].
+fn beyond_shell(plan: &crate::paste::Plan, inside: &[Option<(usize, PathBuf)>]) -> Result<Vec<bool>, String> {
+    use std::os::windows::fs::MetadataExt;
+    let len = |p: &Path| shell_path(p).as_os_str().encode_wide().count();
+    let mut direct = Vec::new();
+    for (op, inside) in plan.ops.iter().zip(inside) {
+        // A source inside a replaced folder is reached through its set-aside name.
+        let aside = if inside.is_some() { "~enyfile-old-99".len() } else { 0 };
+        let base = (len(&op.source) + aside).max(len(&op.target()));
+        let attributes = std::fs::symlink_metadata(&op.source).map_or(0, |m| m.file_attributes());
+        let extent = if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+            0
+        } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            FOLDER_ROOM
+        } else {
+            reach(&op.source, SHELL_MAX.saturating_sub(base))
+        };
+        let long = base + extent > SHELL_MAX;
+        if long {
+            let volume = |p: &Path| crate::pathid::volume(&verbatim(p));
+            let from = op.source.parent().and_then(volume);
+            if !plan.moved || from.is_none() || from != volume(&op.dir) {
+                return Err(format!(
+                    "パスが {} 文字を超える項目があるため中止しました（Windows のコピーエンジンが扱えません。同じドライブ内の移動はできます）: {}",
+                    SHELL_MAX + 1,
+                    shell_path(&op.source).display()
+                ));
+            }
+        }
+        direct.push(long);
+    }
+    Ok(direct)
 }
 /// `name~enyfile-old` (then `-2`, `-3`...): recognizable if a crash leaves it behind.
 fn set_aside(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
@@ -562,8 +644,25 @@ fn delete_aside(aside: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     aside.iter().map(|(_, temp)| temp.clone()).filter(|temp| std::fs::symlink_metadata(temp).is_ok()).collect()
 }
 /// The copies and moves themselves: whether aborted, and whether any item was left out.
-fn paste_ops(plan: &crate::paste::Plan, sources: &[PathBuf]) -> Result<(bool, bool), String> {
-    if plan.ops.is_empty() {
+/// `direct` ops (see [`beyond_shell`]) are moved here, after the copy engine's, unless the
+/// user aborted those.
+fn paste_ops(plan: &crate::paste::Plan, sources: &[PathBuf], direct: &[bool]) -> Result<(bool, bool), String> {
+    let steps = || plan.ops.iter().zip(sources).zip(direct);
+    let (aborted, missed) = shell_ops(plan, steps().filter(|(_, d)| !**d).map(|(s, _)| s))?;
+    if !aborted {
+        for ((step, source), _) in steps().filter(|(_, d)| **d) {
+            let flags = if step.overwrites.is_some() { MOVEFILE_REPLACE_EXISTING } else { MOVE_FILE_FLAGS(0) };
+            move_plain(source, &step.target(), flags).map_err(|e| format!("{}: {}", shell_path(source).display(), e.message()))?;
+        }
+    }
+    Ok((aborted, missed))
+}
+fn shell_ops<'a>(
+    plan: &crate::paste::Plan,
+    steps: impl Iterator<Item = (&'a crate::paste::Op, &'a PathBuf)>,
+) -> Result<(bool, bool), String> {
+    let mut steps = steps.peekable();
+    if steps.peek().is_none() {
         return Ok((false, false));
     }
     let op = operation(FILEOPERATION_FLAGS(
@@ -574,7 +673,7 @@ fn paste_ops(plan: &crate::paste::Plan, sources: &[PathBuf]) -> Result<(bool, bo
     let mut folders = std::collections::HashMap::new();
     unsafe {
         op.Advise(&sink).map_err(|e| e.to_string())?;
-        for (step, source) in plan.ops.iter().zip(sources) {
+        for (step, source) in steps {
             if !folders.contains_key(&step.dir) {
                 folders.insert(step.dir.clone(), item(&step.dir)?);
             }
@@ -1044,6 +1143,38 @@ mod tests {
         drop(held);
         assert!(missed.load(Ordering::Relaxed));
         let _ = std::fs::remove_dir_all(&root);
+    }
+    /// Past MAX_PATH the copy engine fails partway: a move within the volume is one rename
+    /// here, anything else is refused before a single item moves.
+    #[test]
+    fn beyond_max_path() {
+        let deep = ["long-path-segment-1234567890"; 10].join("\\");
+        let root = tree("long", &[&format!(r"src\Deep\{deep}\日本語_😀.txt"), r"src\Deep\top.txt", r"src\short.txt"]);
+        std::fs::create_dir(root.join("dst")).unwrap();
+        let _ole = Apartment::new().unwrap();
+        let plan = |moved: bool| {
+            let mut ask = |_: crate::paste::Question| unreachable!();
+            crate::paste::plan(&[root.join(r"src\Deep"), root.join(r"src\short.txt")], &root.join("dst"), moved, &mut ask).unwrap().unwrap()
+        };
+        let copy = plan(false);
+        assert!(beyond_shell(&copy, &[None, None]).unwrap_err().contains("中止"));
+        assert!(transfer(&copy).is_err());
+        assert!(names(&root.join("dst")).is_empty());
+        let moved = plan(true);
+        assert_eq!(beyond_shell(&moved, &[None, None]).unwrap(), [true, false]);
+        let done = transfer(&moved).unwrap();
+        assert!(!done.aborted && !done.missed);
+        assert_eq!(names(&root.join("src")), Vec::<String>::new());
+        assert_eq!(names(&root.join("dst")), ["Deep", "short.txt"]);
+        let file = root.join(format!(r"dst\Deep\{deep}\日本語_😀.txt"));
+        assert!(file.as_os_str().len() > SHELL_MAX && std::fs::read_to_string(&file).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn verbatim_forms() {
+        assert_eq!(verbatim(Path::new(r"C:\a\b")), Path::new(r"\\?\C:\a\b"));
+        assert_eq!(verbatim(Path::new(r"\\server\share\a")), Path::new(r"\\?\UNC\server\share\a"));
+        assert_eq!(verbatim(Path::new(r"\\?\C:\a.")), Path::new(r"\\?\C:\a."));
     }
     #[test]
     fn set_aside_and_restore() {
