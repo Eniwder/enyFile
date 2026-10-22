@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod agent;
 mod compare;
 mod config;
 mod ctxmenu;
@@ -23,7 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::HWND;
-slint::slint! { export { App, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns } from "src/ui.slint"; }
+slint::slint! { export { App, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine } from "src/ui.slint"; }
 
 type Positions = Arc<HashMap<Arc<PathBuf>, usize>>;
 #[derive(Default, Clone)]
@@ -322,7 +323,38 @@ enum Reply {
     Picked(usize, PathBuf),
     /// From the recursive search walk `u64` of a pane.
     Finder(usize, u64, finder::Event),
+    /// From agent run `u64` (Ctrl+I).
+    Agent(u64, agent::Event),
+    /// The settings dialog's hint for an empty agent program field.
+    AgentFound(String),
+    AgentVersion(Result<String, String>),
 }
+/// `Reply::Picked` for 設定 > エージェント's folder list rather than a place.
+const AGENT_FOLDER: usize = 100;
+/// Ctrl+I: the conversation with the agent CLI.
+struct Agent {
+    /// The next request continues it; 新しい会話 forgets it.
+    session: Option<String>,
+    run: Option<agent::Run>,
+    /// Events from runs left behind by 新しい会話 are ignored.
+    id: u64,
+    lines: Rc<slint::VecModel<AgentLine>>,
+    started: Instant,
+    status: String,
+    /// Requests sent this session, for ↑ / ↓ in the input; `recall` is the one shown and
+    /// `draft` what was typed before going back.
+    history: Vec<String>,
+    recall: Option<usize>,
+    draft: String,
+    /// The CLI's version (Err: not found), asked when the panel first opens.
+    version: Option<Result<String, String>>,
+    version_asked: bool,
+    /// Ticks the elapsed seconds in the panel header while a run goes on.
+    clock: slint::Timer,
+}
+/// The panel keeps this many log lines, and ↑ goes back this many requests.
+const AGENT_LINES: usize = 1000;
+const AGENT_HISTORY: usize = 100;
 
 thread_local! {
     static CONTROLLER: RefCell<Option<Rc<RefCell<Controller>>>> = const { RefCell::new(None) };
@@ -495,6 +527,8 @@ struct Pane {
     finder: Option<Session>,
     /// Ctrl+Alt+Shift+F: the list shows search results instead of the folder.
     found: Option<Found>,
+    /// Where the cursor was at the last paint (listing, cursor, ".." / drive / gap, page).
+    painted: Cell<Option<(usize, Option<usize>, Option<Special>, usize)>>,
 }
 struct Session {
     id: u64,
@@ -558,6 +592,8 @@ struct Controller {
     settings_colors: Vec<slint::Color>,
     settings_ext: Vec<(String, slint::Color)>,
     settings_font: (String, f32),
+    settings_agent_folders: Vec<PathBuf>,
+    agent: Agent,
     drives: Arc<Vec<Drive>>,
     menus: Option<ctxmenu::Menus>,
     /// Pane the open context menu belongs to.
@@ -1002,6 +1038,16 @@ impl Controller {
         if let Some(ui) = self.ui.upgrade() {
             // Update the rows of the page in place; a reset would destroy mouse/double-click state.
             let model = &self.panes[p].model;
+            // The cursor moved (or the listing changed): the full-name tip goes at once.
+            let cursor = (
+                Arc::as_ptr(&model.data.borrow()) as usize,
+                model.selection.borrow().current,
+                model.special.get(),
+                model.page_start.get(),
+            );
+            if self.panes[p].painted.replace(Some(cursor)) != Some(cursor) {
+                ui.invoke_hide_tip(p as i32);
+            }
             for i in 0..model.row_count() {
                 model.notify.row_changed(i);
             }
@@ -1521,7 +1567,21 @@ impl Controller {
             ui.set_settings_font_size(self.settings_font.1.round() as i32);
             ui.set_settings_opacity((self.config.opacity * 100.0).round() as i32);
             ui.set_settings_search_links(self.config.search_links);
+            ui.set_settings_agent_path(self.config.agent_path.as_ref().map_or(String::new(), |p| display(p)).into());
+            let access = agent::Access::ALL.iter().position(|a| *a == self.config.agent_access).unwrap_or(0);
+            ui.set_settings_agent_access(access as i32);
+            ui.set_settings_agent_memory(display(&self.config.agent_memory()).into());
+            ui.set_settings_agent_detected("".into());
         }
+        self.settings_agent_folders = self.config.agent_folders.clone();
+        self.settings_agent_rows();
+        // Looking along PATH can touch slow drives: off the UI thread.
+        std::thread::spawn(|| {
+            post(Reply::AgentFound(match agent::locate(None) {
+                Ok(program) => format!("空欄: 自動で検出（{}）", display(&program)),
+                Err(_) => "空欄: 自動で検出（今は見つかりません。codex.exe の場所を入力できます）".into(),
+            }));
+        });
         if let Some(ui) = self.ui.upgrade() {
             ui.set_settings_open(true);
             ui.invoke_focus_settings();
@@ -1690,6 +1750,21 @@ impl Controller {
                         }
                     }
                 }
+                let program = ui.get_settings_agent_path();
+                let program = program.trim().trim_matches('"');
+                let program = (!program.is_empty()).then(|| PathBuf::from(program));
+                if program != self.config.agent_path {
+                    self.config.agent_path = program;
+                    self.agent.version = None;
+                    self.agent.version_asked = false;
+                    if ui.get_agent_open() {
+                        self.agent_version();
+                    }
+                }
+                let access = ui.get_settings_agent_access().clamp(0, 2) as usize;
+                self.config.agent_access = agent::Access::ALL[access];
+                self.config.agent_folders = self.settings_agent_folders.clone();
+                self.sync_agent();
             }
             self.config.colors = self.settings_colors.clone();
             self.config.extension_colors = self.settings_ext.clone();
@@ -1711,6 +1786,7 @@ impl Controller {
         self.config.split3_columns = [ui.get_col_a(), ui.get_col_b()];
         self.config.split3_rows = [ui.get_row_a(), ui.get_row_b()];
         self.config.split4 = [ui.get_quad_x(), ui.get_quad_y()];
+        self.config.agent_split = ui.get_agent_split().clamp(0.1, 0.85);
         self.save_config();
     }
     fn sync_bookmarks(&self) {
@@ -1824,6 +1900,276 @@ impl Controller {
             }
         }
     }
+    fn settings_agent_rows(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            let rows: Vec<slint::SharedString> = self.settings_agent_folders.iter().map(|d| display(d).into()).collect();
+            ui.set_settings_agent_folders(ModelRc::new(slint::VecModel::from(rows)));
+        }
+    }
+    fn agent_folder_add(&mut self) {
+        let start = self.settings_agent_folders.last().cloned();
+        std::thread::spawn(move || {
+            if let Some(path) = shell::pick_folder(start.as_deref()) {
+                post(Reply::Picked(AGENT_FOLDER, path));
+            }
+        });
+    }
+    fn agent_folder_remove(&mut self, i: usize) {
+        if i < self.settings_agent_folders.len() {
+            self.settings_agent_folders.remove(i);
+        }
+        self.settings_agent_rows();
+    }
+    /// The memory in the default editor for .md files (created first if missing).
+    fn agent_memory_open(&self) {
+        let file = self.config.agent_memory();
+        std::thread::spawn(move || {
+            let result = agent::ensure_memory(&file).map_err(|e| e.to_string()).and_then(|()| shell::open(&file));
+            post(Reply::Opened(result));
+        });
+    }
+    /// The panel header: the CLI, what the agent may write, and the run's state.
+    fn sync_agent(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let access = match self.config.agent_access {
+            agent::Access::Folder => "書き込み: 表示中のフォルダー以下 · ネット遮断".to_string(),
+            agent::Access::Extra => format!("書き込み: 表示中のフォルダー以下 + 追加 {} 件 · ネット遮断", self.config.agent_folders.len()),
+            agent::Access::Full => "制限なし（サンドボックス解除）".to_string(),
+        };
+        let cli = match &self.agent.version {
+            Some(Ok(version)) => format!("Codex {version}"),
+            Some(Err(_)) => "Codex（見つかりません）".to_string(),
+            None => "Codex".to_string(),
+        };
+        ui.set_agent_cli(cli.into());
+        // Closed panel: the history line shows that a run goes on.
+        let badge = match &self.agent.run {
+            Some(_) if !ui.get_agent_open() => format!("エージェント実行中 {} 秒", self.agent.started.elapsed().as_secs()),
+            _ => String::new(),
+        };
+        ui.set_agent_badge(badge.into());
+        ui.set_agent_access(access.into());
+        ui.set_agent_danger(self.config.agent_access == agent::Access::Full);
+        ui.set_agent_running(self.agent.run.is_some());
+        let status = match &self.agent.run {
+            Some(_) => format!("{} 秒  {}", self.agent.started.elapsed().as_secs(), self.agent.status),
+            None => self.agent.status.clone(),
+        };
+        ui.set_agent_status(status.into());
+    }
+    fn agent_line(&self, kind: agent::Kind, text: String) {
+        let kind = match kind {
+            agent::Kind::Step => 1,
+            agent::Kind::Message => 2,
+            agent::Kind::Error => 3,
+            agent::Kind::Info => 4,
+        };
+        self.agent_push(kind, text);
+    }
+    fn agent_push(&self, kind: i32, text: String) {
+        let lines = &self.agent.lines;
+        if lines.row_count() >= AGENT_LINES {
+            lines.remove(0);
+        }
+        lines.push(AgentLine { kind, text: text.trim_end().into() });
+    }
+    /// Ctrl+I, the File menu or a double-click on the history line.
+    fn open_agent(&mut self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        ui.set_agent_lines(ModelRc::from(self.agent.lines.clone()));
+        ui.set_agent_open(true);
+        self.agent_version();
+        self.sync_agent();
+        ui.invoke_focus_agent();
+    }
+    /// Ctrl+I: opens the panel, or closes it when open (Esc closes it too).
+    fn toggle_agent(&mut self) {
+        if self.ui.upgrade().is_some_and(|ui| ui.get_agent_open()) {
+            self.close_agent();
+        } else {
+            self.open_agent();
+        }
+    }
+    /// Asks the CLI for its version once (again after the settings change its program).
+    fn agent_version(&mut self) {
+        if self.agent.version.is_some() || self.agent.version_asked {
+            return;
+        }
+        self.agent.version_asked = true;
+        let program = self.config.agent_path.clone();
+        std::thread::spawn(move || {
+            post(Reply::AgentVersion(agent::version(program.as_deref())));
+        });
+    }
+    /// Esc or ✕: a run goes on, and the history line says so until it ends.
+    fn close_agent(&mut self) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_agent_open(false);
+            ui.invoke_focus_pane(self.active as i32);
+        }
+        self.sync_agent();
+    }
+    /// ↑ / ↓ in the input: earlier requests; past the newest, what was being typed.
+    fn agent_recall(&mut self, older: bool, current: &str) -> String {
+        let agent = &mut self.agent;
+        let last = agent.history.len().checked_sub(1);
+        let next = match (agent.recall, older) {
+            (_, _) if last.is_none() => return current.to_string(),
+            (None, false) => return current.to_string(),
+            (None, true) => {
+                agent.draft = current.to_string();
+                last
+            }
+            (Some(i), true) => Some(i.saturating_sub(1)),
+            (Some(i), false) if Some(i) < last => Some(i + 1),
+            (Some(_), false) => None,
+        };
+        agent.recall = next;
+        match next {
+            Some(i) => agent.history[i].clone(),
+            None => std::mem::take(&mut agent.draft),
+        }
+    }
+    /// Sends `text` with the active pane's folder and selection. False keeps the text in the
+    /// field (nothing was sent).
+    fn agent_send(&mut self, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        if self.agent.run.is_some() {
+            self.message("エージェントの実行中です。終わるか中断してから送ってください");
+            return false;
+        }
+        let p = self.active;
+        let data = self.data(p);
+        if data.dir.as_os_str().is_empty() {
+            self.message("フォルダーを開いてから依頼してください");
+            return false;
+        }
+        let cwd = match shell::os_path(&data.dir) {
+            Ok(dir) => dir,
+            Err(e) => {
+                self.message(e);
+                return false;
+            }
+        };
+        // Nothing selected: the cursor item, as the context menu does.
+        let cursor = self.selected_paths(p).is_empty();
+        let selection: Vec<PathBuf> = self.targets(p).iter().map(|p| shell::shell_path(p)).collect();
+        let passed = match (cursor, selection.first()) {
+            (true, Some(item)) => format!("カーソル: {}", item.file_name().map_or_else(|| display(item), |n| n.to_string_lossy().into_owned())),
+            (true, None) => "選択なし".to_string(),
+            (false, _) => format!("選択 {} 件", selection.len()),
+        };
+        self.agent_push(1, format!("{}  ·  {passed}", display(&cwd)));
+        self.agent_push(0, format!("› {text}"));
+        if self.agent.history.last().is_none_or(|last| last != text) {
+            self.agent.history.push(text.to_string());
+            if self.agent.history.len() > AGENT_HISTORY {
+                self.agent.history.remove(0);
+            }
+        }
+        self.agent.recall = None;
+        self.agent.draft.clear();
+        let request = agent::Request {
+            program: self.config.agent_path.clone(),
+            cwd,
+            selection,
+            cursor,
+            text: text.to_string(),
+            access: self.config.agent_access,
+            extra: self.config.agent_folders.clone(),
+            memory: self.config.agent_memory(),
+            session: self.agent.session.clone(),
+        };
+        self.agent.id += 1;
+        let id = self.agent.id;
+        self.agent.run = Some(agent::start(request, move |event| post(Reply::Agent(id, event))));
+        self.agent.started = Instant::now();
+        self.agent.status = "起動中…".into();
+        self.agent.clock.start(slint::TimerMode::Repeated, Duration::from_secs(1), || {
+            if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+                if let Ok(c) = c.try_borrow() {
+                    c.sync_agent();
+                }
+            }
+        });
+        self.sync_agent();
+        true
+    }
+    fn agent_cancel(&mut self) {
+        if let Some(run) = &self.agent.run {
+            run.cancel();
+            self.agent.status = "中断しています…".into();
+            self.sync_agent();
+        }
+    }
+    /// 新しい会話: forgets the conversation (stopping a run that goes on) and clears the log.
+    fn agent_new(&mut self) {
+        if let Some(run) = self.agent.run.take() {
+            run.cancel();
+            self.agent.clock.stop();
+            self.agent.id += 1;
+        }
+        self.agent.session = None;
+        self.agent.lines.clear();
+        self.agent.status = String::new();
+        self.sync_agent();
+    }
+    fn agent_event(&mut self, id: u64, event: agent::Event) {
+        if id != self.agent.id {
+            return;
+        }
+        match event {
+            agent::Event::Session(session) => self.agent.session = Some(session),
+            agent::Event::Status(status) => {
+                self.agent.status = status;
+                self.sync_agent();
+            }
+            agent::Event::Log(kind, text) => self.agent_line(kind, text),
+            agent::Event::Finished(outcome) => {
+                self.agent.run = None;
+                self.agent.clock.stop();
+                let seconds = self.agent.started.elapsed().as_secs();
+                match outcome {
+                    agent::Outcome::Done => {
+                        self.agent.status = format!("完了（{seconds} 秒）");
+                        self.message("エージェント: 完了しました");
+                    }
+                    agent::Outcome::Cancelled => {
+                        self.agent_push(4, "中断しました".into());
+                        self.agent.status = "中断しました".into();
+                        self.message("エージェント: 中断しました");
+                    }
+                    agent::Outcome::Failed(error) => {
+                        let first = error.lines().next().unwrap_or_default().to_string();
+                        let lower = error.to_lowercase();
+                        self.agent_push(3, error);
+                        if ["login", "log in", "sign in", "unauthorized", "401", "auth"].iter().any(|w| lower.contains(w)) {
+                            self.agent_push(4, "サインインが必要かもしれません。ターミナルで codex login を実行してください".into());
+                        }
+                        self.agent.status = "エラー".into();
+                        self.message(format!("エージェント: {first}"));
+                    }
+                }
+                self.sync_agent();
+                // Folders the watch does not cover (other panes' parents, moved-to places)
+                // show the agent's changes too.
+                for p in 0..self.visible() {
+                    let dir = self.data(p).dir.clone();
+                    if dir.as_os_str().is_empty() || self.panes[p].found.is_some() {
+                        continue;
+                    }
+                    if self.panes[p].pending.is_some() {
+                        self.panes[p].stale = true;
+                    } else {
+                        self.navigate(p, dir, Mode::Refresh);
+                    }
+                }
+            }
+        }
+    }
     fn handle(&mut self, reply: Reply) {
         match reply {
             Reply::Listing(p, generation, result) => self.complete(p, generation, result),
@@ -1909,9 +2255,28 @@ impl Controller {
                 Err(e) => self.message(format!("できませんでした: {e}")),
             },
             Reply::Picked(i, path) => {
-                if self.ui.upgrade().is_some_and(|ui| ui.get_settings_open()) {
+                if !self.ui.upgrade().is_some_and(|ui| ui.get_settings_open()) {
+                    return;
+                }
+                if i == AGENT_FOLDER {
+                    let path = shell::shell_path(&path);
+                    if !self.settings_agent_folders.contains(&path) {
+                        self.settings_agent_folders.push(path);
+                    }
+                    self.settings_agent_rows();
+                } else {
                     self.settings[i] = Some(path);
                     self.settings_rows();
+                }
+            }
+            Reply::Agent(id, event) => self.agent_event(id, event),
+            Reply::AgentVersion(version) => {
+                self.agent.version = Some(version);
+                self.sync_agent();
+            }
+            Reply::AgentFound(hint) => {
+                if let Some(ui) = self.ui.upgrade() {
+                    ui.set_settings_agent_detected(hint.into());
                 }
             }
             Reply::Opened(result) => {
@@ -2143,7 +2508,7 @@ impl Controller {
                                 Special::Drive(i) => ctxmenu::Target::Items(vec![self.drives[i].root.clone()]),
                                 Special::Parent | Special::Gap(_) => ctxmenu::Target::Background(data.dir.clone()),
                             };
-                            self.show_menu(p, target, shift);
+                            self.show_menu(p, target, shift, None);
                         }
                     }
                     2 => self.enter_special(p, special),
@@ -2171,7 +2536,7 @@ impl Controller {
                 drop(selection);
                 self.repaint(p);
                 let items = self.selected_paths(p);
-                self.show_menu(p, ctxmenu::Target::Items(items), shift);
+                self.show_menu(p, ctxmenu::Target::Items(items), shift, None);
                 return;
             }
             4 => {
@@ -2228,20 +2593,68 @@ impl Controller {
             Special::Gap(_) => {}
         }
     }
-    fn show_menu(&mut self, p: usize, target: ctxmenu::Target, extended: bool) {
+    fn show_menu(&mut self, p: usize, target: ctxmenu::Target, extended: bool, verb: Option<&'static str>) {
         let owner = self.ui.upgrade().and_then(|ui| hwnd(&ui)).map_or(0, |h| h.0 as isize);
         self.menu_pane = p;
         match &self.menus {
-            Some(menus) => menus.show(ctxmenu::Request { target, owner, extended }),
+            Some(menus) => menus.show(ctxmenu::Request { target, owner, extended, verb }),
             None => self.message("コンテキストメニューを開けません"),
         }
     }
     /// Right click on the empty part of the list: the folder background menu.
+    /// Alt+Enter: the Windows Properties of the selection, else of the cursor item; on ".."
+    /// the folder shown, on a drive row that drive.
+    fn properties(&mut self, p: usize) {
+        let data = self.data(p);
+        let target = match self.panes[p].model.special.get() {
+            Some(Special::Drive(i)) if self.selected_paths(p).is_empty() => match self.drives.get(i) {
+                Some(drive) => ctxmenu::Target::Items(vec![drive.root.clone()]),
+                None => return,
+            },
+            _ => match self.targets(p) {
+                items if items.is_empty() => ctxmenu::Target::Background(data.dir.clone()),
+                items => ctxmenu::Target::Items(items),
+            },
+        };
+        if matches!(&target, ctxmenu::Target::Background(dir) if dir.as_os_str().is_empty()) {
+            return;
+        }
+        self.show_menu(p, target, false, Some("properties"));
+    }
+    /// A terminal in the folder shown: Windows Terminal when installed, else PowerShell.
+    fn open_terminal(&mut self, p: usize) {
+        let dir = self.data(p).dir.clone();
+        if dir.as_os_str().is_empty() {
+            return self.message("フォルダーを開いてから実行してください");
+        }
+        let dir = match shell::os_path(&dir) {
+            Ok(dir) => dir,
+            Err(e) => return self.message(e),
+        };
+        self.message(format!("ターミナルを開きます: {}", display(&dir)));
+        // Looking along PATH and starting a process can wait on slow drives.
+        std::thread::spawn(move || {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+            let terminal = std::env::var_os("PATH")
+                .into_iter()
+                .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+                .map(|dir| dir.join("wt.exe"))
+                .find(|wt| wt.is_file());
+            // The folder goes in as the working folder, never as text Windows Terminal would
+            // parse (";" separates its commands).
+            let result = match terminal {
+                Some(wt) => std::process::Command::new(wt).args(["-d", "."]).current_dir(&dir).spawn(),
+                None => std::process::Command::new("powershell.exe").arg("-NoLogo").current_dir(&dir).creation_flags(CREATE_NEW_CONSOLE).spawn(),
+            };
+            post(Reply::Opened(result.map(drop).map_err(|e| format!("ターミナルを起動できません: {e}"))));
+        });
+    }
     fn blank_menu(&mut self, p: usize, extended: bool) {
         self.active(p);
         let dir = self.data(p).dir.clone();
         if !dir.as_os_str().is_empty() {
-            self.show_menu(p, ctxmenu::Target::Background(dir), extended);
+            self.show_menu(p, ctxmenu::Target::Background(dir), extended, None);
         }
     }
     /// Name dialog for rename (F2), new file (Ctrl+N) or new folder (F7).
@@ -2642,6 +3055,15 @@ impl Controller {
                     self.paste(p);
                     return true;
                 }
+                // Ctrl+@ (its own key on JIS keyboards; some layouts report NUL with Ctrl).
+                "@" | "\u{0}" if !shift => {
+                    self.open_terminal(p);
+                    return true;
+                }
+                "i" if !shift => {
+                    self.toggle_agent();
+                    return true;
+                }
                 "a" => {
                     self.panes[p]
                         .model
@@ -2726,6 +3148,10 @@ impl Controller {
             .current
             .unwrap_or(0)
             .min(entries.saturating_sub(1));
+        if is(Key::Return) && alt {
+            self.properties(p);
+            return true;
+        }
         if is(Key::Return) {
             match special {
                 Some(special) => self.enter_special(p, special),
@@ -3012,6 +3438,27 @@ fn default_start(side: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
     config::known_folder(side).ok_or_else(|| "既定のフォルダーが見つかりません。開くフォルダーを引数で指定してください".into())
 }
 
+/// A panic (on any thread) is appended to `crash.log` beside the settings: released builds
+/// have no console, so it would otherwise leave no trace.
+fn crash_log(file: PathBuf) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let thread = std::thread::current();
+        let entry = format!(
+            "[{}] enyFile {} thread '{}': {info}\n{}\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            env!("CARGO_PKG_VERSION"),
+            thread.name().unwrap_or("?"),
+            std::backtrace::Backtrace::force_capture(),
+        );
+        if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+            let _ = log.write_all(entry.as_bytes());
+        }
+        default(info);
+    }));
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
@@ -3022,6 +3469,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         demo::prepare(root)?;
     }
     let own_root = smoke.or(demo).map(|i| args[i + 1].as_path());
+    crash_log(config_file(own_root).with_file_name("crash.log"));
     let config = config::Config::load(config_file(own_root));
     let (left, right) = match smoke {
         Some(i) => {
@@ -3071,6 +3519,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         filter: None,
         finder: None,
         found: None,
+        painted: Cell::new(None),
     });
     ui.set_p0_rows(ModelRc::from(panes[0].model.clone()));
     ui.set_p1_rows(ModelRc::from(panes[1].model.clone()));
@@ -3079,7 +3528,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller = Rc::new(RefCell::new(Controller {
         ui: ui.as_weak(),
         panes,
-        active: 0,
+        active: 1,
         operations: 0,
         asking: VecDeque::new(),
         config,
@@ -3087,6 +3536,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings_colors: Vec::new(),
         settings_ext: Vec::new(),
         settings_font: (String::new(), 0.0),
+        settings_agent_folders: Vec::new(),
+        agent: Agent {
+            session: None,
+            run: None,
+            id: 0,
+            lines: Rc::new(slint::VecModel::default()),
+            started: Instant::now(),
+            status: String::new(),
+            history: Vec::new(),
+            recall: None,
+            draft: String::new(),
+            version: None,
+            version_asked: false,
+            clock: slint::Timer::default(),
+        },
         drives: Arc::new(Vec::new()),
         menus: ctxmenu::Menus::start(|outcome| {
             post(Reply::Menu(outcome));
@@ -3102,7 +3566,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drag_probe: None,
         drive_cursors: HashMap::new(),
         compare: None,
-        previous: 1,
+        previous: 0,
         demo: demo.is_some(),
     }));
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
@@ -3190,6 +3654,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let c = controller.clone();
         ui.on_layout_committed(move || c.borrow_mut().layout_committed());
     }
+    {
+        let c = controller.clone();
+        ui.on_agent_folder_add(move || c.borrow_mut().agent_folder_add());
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_folder_remove(move |i| c.borrow_mut().agent_folder_remove(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_memory_open(move || c.borrow().agent_memory_open());
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_show(move || c.borrow_mut().open_agent());
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_send(move |text| c.borrow_mut().agent_send(&text));
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_cancel(move || c.borrow_mut().agent_cancel());
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_recall(move |older, current| c.borrow_mut().agent_recall(older, &current).into());
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_new(move || c.borrow_mut().agent_new());
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_close(move || c.borrow_mut().close_agent());
+    }
     controller.borrow().sync_bookmarks();
     {
         let config = &controller.borrow().config;
@@ -3200,6 +3700,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_row_b(config.split3_rows[1]);
         ui.set_quad_x(config.split4[0]);
         ui.set_quad_y(config.split4[1]);
+        ui.set_agent_split(config.agent_split);
     }
     {
         let c = controller.clone();
@@ -3254,9 +3755,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 30 => c.open_find(p, 1),
                 31 => c.find_next(p, true),
                 32 => c.open_find(p, 2),
-                33 => c.set_filter(p, ""),
                 34 => c.open_find(p, 3),
                 40 => c.toggle_compare(),
+                41 => c.open_terminal(p),
+                42 => c.properties(p),
                 _ => {}
             }
         });
@@ -3385,10 +3887,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui = c.ui.upgrade().unwrap();
         ui.set_pane_count(c.config.panes as i32);
         ui.set_three_columns(c.config.three_columns);
-        ui.set_active_hidden(c.config.show_hidden[0]);
+        ui.set_active_pane(1);
+        ui.set_active_hidden(c.config.show_hidden[1]);
         c.sync_columns();
+        if let Some(notice) = c.config.notice.take() {
+            c.message(notice);
+        }
+        // The memory is there from the start (the release zip ships it; this covers the
+        // development build and folders from older versions). Off the UI thread.
+        let memory = c.config.agent_memory();
+        std::thread::spawn(move || agent::ensure_memory(&memory));
     }
-    ui.invoke_focus_pane(0);
+    // The right pane starts active.
+    ui.invoke_focus_pane(1);
     let _smoke = smoke.map(|i| smoke::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
     let _demo = demo.map(|i| demo::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
     slint::run_event_loop()?;

@@ -4,11 +4,12 @@
 //! ```json
 //! {
 //!   "places": { "desktop": "D:\\Desk", "pictures": "...", "videos": "...", "music": "..." },
-//!   "bookmarks": [ { "name": "Work", "path": "D:\\Work" } ]
+//!   "bookmarks": [ { "name": "Work", "path": "D:\\Work" } ],
+//!   "agent": { "cli": "codex", "path": "", "access": "folder", "folders": [ "H:\\Pictures" ] }
 //! }
 //! ```
 //! A missing place falls back to the Windows known folder (including OneDrive redirection).
-use crate::theme;
+use crate::{agent, theme};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -33,6 +34,10 @@ pub struct Bookmark {
 pub struct Config {
     file: PathBuf,
     raw: Value,
+    /// What `load` had to do about the file, for the history line at startup.
+    pub notice: Option<String>,
+    /// The file could not be read: saving would replace settings that may still be there.
+    blocked: bool,
     /// Places set by the user; None means the Windows known folder.
     pub places: [Option<PathBuf>; 5],
     pub bookmarks: Vec<Bookmark>,
@@ -42,6 +47,8 @@ pub struct Config {
     pub split3_columns: [f32; 2],
     pub split3_rows: [f32; 2],
     pub split4: [f32; 2],
+    /// Agent panel height as a share of the room under the toolbar (its splitter).
+    pub agent_split: f32,
     /// Alt+Z: list hidden files too, per pane.
     pub show_hidden: [bool; 4],
     /// Panes shown: 2 (side by side), 3 (stacked) or 4 (2x2).
@@ -68,6 +75,11 @@ pub struct Config {
     pub drive_dirs: std::collections::BTreeMap<String, PathBuf>,
     /// Where the window was when it was last closed; None = Slint's default placement.
     pub window: Option<Placement>,
+    /// Ctrl+I: the agent CLI's program (None = looked for), where it may write, and the
+    /// folders `Access::Extra` adds.
+    pub agent_path: Option<PathBuf>,
+    pub agent_access: agent::Access,
+    pub agent_folders: Vec<PathBuf>,
 }
 fn default_extensions() -> Vec<(String, slint::Color)> {
     theme::EXTENSIONS
@@ -89,14 +101,30 @@ pub fn known_folder(index: usize) -> Option<PathBuf> {
 }
 
 impl Config {
-    /// A missing or unreadable file gives the defaults; it is created on the first save.
+    /// A missing file gives the defaults; it is created on the first save. A file that is not
+    /// valid settings is set aside first (`config.json.broken-<time>`), so a save never
+    /// overwrites what the user may want back; one that cannot be read at all (locked, no
+    /// access) is never overwritten in this session. `notice` says what happened.
     pub fn load(file: PathBuf) -> Self {
-        let raw = std::fs::read(&file)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({}));
-        Self::from_value(file, raw)
+        let (raw, notice, blocked) = match std::fs::read(&file) {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(raw) if raw.is_object() => (raw, None, false),
+                _ => {
+                    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                    let aside = file.with_extension(format!("json.broken-{stamp}"));
+                    match std::fs::rename(&file, &aside) {
+                        Ok(()) => (json!({}), Some(format!("設定ファイルが壊れていたため {} に退避し、既定の設定で起動しました", aside.display())), false),
+                        Err(e) => (json!({}), Some(format!("設定ファイルが壊れていて退避もできないため（{e}）、この起動中は設定を保存しません")), true),
+                    }
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (json!({}), None, false),
+            Err(e) => (json!({}), Some(format!("設定ファイルを読めないため（{e}）、既定の設定で起動し、この起動中は設定を保存しません")), true),
+        };
+        let mut config = Self::from_value(file, raw);
+        config.notice = notice;
+        config.blocked = blocked;
+        config
     }
     fn from_value(file: PathBuf, raw: Value) -> Self {
         let places = std::array::from_fn(|i| {
@@ -118,6 +146,7 @@ impl Config {
         let thirds = pair("split3_rows", [1.0 / 3.0, 2.0 / 3.0]);
         let split3_rows = if thirds[0] < thirds[1] { thirds } else { [1.0 / 3.0, 2.0 / 3.0] };
         let split4 = pair("split4", [0.5, 0.5]);
+        let agent_split = raw["agent_split"].as_f64().map_or(0.42, |v| v as f32).clamp(0.1, 0.85);
         // Older files stored one flag for both panes.
         let show_hidden = match &raw["show_hidden"] {
             Value::Bool(b) => [*b; 4],
@@ -185,15 +214,25 @@ impl Config {
             }
             _ => None,
         };
+        let agent = &raw["agent"];
+        let agent_path = agent["path"].as_str().filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+        let agent_access = agent["access"].as_str().and_then(agent::Access::from_key).unwrap_or(agent::Access::Folder);
+        let agent_folders = agent["folders"]
+            .as_array()
+            .map(|dirs| dirs.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
+            .unwrap_or_default();
         Self {
             file,
             raw,
+            notice: None,
+            blocked: false,
             places,
             bookmarks,
             split,
             split3_columns,
             split3_rows,
             split4,
+            agent_split,
             show_hidden,
             panes,
             three_columns,
@@ -207,7 +246,15 @@ impl Config {
             search_links,
             drive_dirs,
             window,
+            agent_path,
+            agent_access,
+            agent_folders,
         }
+    }
+    /// The agent's memory beside the settings, in a folder of its own: the agent may write
+    /// there in every mode, and nowhere else near the settings.
+    pub fn agent_memory(&self) -> PathBuf {
+        self.file.with_file_name("agent").join("memory.md")
     }
     pub fn default_colors() -> Vec<slint::Color> {
         theme::BASE.iter().map(|(_, _, d)| theme::parse(d).unwrap()).collect()
@@ -221,6 +268,9 @@ impl Config {
     }
     /// Unset places are not written, so they keep following the Windows default.
     pub fn save(&mut self) -> Result<(), String> {
+        if self.blocked {
+            return Err("起動時に設定ファイルを読めなかったため、上書きしません".into());
+        }
         let mut places = serde_json::Map::new();
         for (key, place) in PLACES.iter().zip(&self.places) {
             if let Some(path) = place {
@@ -233,6 +283,7 @@ impl Config {
         self.raw["split3_columns"] = json!(self.split3_columns.map(round));
         self.raw["split3_rows"] = json!(self.split3_rows.map(round));
         self.raw["split4"] = json!(self.split4.map(round));
+        self.raw["agent_split"] = json!(round(self.agent_split));
         self.raw["show_hidden"] = json!(self.show_hidden);
         self.raw["panes"] = json!(self.panes);
         self.raw["three_columns"] = json!(self.three_columns);
@@ -270,6 +321,13 @@ impl Config {
         if let Some(w) = self.window {
             self.raw["window"] = json!({ "x": w.x, "y": w.y, "width": w.width, "height": w.height, "maximized": w.maximized });
         }
+        // Only Codex so far; "cli" names the CLI the other keys are for.
+        self.raw["agent"] = json!({
+            "cli": "codex",
+            "path": self.agent_path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()),
+            "access": self.agent_access.key(),
+            "folders": self.agent_folders.iter().map(|d| d.to_string_lossy()).collect::<Vec<_>>(),
+        });
         self.raw["bookmarks"] = Value::Array(
             self.bookmarks
                 .iter()
@@ -301,6 +359,22 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn broken_file_is_set_aside_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("enyfile-broken-{}", std::process::id()));
+        let file = dir.join("config.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, r#"{ "bookmarks": [ { "name": "途中で切れ"#).unwrap();
+        let mut config = Config::load(file.clone());
+        assert!(config.notice.as_deref().is_some_and(|n| n.contains("退避")), "{:?}", config.notice);
+        let aside: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(aside.iter().any(|n| n.starts_with("config.json.broken-")), "{aside:?}");
+        assert!(!file.exists(), "the broken file is moved, not copied");
+        config.save().unwrap();
+        assert!(Config::load(file.clone()).notice.is_none(), "the next start reads the new file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn roundtrip_keeps_unknown_keys_and_defaults() {
         let dir = std::env::temp_dir().join(format!("enyfile-config-{}", std::process::id()));
@@ -334,6 +408,13 @@ mod tests {
         config.window = Some(placement);
         config.save().unwrap();
         assert_eq!(Config::load(file.clone()).window, Some(placement));
+        assert_eq!(config.agent_access, agent::Access::Folder, "the narrowest mode by default");
+        config.agent_access = agent::Access::Extra;
+        config.agent_folders = vec![r"H:\写真".into()];
+        config.save().unwrap();
+        let again = Config::load(file.clone());
+        assert_eq!((again.agent_access, again.agent_folders.clone(), again.agent_path.clone()), (agent::Access::Extra, vec![PathBuf::from(r"H:\写真")], None));
+        assert_eq!(again.agent_memory(), dir.join("agent").join("memory.md"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

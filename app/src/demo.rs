@@ -144,6 +144,16 @@ fn light_extensions() -> Vec<(String, slint::Color)> {
     config::Config::default_extension_colors().into_iter().map(|(e, c)| (e, darker(c))).collect()
 }
 
+/// Answers like `codex exec --json` (UTF-8 through chcp 65001): one command that takes a
+/// while, its effect, and a reply.
+const FAKE_CODEX: &str = "@echo off\r\nif \"%~1\"==\"--version\" (echo codex-cli 0.162.0& exit /b 0)\r\nchcp 65001 >nul\r\nfindstr \"^\" >nul\r\n\
+echo {\"type\":\"thread.started\",\"thread_id\":\"demo-1\"}\r\n\
+echo {\"type\":\"item.started\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"powershell.exe -Command Get-ChildItem *.jpg,*.png | ForEach-Object { magick $_.Name -resize 256x256 256/$($_.Name) }\",\"status\":\"in_progress\"}}\r\n\
+ping -n 3 127.0.0.1 >nul\r\n\
+mkdir 256\r\ncopy *.jpg 256 >nul\r\ncopy *.png 256 >nul\r\n\
+echo {\"type\":\"item.completed\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"powershell.exe -Command Get-ChildItem *.jpg,*.png | ForEach-Object { magick $_.Name -resize 256x256 256/$($_.Name) }\",\"exit_code\":0,\"status\":\"completed\"}}\r\n\
+echo {\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"5 枚を 256×256 に縮小して 256 フォルダーに保存しました。元の画像はそのままです。\"}}\r\n";
+
 type Act = Box<dyn Fn(&App, &Rc<RefCell<Controller>>)>;
 enum Step {
     /// Runs on the UI thread with nothing borrowed.
@@ -226,8 +236,11 @@ fn key_event(spec: &str) -> slint::language::KeyEvent {
 fn script(root: &Path) -> Script {
     let mut s = Script::default();
     let (photos, music) = (root.join("Photos"), root.join("Music"));
-    s.act(move |_, c| {
+    s.act(move |ui, c| {
+        // The script starts on the left (the app starts on the right).
+        ui.invoke_focus_pane(0);
         let mut c = c.borrow_mut();
+        c.active(0);
         // Panes 3 and 4 show other folders once the layout has four.
         c.navigate(2, photos.clone(), Mode::New(None));
         c.navigate(3, music.clone(), Mode::New(None));
@@ -284,6 +297,50 @@ fn script(root: &Path) -> Script {
     s.key("Tab", 900);
     s.caption("Ctrl+Shift+2", "2 ペインに戻す");
     s.key("Ctrl+Shift+2", 1400);
+
+    // The agent, with a stand-in for Codex that answers the same way (no model is asked).
+    let (fake, photos, projects) = (root.join("fake-codex.cmd"), root.join("Photos"), root.join("Projects"));
+    s.act(move |_, c| {
+        let _ = std::fs::write(&fake, FAKE_CODEX);
+        let mut c = c.borrow_mut();
+        c.config.agent_path = Some(fake.clone());
+        c.config.agent_access = agent::Access::Folder;
+        let p = c.active;
+        c.navigate(p, photos.clone(), Mode::New(None));
+    });
+    s.caption("Ctrl+I", "エージェントに頼む（Codex CLI を呼び出す）");
+    s.show(1200);
+    s.key("Ctrl+I", 900);
+    s.typed("画像を全部 256×256 に縮小して 256 フォルダーへ", 110);
+    s.window_key(Key::Return, 700);
+    s.0.push(Step::Wait(600));
+    s.caption("", "現在のフォルダーと選択を渡し、サンドボックスの中で実行");
+    s.show(1800);
+    s.0.push(Step::Wait(2600));
+    s.caption("", "終わると一覧を更新。続けて指示すると同じ会話の続きになる");
+    s.show(3200);
+    s.caption("Esc", "パネルを閉じる");
+    s.window_key(Key::Escape, 1000);
+    s.caption("ファイル > 設定", "エージェントが書き込める範囲とメモリ");
+    s.act(|ui, c| {
+        c.borrow_mut().open_settings();
+        ui.set_settings_tab(4);
+    });
+    s.0.push(Step::Wait(300));
+    // Not the stand-in, nor where this machine keeps Codex.
+    s.act(|ui, _| {
+        ui.set_settings_agent_path("".into());
+        ui.set_settings_agent_detected("空欄: 自動で検出（PATH の codex）".into());
+    });
+    s.show(2600);
+    s.act(|_, c| c.borrow_mut().settings_done(false));
+    s.act(move |_, c| {
+        let mut c = c.borrow_mut();
+        c.agent_new();
+        let p = c.active;
+        c.navigate(p, projects.clone(), Mode::New(None));
+    });
+    s.show(800);
 
     // Colors and font, through the settings dialog as a user would.
     s.caption("ファイル > 設定", "配色とフォントを変更");

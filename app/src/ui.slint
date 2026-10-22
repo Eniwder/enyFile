@@ -52,6 +52,8 @@ export struct ExtRow { exts: string, color: color, r: int, g: int, b: int }
 export struct PaneInfo { folders: string, files: string, total: string, volume: string, free: string, selected: string, page: string, filter: string, search: string, compare: string }
 export struct BookmarkRow { name: string, path: string }
 export struct PlaceRow { label: string, value: string, fallback: string }
+// Agent panel log. kind: 0 request, 1 step, 2 reply, 3 error, 4 note.
+export struct AgentLine { kind: int, text: string }
 // kind: 0 file, 1 folder, 2 file/folder mismatch.
 export struct AskInfo { kind: int, name: string, existing-path: string, existing-detail: string, incoming-label: string, incoming-path: string, incoming-detail: string, rename: string, stem: int, replaceable: bool }
 
@@ -326,6 +328,9 @@ component Pane inherits Rectangle {
     changed rows => { root.tip-shown = false; }
     public function focus-list() { root.editing = false; keys.focus(); }
     public function focus-path() { root.editing = true; address.focus(); address.select-all(); }
+    // Rust hides the tip when the cursor moves: the row that would have hidden it may be
+    // gone already (page turned, list rebuilt).
+    public function hide-tip() { root.tip-shown = false; }
     background: Theme.pane;
     border-width: 1px;
     border-color: root.active ? Theme.border-active : Theme.border;
@@ -542,6 +547,122 @@ component Pane inherits Rectangle {
     }
 }
 
+// Ctrl+I: plain-language requests to the agent CLI, under the panes. The log keeps the
+// requests, the steps the agent took and its replies; the header says what runs now.
+component AgentPanel inherits Rectangle {
+    in property <[AgentLine]> lines;
+    in property <bool> running;
+    in property <string> status;
+    in property <string> cli;
+    in property <string> access;
+    in property <bool> danger;
+    callback send(string) -> bool;
+    callback cancel();
+    callback fresh();
+    callback recall(bool, string) -> string;
+    callback close();
+    public function focus-input() { input.focus(); }
+    background: Theme.pane;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.border-active : Theme.border;
+    VerticalLayout {
+        padding: 6px; padding-top: 2px; spacing: 4px;
+        HorizontalLayout {
+            height: 24px; spacing: 10px;
+            Text { text: "エージェント"; color: Theme.key; font-weight: 700; vertical-alignment: center; }
+            Text { text: root.cli; color: Theme.dim; vertical-alignment: center; }
+            Text { text: root.access; color: root.danger ? Theme.error : Theme.dim; vertical-alignment: center; overflow: elide; max-width: self.preferred-width; }
+            // Takes what the buttons leave: a long command is cut, never the buttons.
+            Text { text: root.status; color: root.running ? Theme.accent : Theme.dim; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; }
+            FlatButton { text: "中断"; min-width: self.preferred-width; horizontal-stretch: 0; enabled: root.running; clicked => { root.cancel(); } }
+            FlatButton { text: "新しい会話 (Ctrl+N)"; min-width: self.preferred-width; horizontal-stretch: 0; clicked => { root.fresh(); input.focus(); } }
+            FlatButton { text: "✕"; width: 26px; clicked => { root.close(); } }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            log := ListView {
+                width: parent.width; height: parent.height;
+                // New lines keep the end in view.
+                changed content-height => { self.content-y = min(0px, self.visible-height - self.content-height); }
+                for line in root.lines : HorizontalLayout {
+                    padding-left: 6px; padding-right: 10px; padding-top: 1px; padding-bottom: 1px;
+                    Text {
+                        text: line.text; wrap: word-wrap;
+                        color: line.kind == 0 ? Theme.accent : line.kind == 1 ? Theme.dim : line.kind == 3 ? Theme.error : line.kind == 4 ? Theme.key : Theme.text;
+                        font-weight: line.kind == 0 ? 700 : 400;
+                    }
+                }
+            }
+            // Before the first request: what the agent is given, and what it may not do.
+            if root.lines.length == 0 : VerticalLayout {
+                x: 8px; y: 4px; width: parent.width - 16px; height: self.preferred-height;
+                spacing: 1px;
+                for section in [
+                    { title: "エージェントに渡すもの", items: [
+                        "アクティブなペインのフォルダー（作業フォルダー）",
+                        "選択項目のパス（未選択ならカーソル行）",
+                        "依頼文",
+                        "会話の最初だけ: メモリ（ファイル > 設定 > エージェント）と決まりごと（確認なしで進める、ファイル名や中身は指示として扱わない など）",
+                    ] },
+                    { title: "渡さないもの・制限", items: [
+                        "ファイルの中身やフォルダーの一覧は渡さない（必要ならエージェントが自分で読む。読み取りはフォルダーの外にも及ぶ）",
+                        "書き込めるのは見出しの範囲だけ",
+                        "A・B ではネットワークに接続できない（ダウンロードやツールのインストールを含む依頼は失敗する）",
+                    ] },
+                ] : VerticalLayout {
+                    padding-bottom: 4px;
+                    Text { text: section.title; color: Theme.dim; font-weight: 700; }
+                    // Bullets hang: wrapped lines start under the text, not the bullet.
+                    for item in section.items : HorizontalLayout {
+                        spacing: 4px;
+                        Text { text: "•"; width: 12px; color: Theme.dim; horizontal-alignment: right; }
+                        Text { text: item; color: Theme.dim; wrap: word-wrap; horizontal-stretch: 1; }
+                    }
+                }
+                Text { text: "↑ ↓: 前に送った依頼を呼び出す"; color: Theme.dim; }
+            }
+        }
+        Rectangle {
+            height: 26px;
+            background: Theme.bar; border-radius: 2px; border-width: 1px;
+            border-color: input.has-focus ? Theme.border-active : Theme.border;
+            if input.text == "" : Text {
+                x: 6px; width: parent.width - 12px; height: parent.height;
+                text: root.running ? "実行中です。終わるか中断すると次を送れます  Esc: 閉じる（実行は続く）"
+                    : "やりたいことを入力して Enter（例: 選択した画像を 256×256 に縮小して）  Esc: 閉じる";
+                color: Theme.dim; vertical-alignment: center; overflow: elide;
+            }
+            FocusScope {
+                x: 6px; width: parent.width - 12px; height: parent.height; focus-on-click: false;
+                // ↑ / ↓ before the text field sees them: earlier requests, cursor at the end.
+                capture-key-pressed(e) => {
+                    if e.modifiers.control || e.modifiers.alt || e.modifiers.shift { return reject; }
+                    if e.text == Key.UpArrow || e.text == Key.DownArrow {
+                        input.text = root.recall(e.text == Key.UpArrow, input.text);
+                        input.set-selection-offsets(2147483647, 2147483647);
+                        return accept;
+                    }
+                    return reject;
+                }
+                // Keys the text field leaves unhandled arrive here.
+                key-pressed(e) => {
+                    if e.text == Key.Escape { root.close(); return accept; }
+                    // Ctrl+I again closes the panel, as Esc does.
+                    if e.modifiers.control && !e.modifiers.shift && (e.text == "i" || e.text == "I") { root.close(); return accept; }
+                    if e.modifiers.control && (e.text == "n" || e.text == "N") { root.fresh(); return accept; }
+                    return reject;
+                }
+                input := TextInput {
+                    width: parent.width; height: parent.height;
+                    vertical-alignment: center; single-line: true;
+                    color: Theme.text; selection-background-color: Theme.selected-bg; selection-foreground-color: Theme.selected-text;
+                    accepted => { if root.send(self.text) { self.text = ""; } }
+                }
+            }
+        }
+    }
+}
+
 // Toolbar icon from the Windows icon font (Segoe MDL2 Assets).
 component IconButton inherits Rectangle {
     in property <string> glyph;
@@ -669,6 +790,17 @@ component SettingsDialog inherits Rectangle {
     in-out property <int> font-size;
     in-out property <int> window-opacity;
     in-out property <bool> search-links;
+    // エージェント: program (empty = found automatically, shown dim), write access 0 / 1 / 2,
+    // the folders access 1 adds, and the memory file.
+    in-out property <string> agent-path;
+    in property <string> agent-detected;
+    in-out property <int> agent-access;
+    in property <[string]> agent-folders;
+    in property <string> agent-memory;
+    callback agent-folder-add();
+    callback agent-folder-remove(int);
+    callback agent-memory-open();
+    property <int> folder-selected: -1;
     callback edited(int, string);
     callback browse(int);
     callback reset(int);
@@ -710,7 +842,7 @@ component SettingsDialog inherits Rectangle {
                 padding: 14px; spacing: 10px;
                 HorizontalLayout {
                     spacing: 2px; alignment: start;
-                    for name[i] in ["パス", "カラー", "表示", "その他"] : Rectangle {
+                    for name[i] in ["パス", "カラー", "表示", "その他", "エージェント"] : Rectangle {
                         width: tab-label.preferred-width + 28px; height: 28px;
                         background: root.tab == i ? Theme.pane : Theme.bar;
                         border-width: 1px; border-color: root.tab == i ? Theme.border-active : Theme.border;
@@ -839,6 +971,81 @@ component SettingsDialog inherits Rectangle {
                             color: Theme.dim; wrap: word-wrap;
                         }
                     }
+                    // エージェント
+                    if root.tab == 4 : VerticalLayout {
+                        spacing: 8px; alignment: start;
+                        Text { text: "エージェント (Ctrl+I)"; font-weight: 700; color: Theme.text; }
+                        Text {
+                            text: "依頼を Codex CLI に渡して実行します。Codex のインストールとサインイン（codex login）は事前に済ませておきます。";
+                            color: Theme.dim; font-size: 12px; wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "CLI"; width: 90px; color: Theme.text; vertical-alignment: center; }
+                            ComboBox { width: 140px; model: ["Codex CLI"]; current-index: 0; }
+                            LineEdit {
+                                text <=> root.agent-path;
+                                placeholder-text: root.agent-detected;
+                                key-pressed(e) => { if e.text == Key.Escape { root.done(false); return accept; } return reject; }
+                            }
+                        }
+                        Text { text: "書き込みの許可"; font-weight: 700; color: Theme.text; }
+                        for mode[i] in [
+                            { label: "A. 表示中のフォルダーのみ（推奨）", detail: "アクティブなペインのフォルダー以下に書き込めます。" },
+                            { label: "B. 追加のフォルダーも許可", detail: "A に加えて、下の一覧のフォルダー以下にも書き込めます。" },
+                            { label: "C. 制限なし（危険）", detail: "サンドボックスを使いません。エージェントはあなたの権限でどこでも変更・削除できます。" },
+                        ] : Rectangle {
+                            height: 36px;
+                            background: choice.has-hover ? Theme.hover : transparent;
+                            HorizontalLayout {
+                                spacing: 8px; padding-left: 4px;
+                                Text { text: root.agent-access == i ? "●" : "○"; width: 16px; color: Theme.accent; vertical-alignment: center; }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text { text: mode.label; color: i == 2 ? Theme.error : Theme.text; }
+                                    Text { text: mode.detail; color: Theme.dim; font-size: 12px; overflow: elide; }
+                                }
+                            }
+                            choice := TouchArea { clicked => { root.agent-access = i; } }
+                        }
+                        Text {
+                            text: "どのモードでも読み取りはフォルダーの外にも及び、メモリのフォルダーには常に書き込めます。A・B の制限は Codex のサンドボックスが行い、ネットワークにも接続できません（ダウンロードやツールのインストールを含む依頼は失敗します）。";
+                            color: Theme.dim; font-size: 12px; wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "追加のフォルダー"; width: 90px; color: Theme.text; }
+                            Rectangle {
+                                height: 76px;
+                                background: Theme.pane; border-width: 1px; border-color: Theme.border;
+                                ListView {
+                                    for dir[i] in root.agent-folders : Rectangle {
+                                        height: 24px;
+                                        background: root.folder-selected == i ? Theme.selected-bg : transparent;
+                                        Text { x: 8px; text: dir; color: Theme.text; vertical-alignment: center; overflow: elide; }
+                                        TouchArea { clicked => { root.folder-selected = i; } }
+                                    }
+                                }
+                                if root.agent-folders.length == 0 : Text { text: "（なし）"; color: Theme.dim; }
+                            }
+                            VerticalLayout {
+                                spacing: 6px; width: 120px; alignment: start;
+                                DialogButton { text: "追加..."; clicked => { root.agent-folder-add(); } }
+                                DialogButton {
+                                    text: "削除";
+                                    clicked => {
+                                        if root.folder-selected >= 0 { root.agent-folder-remove(root.folder-selected); root.folder-selected = -1; }
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "メモリ"; width: 90px; color: Theme.text; vertical-alignment: center; }
+                            Text { text: root.agent-memory; color: Theme.dim; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                            DialogButton { text: "開く"; clicked => { root.agent-memory-open(); } }
+                        }
+                    }
                 }
                 HorizontalLayout {
                     spacing: 6px; alignment: end;
@@ -945,6 +1152,31 @@ export component App inherits Window {
     in property <int> settings-font-size;
     in-out property <int> settings-opacity: 100;
     in-out property <bool> settings-search-links;
+    in-out property <string> settings-agent-path;
+    in property <string> settings-agent-detected;
+    in-out property <int> settings-agent-access;
+    in property <[string]> settings-agent-folders;
+    in property <string> settings-agent-memory;
+    callback agent-folder-add();
+    callback agent-folder-remove(int);
+    callback agent-memory-open();
+    // Ctrl+I agent panel.
+    in property <bool> agent-open;
+    in property <[AgentLine]> agent-lines;
+    in property <bool> agent-running;
+    in property <string> agent-status;
+    in property <string> agent-cli;
+    in property <string> agent-access;
+    in property <bool> agent-danger;
+    callback agent-show();
+    callback agent-send(string) -> bool;
+    callback agent-cancel();
+    callback agent-new();
+    callback agent-close();
+    callback agent-recall(bool, string) -> string;
+    // On the history line while the panel is closed and a run goes on.
+    in property <string> agent-badge;
+    public function focus-agent() { agent-panel.focus-input(); }
     callback color-base(int, color);
     callback color-ext(int, string, color);
     callback color-ext-delete(int);
@@ -958,6 +1190,8 @@ export component App inherits Window {
     in-out property <float> row-b: 0.6667;
     in-out property <float> quad-x: 0.5;
     in-out property <float> quad-y: 0.5;
+    // Agent panel height as a share of the room under the toolbar (its splitter).
+    in-out property <float> agent-split: 0.42;
     public function focus-bookmark() { bookmark-dialog.open(); }
     callback pointer(int, int, bool, bool, int);
     callback key-event(int, KeyEvent) -> bool;
@@ -978,6 +1212,7 @@ export component App inherits Window {
     callback ask-validate(string) -> string;
     public function focus-ask() { asker.open(); }
     public function focus-pane(pane: int) { if pane == 0 { p0.focus-list(); } else if pane == 1 { p1.focus-list(); } else if pane == 2 { p2.focus-list(); } else { p3.focus-list(); } }
+    public function hide-tip(pane: int) { if pane == 0 { p0.hide-tip(); } else if pane == 1 { p1.hide-tip(); } else if pane == 2 { p2.hide-tip(); } else { p3.hide-tip(); } }
     public function focus-address(pane: int) { if pane == 0 { p0.focus-path(); } else if pane == 1 { p1.focus-path(); } else if pane == 2 { p2.focus-path(); } else { p3.focus-path(); } }
     // Find bar over the history line: 0 closed, 1 search (Ctrl+F), 2 filter (Ctrl+Shift+F),
     // 3 search below the folder (Ctrl+Alt+Shift+F).
@@ -988,7 +1223,7 @@ export component App inherits Window {
     callback find-done(bool, string);
     callback find-next(bool);
     public function focus-find() { find-keys.empty-backspaces = 0; find-edit.text = root.find-text; find-edit.focus(); find-edit.select-all(); }
-    // Menu bar menu shown: -1 none, 0 ファイル, 1 編集, 2 表示.
+    // Menu bar menu shown: -1 none, 0 ファイル, 1 編集, 2 表示, 3 ツール.
     out property <int> open-menu: -1;
     // A shown menu makes the window a little more opaque (Rust sets the window opacity).
     callback menu-shown();
@@ -1046,7 +1281,10 @@ export component App inherits Window {
     property <length> area-x: 2px;
     property <length> area-y: 60px;
     property <length> area-w: self.width - 4px;
-    property <length> area-h: self.height - 60px - 26px;
+    // The agent panel takes its room from the panes (their pages shrink with them).
+    property <length> agent-h: root.agent-open ? max(100px, min(self.height - 86px - 120px, (self.height - 86px) * root.agent-split)) : 0px;
+    // 4 px between the panes and the panel hold its splitter.
+    property <length> area-h: self.height - 60px - 26px - root.agent-h - (root.agent-open ? 2px : 0px);
     property <bool> stacked: root.pane-count == 3 && !root.three-columns;
     property <bool> side-by-side: root.pane-count == 3 && root.three-columns;
     property <bool> quad: root.pane-count == 4;
@@ -1169,15 +1407,40 @@ export component App inherits Window {
         released => { root.layout-committed(); }
         reset => { root.quad-y = 0.5; root.layout-committed(); }
     }
-    // History line: what was done (results, errors). Planned: double-click to type to the AI.
+    agent-panel := AgentPanel {
+        visible: root.agent-open;
+        x: 2px; y: parent.height - 24px - root.agent-h; width: parent.width - 4px; height: root.agent-h;
+        lines: root.agent-lines; running: root.agent-running; status: root.agent-status;
+        cli: root.agent-cli; access: root.agent-access; danger: root.agent-danger;
+        send(text) => { return root.agent-send(text); }
+        cancel => { root.agent-cancel(); }
+        fresh => { root.agent-new(); }
+        close => { root.agent-close(); }
+        recall(older, current) => { return root.agent-recall(older, current); }
+    }
+    // Between the panes and the agent panel: drag to share the height, double-click to reset.
+    Splitter {
+        visible: root.agent-open; vertical: false;
+        x: root.area-x; y: root.area-y + root.area-h; width: root.area-w; height: 4px;
+        moved-to(pos) => { root.agent-split = max(0.1, min(0.85, (root.height - 28px - pos) / (root.height - 86px))); }
+        released => { root.layout-committed(); }
+        reset => { root.agent-split = 0.42; root.layout-committed(); }
+    }
+    // History line: what was done (results, errors). Double-click: the agent panel.
     Rectangle {
         x: 0; y: parent.height - 24px; width: parent.width; height: 24px;
         background: Theme.bar;
         Rectangle { height: 1px; y: 0; background: Theme.border; }
+        TouchArea { double-clicked => { root.agent-show(); } }
         Text {
-            x: 10px; width: parent.width - 20px; height: parent.height;
+            x: 10px; width: parent.width - 20px - (root.agent-badge != "" ? badge.preferred-width + 16px : 0px); height: parent.height;
             visible: root.find-mode == 0;
             text: root.message; color: Theme.dim; overflow: elide; vertical-alignment: center;
+        }
+        badge := Text {
+            x: parent.width - 10px - self.preferred-width; height: parent.height;
+            visible: root.find-mode == 0 && root.agent-badge != "";
+            text: root.agent-badge; color: Theme.accent; vertical-alignment: center;
         }
     }
     // A cut-short name in full, over the row of the active pane (only it can show one).
@@ -1279,8 +1542,8 @@ export component App inherits Window {
         key-pressed(e) => {
             if root.open-menu < 0 { return reject; }
             if e.text == Key.Escape { root.close-menu(); }
-            if e.text == Key.LeftArrow { root.open-menu = mod(root.open-menu + 2, 3); }
-            if e.text == Key.RightArrow { root.open-menu = mod(root.open-menu + 1, 3); }
+            if e.text == Key.LeftArrow { root.open-menu = mod(root.open-menu + 3, 4); }
+            if e.text == Key.RightArrow { root.open-menu = mod(root.open-menu + 1, 4); }
             return accept;
         }
         changed has-focus => { if !self.has-focus { root.open-menu = -1; } }
@@ -1305,15 +1568,23 @@ export component App inherits Window {
             clicked => { if root.open-menu == 2 { root.close-menu(); } else { root.show-menu(2); } }
             changed hovered => { if self.hovered && root.open-menu >= 0 { root.open-menu = 2; } }
         }
+        tool-button := FlatButton {
+            text: "ツール(T)";
+            lit: root.open-menu == 3;
+            clicked => { if root.open-menu == 3 { root.close-menu(); } else { root.show-menu(3); } }
+            changed hovered => { if self.hovered && root.open-menu >= 0 { root.open-menu = 3; } }
+        }
     }
     if root.open-menu == 0 : Rectangle {
-        x: 4px + file-button.x; y: 24px; width: 200px; height: file-list.preferred-height;
+        x: 4px + file-button.x; y: 24px; width: 230px; height: file-list.preferred-height;
         background: Theme.dialog; border-width: 1px; border-color: Theme.border;
         TouchArea { }
         file-list := VerticalLayout {
             padding: 4px;
             MenuEntry { text: "新規ファイル (Ctrl+N)"; clicked => { root.close-menu(); root.menu-command(0); } }
             MenuEntry { text: "新規フォルダー (F7)"; clicked => { root.close-menu(); root.menu-command(1); } }
+            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+            MenuEntry { text: "プロパティ (Alt+Enter)"; clicked => { root.close-menu(); root.menu-command(42); } }
             Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
             MenuEntry { text: "設定..."; clicked => { root.close-menu(); root.open-settings(); } }
         }
@@ -1336,7 +1607,6 @@ export component App inherits Window {
             MenuEntry { text: "検索 (Ctrl+F)"; clicked => { root.close-menu(); root.menu-command(30); } }
             MenuEntry { text: "次を検索 (Ctrl+G)"; clicked => { root.close-menu(); root.menu-command(31); } }
             MenuEntry { text: "フィルター (Ctrl+Shift+F)"; clicked => { root.close-menu(); root.menu-command(32); } }
-            MenuEntry { text: "フィルターの解除 (Esc)"; clicked => { root.close-menu(); root.menu-command(33); } }
             MenuEntry { text: "フォルダー以下を検索 (Ctrl+Alt+Shift+F)"; clicked => { root.close-menu(); root.menu-command(34); } }
         }
     }
@@ -1351,8 +1621,6 @@ export component App inherits Window {
             MenuEntry { text: "更新日時で並べ替え (Ctrl+Shift+T)"; clicked => { root.close-menu(); root.sort(root.active-pane, 2); } }
             MenuEntry { text: "拡張子で並べ替え (Ctrl+Shift+E)"; clicked => { root.close-menu(); root.sort(root.active-pane, 3); } }
             Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "ペインの比較 (Ctrl+Shift+D)"; clicked => { root.close-menu(); root.menu-command(40); } }
-            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
             MenuEntry { text: "サイズの表示"; check: root.columns.size ? 1 : 0; clicked => { root.close-menu(); root.menu-command(20); } }
             MenuEntry { text: "日付の表示"; check: root.columns.date ? 1 : 0; clicked => { root.close-menu(); root.menu-command(21); } }
             MenuEntry { text: "時刻の表示"; check: root.columns.time ? 1 : 0; clicked => { root.close-menu(); root.menu-command(22); } }
@@ -1364,6 +1632,17 @@ export component App inherits Window {
             MenuEntry { text: "3 ペイン 横長 (Ctrl+Shift+3 2回)"; check: root.pane-count == 3 && !root.three-columns ? 1 : 0; clicked => { root.close-menu(); root.menu-command(11); } }
             MenuEntry { text: "3 ペイン 縦長 (Ctrl+Shift+3)"; check: root.pane-count == 3 && root.three-columns ? 1 : 0; clicked => { root.close-menu(); root.menu-command(13); } }
             MenuEntry { text: "4 ペイン (Ctrl+Shift+4)"; check: root.pane-count == 4 ? 1 : 0; clicked => { root.close-menu(); root.menu-command(12); } }
+        }
+    }
+    if root.open-menu == 3 : Rectangle {
+        x: 4px + tool-button.x; y: 24px; width: 250px; height: tool-list.preferred-height;
+        background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+        TouchArea { }
+        tool-list := VerticalLayout {
+            padding: 4px;
+            MenuEntry { text: "ペインの比較 (Ctrl+Shift+D)"; clicked => { root.close-menu(); root.menu-command(40); } }
+            MenuEntry { text: "エージェントに依頼 (Ctrl+I)"; clicked => { root.close-menu(); root.agent-show(); } }
+            MenuEntry { text: "ここでターミナルを開く (Ctrl+@)"; clicked => { root.close-menu(); root.menu-command(41); } }
         }
     }
     settings-dialog := SettingsDialog {
@@ -1378,6 +1657,14 @@ export component App inherits Window {
         font-size: root.settings-font-size;
         window-opacity <=> root.settings-opacity;
         search-links <=> root.settings-search-links;
+        agent-path <=> root.settings-agent-path;
+        agent-detected: root.settings-agent-detected;
+        agent-access <=> root.settings-agent-access;
+        agent-folders: root.settings-agent-folders;
+        agent-memory: root.settings-agent-memory;
+        agent-folder-add => { root.agent-folder-add(); }
+        agent-folder-remove(i) => { root.agent-folder-remove(i); }
+        agent-memory-open => { root.agent-memory-open(); }
         color-base(i, c) => { root.color-base(i, c); }
         color-ext(i, e, c) => { root.color-ext(i, e, c); }
         color-ext-delete(i) => { root.color-ext-delete(i); }

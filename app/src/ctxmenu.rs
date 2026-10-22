@@ -27,6 +27,8 @@ pub struct Request {
     pub owner: isize,
     /// Shift held: extended verbs, as in Explorer.
     pub extended: bool,
+    /// Run this verb (e.g. "properties" for Alt+Enter) without showing the menu.
+    pub verb: Option<&'static str>,
 }
 pub enum Outcome {
     /// Verbs the app handles itself, so its own conflict and rename dialogs are used:
@@ -185,6 +187,26 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
         if menu.QueryContextMenu(popup, 0, FIRST, 0x7FFF, flags).is_err() {
             let _ = DestroyMenu(popup);
             return Outcome::Failed("QueryContextMenu".into());
+        }
+        // Run on this thread, which outlives the call: dialogs such as Properties stay open.
+        if let Some(verb) = request.verb {
+            let ansi: Vec<u8> = verb.bytes().chain(Some(0)).collect();
+            let wide: Vec<u16> = verb.encode_utf16().chain(Some(0)).collect();
+            let info = CMINVOKECOMMANDINFOEX {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+                fMask: 0x4000, /* CMIC_MASK_UNICODE */
+                hwnd: HWND(request.owner as *mut _),
+                lpVerb: PCSTR(ansi.as_ptr()),
+                lpVerbW: PCWSTR(wide.as_ptr()),
+                nShow: SW_SHOWNORMAL.0,
+                ..Default::default()
+            };
+            let result = menu.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO);
+            let _ = DestroyMenu(popup);
+            return match result {
+                Ok(()) => Outcome::Done,
+                Err(e) => Outcome::Failed(e.to_string()),
+            };
         }
         CURRENT.with(|c| *c.borrow_mut() = Some(menu.clone()));
         let mut point = POINT::default();

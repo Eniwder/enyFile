@@ -35,6 +35,9 @@ jobs:
           $name = "enyFile-$env:GITHUB_REF_NAME-windows-x64"
           New-Item -ItemType Directory -Path $name | Out-Null
           Copy-Item app/target/release/enyfile.exe, LICENSE, COPYING, README.md -Destination $name
+          # The agent's memory sits beside the exe from the start, like config.json.
+          New-Item -ItemType Directory -Path "$name/agent" | Out-Null
+          Copy-Item app/agent/memory.md -Destination "$name/agent"
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           "ASSET=$name.zip" >> $env:GITHUB_ENV
       - name: Publish

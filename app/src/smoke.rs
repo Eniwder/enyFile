@@ -140,6 +140,31 @@ struct State {
     sort: (usize, bool),
     /// Toolbar Home was pressed (step 41 waits for it).
     homed: bool,
+    /// When the slow fake agent was cancelled.
+    cancelled: Option<Instant>,
+}
+/// A stand-in for `codex exec --json`: records its arguments and prompt, makes a file in its
+/// working folder and answers with Codex's events. `slow` waits in a grandchild first.
+fn fake_agent(root: &Path, slow: bool) -> Result<PathBuf, String> {
+    let file = root.join(if slow { "fake-agent-slow.cmd" } else { "fake-agent.cmd" });
+    let wait = if slow { "ping -n 60 127.0.0.1 >nul\r\n" } else { "" };
+    let script = format!(
+        "@echo off\r\n\
+         if \"%~1\"==\"--version\" (echo codex-cli 9.9.9-fake& exit /b 0)\r\n\
+         echo %*> \"%~dp0agent-args.txt\"\r\n\
+         findstr \"^\" > \"%~dp0agent-prompt.txt\"\r\n\
+         echo {{\"type\":\"thread.started\",\"thread_id\":\"fake-1\"}}\r\n\
+         {wait}\
+         echo {{\"type\":\"item.started\",\"item\":{{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"make\",\"status\":\"in_progress\"}}}}\r\n\
+         echo agent> agent-made.txt\r\n\
+         echo {{\"type\":\"item.completed\",\"item\":{{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"make\",\"exit_code\":0,\"status\":\"completed\"}}}}\r\n\
+         echo {{\"type\":\"item.completed\",\"item\":{{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"fake done\"}}}}\r\n"
+    );
+    std::fs::write(&file, script).map_err(|e| e.to_string())?;
+    Ok(file)
+}
+fn agent_texts(c: &Rc<RefCell<Controller>>) -> Vec<String> {
+    c.borrow().agent.lines.iter().map(|l| l.text.to_string()).collect()
 }
 impl State {
     fn spawn(&mut self, args: &[&std::ffi::OsStr]) -> Result<(), String> {
@@ -179,6 +204,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
         session: 0,
         sort: (0, false),
         homed: false,
+        cancelled: None,
     });
     let finish = move |state: &mut State, error: Option<String>| {
         if let Some(mut probe) = state.probe.take() {
@@ -993,13 +1019,13 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     if s.menus.last() != Some(&open) {
                         s.menus.push(open);
                     }
-                    if s.sweep < 280.0 {
+                    if s.sweep < 330.0 {
                         s.sweep += 8.0;
                         let position = slint::LogicalPosition::new(s.sweep, 12.0);
                         ui.window().dispatch_event(WindowEvent::PointerMoved { position });
                         return Ok(false);
                     }
-                    expect(s.menus == [0, 1, 2], &format!("hovering the bar switches menus (seen {:?})", s.menus))?;
+                    expect(s.menus == [0, 1, 2, 3], &format!("hovering the bar switches menus (seen {:?})", s.menus))?;
                     let size = ui.window().size().to_logical(ui.window().scale_factor());
                     let away = slint::LogicalPosition::new(size.width / 2.0, size.height / 2.0);
                     ui.window().dispatch_event(WindowEvent::PointerMoved { position: away });
@@ -1193,7 +1219,95 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect((c.borrow().panes[0].column, c.borrow().panes[0].descending) == s.sort, "the sort order is back")?;
                     s.pass("the comparison ends with the folders and sort order as before");
                 }
-                62 => return Err("done".into()),
+                // Ctrl+I: the agent panel with a fake CLI, in pane 0's folder (cmpL).
+                62 => {
+                    let program = fake_agent(&root, false)?;
+                    c.borrow_mut().config.agent_path = Some(program);
+                    c.borrow_mut().active(0);
+                    let a = index(&c, 0, "size.txt")?;
+                    click(&ui, 0, a, false);
+                    expect(c.borrow().config.agent_memory().is_file(), "the memory file is there from the start")?;
+                    ctrl_key(&ui, 0, "i");
+                    expect(ui.get_agent_open(), "Ctrl+I opens the agent panel")?;
+                    expect(ui.invoke_agent_send("make a file".into()), "a request is sent")?;
+                    expect(ui.get_agent_running(), "the panel shows the run")?;
+                    expect(!ui.invoke_agent_send("second".into()), "nothing more is sent while it runs")?;
+                }
+                63 => {
+                    if c.borrow().agent.run.is_some() || !idle(&c) || !names(&c, 0).contains(&"agent-made.txt".to_string()) || c.borrow().agent.version.is_none() {
+                        return Ok(false);
+                    }
+                    let lines = agent_texts(&c);
+                    expect(lines.iter().any(|l| l == "fake done") && lines.iter().any(|l| l == "$ make"), &format!("reply and step in the log: {lines:?}"))?;
+                    expect(ui.get_agent_status().starts_with("完了"), &format!("status: {}", ui.get_agent_status()))?;
+                    expect(c.borrow().agent.session.as_deref() == Some("fake-1"), "the conversation id is kept")?;
+                    let args = std::fs::read_to_string(root.join("agent-args.txt")).map_err(|e| e.to_string())?;
+                    expect(args.contains("-s workspace-write") && args.contains("--add-dir") && !args.contains("resume"), &format!("new conversation in the sandbox: {args}"))?;
+                    let prompt = std::fs::read_to_string(root.join("agent-prompt.txt")).map_err(|e| e.to_string())?;
+                    expect(prompt.contains("<memory>") && prompt.contains("size.txt") && prompt.contains("make a file"), "the prompt carries memory, selection and request")?;
+                    expect(c.borrow().config.agent_memory().is_file(), "the memory file is created")?;
+                    expect(ui.get_agent_cli() == "Codex 9.9.9-fake", &format!("the CLI version in the header: {}", ui.get_agent_cli()))?;
+                    s.pass("Ctrl+I: request with folder and selection, steps and reply, list refreshed");
+                    std::fs::remove_file(root.join("cmpL").join("agent-made.txt")).map_err(|e| e.to_string())?;
+                    // ↑ / ↓ in the input: earlier requests, then back to what was typed.
+                    expect(ui.invoke_agent_recall(true, "draft".into()) == "make a file", "↑ recalls the last request")?;
+                    expect(ui.invoke_agent_recall(true, "make a file".into()) == "make a file", "↑ stops at the oldest")?;
+                    expect(ui.invoke_agent_recall(false, "make a file".into()) == "draft", "↓ past the newest gives back the draft")?;
+                    // Nothing selected: the cursor row (size.txt) goes instead.
+                    fkey(&ui, 0, slint::platform::Key::Escape);
+                    expect(selected(&c, 0).is_empty(), "Esc clears the selection")?;
+                    expect(ui.invoke_agent_send("and again".into()), "a follow-up is sent")?;
+                }
+                64 => {
+                    if c.borrow().agent.run.is_some() || !idle(&c) || !names(&c, 0).contains(&"agent-made.txt".to_string()) {
+                        return Ok(false);
+                    }
+                    let args = std::fs::read_to_string(root.join("agent-args.txt")).map_err(|e| e.to_string())?;
+                    expect(args.contains("-s workspace-write") && args.contains("resume fake-1"), &format!("the follow-up resumes in the same sandbox: {args}"))?;
+                    let prompt = std::fs::read_to_string(root.join("agent-prompt.txt")).map_err(|e| e.to_string())?;
+                    expect(!prompt.contains("<memory>") && prompt.contains("and again"), "a follow-up sends only the context and request")?;
+                    expect(prompt.contains("under the cursor") && prompt.contains("size.txt"), "with nothing selected, the cursor item is passed")?;
+                    expect(agent_texts(&c).iter().any(|l| l.ends_with("カーソル: size.txt")), "the log says the cursor item was passed")?;
+                    s.pass("follow-up continues the conversation with the same sandbox; cursor item when nothing is selected; ↑ ↓ recall");
+                    let program = fake_agent(&root, true)?;
+                    c.borrow_mut().config.agent_path = Some(program);
+                    expect(ui.invoke_agent_send("slow".into()), "the slow request is sent")?;
+                    expect(ui.get_agent_badge().is_empty(), "no badge while the panel shows the run")?;
+                    ui.invoke_agent_close();
+                    expect(ui.get_agent_badge().contains("実行中"), &format!("closed panel: the history line shows the run ({})", ui.get_agent_badge()))?;
+                }
+                65 => {
+                    // Cancelled once the fake has started its grandchild (ping).
+                    if !std::fs::read_to_string(root.join("agent-prompt.txt")).is_ok_and(|p| p.contains("slow")) {
+                        return Ok(false);
+                    }
+                    ui.invoke_agent_cancel();
+                    s.cancelled = Some(Instant::now());
+                }
+                66 => {
+                    if c.borrow().agent.run.is_some() {
+                        return Ok(false);
+                    }
+                    // The grandchild holds stderr open: finishing at all means it was killed too.
+                    let took = s.cancelled.map_or(Duration::ZERO, |t| t.elapsed());
+                    expect(took < Duration::from_secs(20), &format!("cancel ends the whole process tree ({took:?})"))?;
+                    expect(agent_texts(&c).last().is_some_and(|l| l == "中断しました"), "the log says it was cancelled")?;
+                    expect(ui.get_agent_badge().is_empty(), "the badge goes when the run ends")?;
+                    // The splitter above the panel: its share is saved like the pane splitters.
+                    ui.set_agent_split(0.3);
+                    ui.invoke_layout_committed();
+                    let saved = config::Config::load(root.join("config.json")).agent_split;
+                    expect((saved - 0.3).abs() < 1e-3, &format!("agent splitter saved: {saved}"))?;
+                    ui.invoke_agent_new();
+                    expect(c.borrow().agent.session.is_none() && agent_texts(&c).is_empty(), "新しい会話 forgets the conversation")?;
+                    ctrl_key(&ui, 0, "i");
+                    expect(ui.get_agent_open(), "Ctrl+I opens the closed panel")?;
+                    // Through the window: the key reaches the panel's input, which has the focus.
+                    window_ctrl_key(&ui, "i");
+                    expect(!ui.get_agent_open(), "Ctrl+I in the panel closes it")?;
+                    s.pass("cancel stops the CLI and its children; 新しい会話 starts over");
+                }
+                67 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)
