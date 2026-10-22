@@ -16,6 +16,9 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # The build runs dependencies' build scripts: no token left in .git/config for them.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10
         with:
           toolchain: stable
@@ -43,4 +46,8 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME $env:ASSET --title "enyFile $env:GITHUB_REF_NAME" --generate-notes
+        # Releases are immutable once published: the zip goes onto a draft first.
+        run: |
+          gh release create $env:GITHUB_REF_NAME $env:ASSET --repo $env:GITHUB_REPOSITORY --draft --title "enyFile $env:GITHUB_REF_NAME" --generate-notes
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --draft=false

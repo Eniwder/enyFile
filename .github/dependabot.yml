@@ -1,0 +1,9 @@
+# The actions are pinned by commit SHA; this keeps those pins up to date.
+# Crates are pinned with `=` and updated by hand (offline builds need them in .tools),
+# so only security alerts cover them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
