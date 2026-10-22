@@ -4,7 +4,10 @@ use std::{
     ffi::OsString,
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use windows::{
@@ -14,7 +17,7 @@ use windows::{
         System::{Com::*, DataExchange::*, Memory::*, Ole::*, Threading::*},
         UI::{Shell::*, WindowsAndMessaging::SW_SHOWNORMAL},
     },
-    core::{Interface, PCWSTR, w},
+    core::{HRESULT, Interface, PCWSTR, w},
 };
 
 /// OLE (not plain COM) is required for the OLE clipboard; each worker thread owns one.
@@ -381,9 +384,76 @@ fn finish(op: &IFileOperation) -> Result<bool, String> {
     }
 }
 
+/// Notes items the copy engine left out: an error the user skipped in its own dialog, which
+/// it does not count as aborting.
+#[windows::core::implement(IFileOperationProgressSink)]
+struct Missed(Arc<AtomicBool>);
+impl Missed {
+    fn note(&self, hr: HRESULT) -> windows::core::Result<()> {
+        if hr.is_err() || hr == COPYENGINE_S_USER_IGNORED {
+            self.0.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+type Item<'a> = windows::core::Ref<'a, IShellItem>;
+impl IFileOperationProgressSink_Impl for Missed_Impl {
+    fn StartOperations(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn FinishOperations(&self, _: HRESULT) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreRenameItem(&self, _: u32, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostRenameItem(&self, _: u32, _: Item, _: &PCWSTR, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+        self.note(hr)
+    }
+    fn PreMoveItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostMoveItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+        self.note(hr)
+    }
+    fn PreCopyItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostCopyItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+        self.note(hr)
+    }
+    fn PreDeleteItem(&self, _: u32, _: Item) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostDeleteItem(&self, _: u32, _: Item, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+        self.note(hr)
+    }
+    fn PreNewItem(&self, _: u32, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PostNewItem(&self, _: u32, _: Item, _: &PCWSTR, _: &PCWSTR, _: u32, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+        self.note(hr)
+    }
+    fn UpdateProgress(&self, _: u32, _: u32) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn ResetTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PauseTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn ResumeTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Transferred {
     pub aborted: bool,
+    /// The copy engine left some items out (the user skipped an error in its dialog). The
+    /// replaced items are kept: one may hold the only copy of what was left out.
+    pub missed: bool,
     /// Replaced items still under their temporary name: the new item already took the
     /// name when the paste stopped, or deleting the old one failed.
     pub kept: Vec<PathBuf>,
@@ -404,8 +474,8 @@ pub fn transfer(plan: &crate::paste::Plan) -> Result<Transferred, String> {
         .map(|(op, inside)| inside.map_or_else(|| op.source.clone(), |(i, rest)| aside[i].1.join(rest)))
         .collect();
     match paste_ops(plan, &sources) {
-        Ok(false) => Ok(Transferred { aborted: false, kept: delete_aside(&aside) }),
-        Ok(true) => Ok(Transferred { aborted: true, kept: restore(&aside) }),
+        Ok((false, false)) => Ok(Transferred { kept: delete_aside(&aside), ..Default::default() }),
+        Ok((aborted, missed)) => Ok(Transferred { aborted, missed, kept: restore(&aside) }),
         Err(e) => Err(with_kept(e, &restore(&aside))),
     }
 }
@@ -491,16 +561,19 @@ fn delete_aside(aside: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     }
     aside.iter().map(|(_, temp)| temp.clone()).filter(|temp| std::fs::symlink_metadata(temp).is_ok()).collect()
 }
-/// The copies and moves themselves; Ok(true) when aborted.
-fn paste_ops(plan: &crate::paste::Plan, sources: &[PathBuf]) -> Result<bool, String> {
+/// The copies and moves themselves: whether aborted, and whether any item was left out.
+fn paste_ops(plan: &crate::paste::Plan, sources: &[PathBuf]) -> Result<(bool, bool), String> {
     if plan.ops.is_empty() {
-        return Ok(false);
+        return Ok((false, false));
     }
     let op = operation(FILEOPERATION_FLAGS(
         FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_NOCONFIRMMKDIR.0,
     ))?;
+    let missed = Arc::new(AtomicBool::new(false));
+    let sink: IFileOperationProgressSink = Missed(missed.clone()).into();
     let mut folders = std::collections::HashMap::new();
     unsafe {
+        op.Advise(&sink).map_err(|e| e.to_string())?;
         for (step, source) in plan.ops.iter().zip(sources) {
             if !folders.contains_key(&step.dir) {
                 folders.insert(step.dir.clone(), item(&step.dir)?);
@@ -517,7 +590,8 @@ fn paste_ops(plan: &crate::paste::Plan, sources: &[PathBuf]) -> Result<bool, Str
             .map_err(|e| e.to_string())?;
         }
     }
-    finish(&op)
+    let aborted = finish(&op)?;
+    Ok((aborted, missed.load(Ordering::Relaxed)))
 }
 /// Ctrl+V into the items' own folder: Explorer-style "name - コピー" duplicates, no prompt.
 pub fn duplicate(paths: &[PathBuf], destination: &Path) -> Result<bool, String> {
@@ -946,6 +1020,29 @@ mod tests {
         assert!(transfer(&second).unwrap_err().contains("確認後に変わった"));
         unchanged();
         assert_eq!(std::fs::read_to_string(root.join(r"dst\B\old-b.txt")).unwrap(), "someone else's");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// An item the copy engine fails on is noticed even when the operation as a whole is not
+    /// aborted (here no dialog, so the test does not wait for anyone to press Skip).
+    #[test]
+    fn missed_items_are_noticed() {
+        let root = tree("missed", &[r"src\locked.txt", r"src\free.txt"]);
+        std::fs::create_dir(root.join("dst")).unwrap();
+        let _ole = Apartment::new().unwrap();
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::File::options().read(true).share_mode(0).open(root.join(r"src\locked.txt")).unwrap()
+        };
+        let missed = Arc::new(AtomicBool::new(false));
+        let sink: IFileOperationProgressSink = Missed(missed.clone()).into();
+        let op = operation(FILEOPERATION_FLAGS(FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0)).unwrap();
+        unsafe {
+            op.Advise(&sink).unwrap();
+            op.CopyItem(&item(&root.join("src")).unwrap(), &item(&root.join("dst")).unwrap(), PCWSTR::null(), None).unwrap();
+            let _ = op.PerformOperations();
+        }
+        drop(held);
+        assert!(missed.load(Ordering::Relaxed));
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]

@@ -53,7 +53,7 @@ export struct PaneInfo { folders: string, files: string, total: string, volume: 
 export struct BookmarkRow { name: string, path: string }
 export struct PlaceRow { label: string, value: string, fallback: string }
 // kind: 0 file, 1 folder, 2 file/folder mismatch.
-export struct AskInfo { kind: int, name: string, existing-path: string, existing-detail: string, incoming-label: string, incoming-path: string, incoming-detail: string, rename: string, stem: int }
+export struct AskInfo { kind: int, name: string, existing-path: string, existing-detail: string, incoming-label: string, incoming-path: string, incoming-detail: string, rename: string, stem: int, replaceable: bool }
 
 component FlatButton inherits Rectangle {
     in property <string> text;
@@ -203,7 +203,7 @@ component AskDialog inherits Rectangle {
     function choose(code: int) {
         if code == 0 || code == 1 { if root.info.kind != 0 { return; } }
         if code == 4 { if root.info.kind != 1 { return; } }
-        if code == 5 { if root.info.kind != 1 { return; } }
+        if code == 5 { if root.info.kind != 1 || !root.info.replaceable { return; } }
         if code == 3 && !root.all {
             root.renaming = true;
             name-edit.text = root.info.rename;
@@ -281,7 +281,7 @@ component AskDialog inherits Rectangle {
                 if root.info.kind == 0 : DialogButton { text: "新しければ上書き(N)"; clicked => { root.choose(1); } }
                 if root.info.kind == 1 : DialogButton { text: "結合(G)"; clicked => { root.choose(4); } }
                 DialogButton { text: "スキップ(S)"; clicked => { root.choose(2); } }
-                if root.info.kind == 1 : DialogButton { text: "フォルダの置換(E)"; clicked => { root.choose(5); } }
+                if root.info.kind == 1 : DialogButton { text: "フォルダの置換(E)"; enabled: root.info.replaceable; clicked => { root.choose(5); } }
                 DialogButton { text: "リネーム(R)"; primary: root.renaming; clicked => { if root.renaming { root.confirm-rename(); } else { root.choose(3); } } }
                 Rectangle { height: 12px; }
                 DialogButton { text: "キャンセル(C)"; clicked => { root.choose(6); } }

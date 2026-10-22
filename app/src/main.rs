@@ -1862,6 +1862,8 @@ impl Controller {
                             "貼り付けを取り消しました".to_string()
                         } else if outcome.aborted {
                             format!("{verb}は途中で中止されました")
+                        } else if outcome.missed {
+                            format!("{verb}できなかった項目があります → {}", display(&dir))
                         } else if outcome.inside > 0 {
                             format!("フォルダーをその中へは貼り付けられないため {} 件をスキップしました → {}", outcome.inside, display(&dir))
                         } else if outcome.skipped {
@@ -2513,6 +2515,7 @@ impl Controller {
             incoming_detail: detail(&q.from, q.from.modified > q.to.modified).into(),
             rename: q.auto_name.clone().into(),
             name: name.into(),
+            replaceable: q.replaceable,
         };
         if let Some(ui) = self.ui.upgrade() {
             ui.set_ask(info);
@@ -2866,6 +2869,8 @@ impl Controller {
 struct PasteOutcome {
     moved: bool,
     aborted: bool,
+    /// The copy engine left items out (an error skipped in its dialog).
+    missed: bool,
     skipped: bool,
     cancelled: bool,
     /// Folders left out because the destination was the folder itself or inside it.
@@ -2913,14 +2918,14 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
         return Ok((Vec::new(), cancelled));
     };
     // `transfer` verifies the plan against the disk right before it changes anything.
-    let shell::Transferred { aborted, kept } = shell::transfer(&plan)?;
+    let shell::Transferred { aborted, missed, kept } = shell::transfer(&plan)?;
     if moved && !aborted {
         plan.remove_emptied();
-        if !plan.skipped {
+        if !plan.skipped && !missed {
             shell::finish_cut(&paths);
         }
     }
-    let outcome = PasteOutcome { moved, aborted, skipped: plan.skipped, cancelled: false, inside: plan.inside, kept };
+    let outcome = PasteOutcome { moved, aborted, missed, skipped: plan.skipped, cancelled: false, inside: plan.inside, kept };
     Ok((plan.targets, outcome))
 }
 

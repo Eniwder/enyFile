@@ -899,6 +899,7 @@ dependencies = [
  "serde_json",
  "slint",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

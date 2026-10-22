@@ -51,6 +51,9 @@ pub struct Question {
     pub from: Meta,
     pub to: Meta,
     pub auto_name: String,
+    /// The existing folder has a file ID: without one, a swap before the paste runs could
+    /// not be detected, so it cannot be replaced.
+    pub replaceable: bool,
     /// Lower-cased names a rename may not use in the target folder.
     pub taken: HashSet<String>,
 }
@@ -210,7 +213,9 @@ impl Planner<'_> {
         let names = self.names(dir)?;
         let taken = names.clone();
         let auto = auto_name(&name, from.directory, &taken);
-        let rule = self.rules.get(&kind);
+        let target_id = if kind == Kind::Folder { crate::pathid::ident(&target) } else { None };
+        // "Replace, apply to all" reaching a folder that cannot be replaced: asked about.
+        let rule = self.rules.get(&kind).filter(|rule| **rule != Answer::Replace || target_id.is_some());
         let answer = match rule {
             Some(Answer::Rename(_)) => Answer::Rename(auto),
             Some(rule) => rule.clone(),
@@ -223,6 +228,7 @@ impl Planner<'_> {
                     from: from.clone(),
                     to: to.clone(),
                     auto_name: auto,
+                    replaceable: target_id.is_some(),
                     taken,
                 });
                 if all && kind != Kind::Mismatch && answer != Answer::Cancel {
@@ -262,7 +268,7 @@ impl Planner<'_> {
                 }
             }
             Answer::Replace if kind == Kind::Folder => {
-                self.plan.remove_ids.push(crate::pathid::ident(&target));
+                self.plan.remove_ids.push(target_id);
                 self.plan.remove.push(target);
                 self.push(source, dir, None, false, top);
             }
@@ -527,7 +533,12 @@ mod tests {
     #[test]
     fn replace_only_an_identified_folder() {
         let f = fixture("identified");
-        let replace = || plan(&[f.0.join("src/Folder")], &f.0.join("dst"), false, &mut |_| (Answer::Replace, false)).unwrap().unwrap();
+        let replace = || plan(&[f.0.join("src/Folder")], &f.0.join("dst"), false, &mut |q| {
+            assert!(q.replaceable);
+            (Answer::Replace, false)
+        })
+        .unwrap()
+        .unwrap();
         let ok = replace();
         assert!(ok.remove_ids[0].is_some() && ok.verify().is_ok());
         let mut unknown = replace();

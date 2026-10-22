@@ -11,6 +11,8 @@ raw-window-handle = "=0.6.2"
 chrono = "=0.4.45"
 serde_json = "=1.0.154"
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+# The COM `implement` macro refers to this crate by name (already a dependency of windows).
+windows-core = "=0.62.2"
 
 [[bin]]
 name = "enyfile"
