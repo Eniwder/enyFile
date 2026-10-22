@@ -7,7 +7,7 @@ Windows 専用の、キーボード中心の 2 ペインファイラー。Rust +
 
 ![enyFile のデモ: 2 ペインの操作、フィルター、左右の比較、4 ペイン、エージェントへの依頼、ライト配色と游ゴシックへの切り替え](docs/demo.webp)
 
-## インストール
+## ダウンロード/インストール
 
 [Releases](https://github.com/Eniwder/enyFile/releases/latest) から `enyFile-vX.Y.Z-windows-x64.zip` をダウンロードして展開し、`enyfile.exe` を実行します。インストーラーはありません。
 
@@ -45,8 +45,6 @@ Windows 専用の、キーボード中心の 2 ペインファイラー。Rust +
 | Ctrl+Alt+Shift+F | フォルダー以下を検索（入力しながら絞り込み、Esc で戻る） |
 | Ctrl+Shift+D | 2 つのペインを比較（もう一度で差分のみ、3 回目か Esc で終了） |
 | Ctrl+I | エージェントに文章で依頼（もう一度か Esc で閉じる。下の「エージェント」） |
-| Alt+Enter | プロパティ |
-| Ctrl+@ | 表示中のフォルダーでターミナルを開く |
 
 並べ替え、ペイン数の切り替え、設定画面など、そのほかの操作と画面の説明は [app/README.md](app/README.md) を参照してください。
 
