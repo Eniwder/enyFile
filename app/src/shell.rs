@@ -771,7 +771,10 @@ pub fn delete(paths: &[PathBuf], permanent: bool) -> Result<bool, String> {
     finish(&op)
 }
 
+/// Starts in the file's own folder, as from Explorer: without it a .bat or .exe would run in
+/// enyFile's working folder and miss the files next to it.
 pub fn open(path: &Path) -> Result<(), String> {
+    let folder = path.parent().map(wide).transpose()?;
     let path = wide(path)?;
     let _ole = Apartment::new()?;
     let result = unsafe {
@@ -780,7 +783,7 @@ pub fn open(path: &Path) -> Result<(), String> {
             w!("open"),
             PCWSTR(path.as_ptr()),
             PCWSTR::null(),
-            PCWSTR::null(),
+            folder.as_ref().map_or(PCWSTR::null(), |f| PCWSTR(f.as_ptr())),
             SW_SHOWNORMAL,
         )
     };

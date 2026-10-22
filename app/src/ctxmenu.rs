@@ -169,6 +169,13 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
         return Outcome::Failed(e);
     }
     unsafe {
+        // Verbs that start a program (Open, Run as administrator) start it in the items'
+        // folder, as Explorer does, not in enyFile's working folder.
+        let folder = match &request.target {
+            Target::Items(paths) => paths.first().and_then(|p| p.parent()).map(wide),
+            Target::Background(dir) => Some(wide(dir)),
+        };
+        let folder = folder.as_ref().map_or(PCWSTR::null(), |f| PCWSTR(f.as_ptr()));
         let menu = match &request.target {
             Target::Items(paths) => items_menu(paths),
             Target::Background(dir) => background_menu(dir, hwnd),
@@ -198,6 +205,7 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
                 hwnd: HWND(request.owner as *mut _),
                 lpVerb: PCSTR(ansi.as_ptr()),
                 lpVerbW: PCWSTR(wide.as_ptr()),
+                lpDirectoryW: folder,
                 nShow: SW_SHOWNORMAL.0,
                 ..Default::default()
             };
@@ -228,6 +236,7 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
                         hwnd,
                         lpVerb: PCSTR(id as *const u8),
                         lpVerbW: PCWSTR(id as *const u16),
+                        lpDirectoryW: folder,
                         nShow: SW_SHOWNORMAL.0,
                         ptInvoke: point,
                         ..Default::default()

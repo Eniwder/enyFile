@@ -1319,7 +1319,26 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(!ui.get_agent_open(), "Ctrl+I in the panel closes it")?;
                     s.pass("cancel stops the CLI and its children; 新しい会話 starts over");
                 }
-                67 => return Err("done".into()),
+                // Opening a file starts it in its own folder (as Explorer does), not in ours.
+                67 => {
+                    let probe = root.join("cmpL").join("where.cmd");
+                    if !probe.exists() {
+                        std::fs::write(&probe, "@cd > \"%~dp0cwd.txt\"\r\n").map_err(|e| e.to_string())?;
+                    }
+                    if !idle(&c) || !names(&c, 0).contains(&"where.cmd".to_string()) {
+                        return Ok(false);
+                    }
+                    let row = index(&c, 0, "where.cmd")?;
+                    ui.invoke_pointer(0, row, false, false, 2);
+                }
+                68 => {
+                    // The file exists before `cd` has written into it.
+                    let Some(cwd) = std::fs::read_to_string(root.join("cmpL").join("cwd.txt")).ok().filter(|t| t.ends_with('\n')) else { return Ok(false) };
+                    let expected = display(&root.join("cmpL"));
+                    expect(cwd.trim().eq_ignore_ascii_case(&expected), &format!("started in {} (expected {expected})", cwd.trim()))?;
+                    s.pass("opening a file starts it in its own folder");
+                }
+                69 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)
