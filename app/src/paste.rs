@@ -328,7 +328,14 @@ impl Plan {
             crate::shell::os_path(path)?;
         }
         let mut ids = crate::pathid::Idents::default();
+        // Replacing deletes the whole folder: without an ID a swap could not be told apart.
+        if self.remove_ids.len() != self.remove.len() {
+            return Err("置換するフォルダーを識別できないため中止しました".into());
+        }
         for (path, planned) in self.remove.iter().zip(&self.remove_ids) {
+            if planned.is_none() {
+                return Err(format!("置換するフォルダーを識別できないため中止しました: {}", path.display()));
+            }
             if crate::pathid::ident(path) != *planned {
                 return Err(format!("置換するフォルダーが確認後に変わったため中止しました: {}", path.display()));
             }
@@ -514,6 +521,27 @@ mod tests {
         };
         assert!(bad.verify().unwrap_err().contains("貼り付け元を削除"));
         assert!(root.join(r"w\Folder\Folder\inner.txt").exists());
+    }
+    /// A folder to replace is deleted outright, so it must be the one the user saw: one
+    /// swapped meanwhile, or one whose ID cannot be read, stops the paste.
+    #[test]
+    fn replace_only_an_identified_folder() {
+        let f = fixture("identified");
+        let replace = || plan(&[f.0.join("src/Folder")], &f.0.join("dst"), false, &mut |_| (Answer::Replace, false)).unwrap().unwrap();
+        let ok = replace();
+        assert!(ok.remove_ids[0].is_some() && ok.verify().is_ok());
+        let mut unknown = replace();
+        unknown.remove_ids = vec![None];
+        assert!(unknown.verify().unwrap_err().contains("識別できない"));
+        unknown.remove_ids.clear();
+        assert!(unknown.verify().is_err());
+        // Deleted and made again under the same name: another folder.
+        let swapped = replace();
+        std::fs::remove_dir_all(f.0.join("dst/Folder")).unwrap();
+        std::fs::create_dir(f.0.join("dst/Folder")).unwrap();
+        assert!(swapped.verify().unwrap_err().contains("確認後に変わった"));
+        std::fs::remove_dir(f.0.join("dst/Folder")).unwrap();
+        assert!(swapped.verify().is_err());
     }
     /// Audit #4: a file changed after the user chose to overwrite it is not overwritten.
     #[test]

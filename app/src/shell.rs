@@ -912,6 +912,42 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&root);
     }
+    /// Stopped before the copy engine runs: every replaced folder keeps its name and its
+    /// contents, and nothing is pasted.
+    #[test]
+    fn replace_stopped_early_changes_nothing() {
+        let root = tree("stopped", &[r"src\A\new-a.txt", r"src\B\new-b.txt", r"dst\A\old-a.txt", r"dst\B\old-b.txt"]);
+        let _ole = Apartment::new().unwrap();
+        let plan = || {
+            let mut ask = |_: crate::paste::Question| (crate::paste::Answer::Replace, false);
+            crate::paste::plan(&[root.join(r"src\A"), root.join(r"src\B")], &root.join("dst"), false, &mut ask).unwrap().unwrap()
+        };
+        let unchanged = || {
+            assert_eq!(names(&root.join("dst")), ["A", "B"]);
+            assert_eq!(names(&root.join(r"dst\A")), ["old-a.txt"]);
+            assert_eq!(names(&root.join(r"dst\B")), ["old-b.txt"]);
+        };
+        // B cannot be set aside (a file inside held open): A, already aside, comes back.
+        let first = plan();
+        assert_eq!(first.remove.len(), 2);
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::File::options().read(true).share_mode(0).open(root.join(r"dst\B\old-b.txt")).unwrap()
+        };
+        let error = transfer(&first).unwrap_err();
+        drop(held);
+        assert!(error.contains("退避できません") && !error.contains("残っています"), "{error}");
+        unchanged();
+        // B swapped for another folder after the user answered: refused before any rename.
+        let second = plan();
+        std::fs::remove_dir_all(root.join(r"dst\B")).unwrap();
+        std::fs::create_dir(root.join(r"dst\B")).unwrap();
+        std::fs::write(root.join(r"dst\B\old-b.txt"), "someone else's").unwrap();
+        assert!(transfer(&second).unwrap_err().contains("確認後に変わった"));
+        unchanged();
+        assert_eq!(std::fs::read_to_string(root.join(r"dst\B\old-b.txt")).unwrap(), "someone else's");
+        let _ = std::fs::remove_dir_all(&root);
+    }
     #[test]
     fn set_aside_and_restore() {
         let root = tree("aside", &[r"A\a.txt", r"A~enyfile-old\taken.txt", r"B\b.txt"]);
