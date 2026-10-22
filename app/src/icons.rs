@@ -138,7 +138,7 @@ fn url_places(bytes: &[u8]) -> Vec<String> {
 fn local(place: &str) -> bool {
     let place = expand(place);
     let place = place.strip_prefix(r"\\?\").unwrap_or(&place);
-    if place.starts_with(r"\\") || place.starts_with("//") || place.len() >= 4 && place[..4].eq_ignore_ascii_case(r"UNC\") {
+    if place.starts_with(r"\\") || place.starts_with("//") || place.get(..4).is_some_and(|s| s.eq_ignore_ascii_case(r"UNC\")) {
         return false;
     }
     let bytes = place.as_bytes();
@@ -255,6 +255,9 @@ mod tests {
             (&format!(r"{windows}\notepad.exe"), true),
             (&format!(r"\\?\{windows}\notepad.exe"), true),
             ("icon.ico", true),
+            // Byte 4 falls inside a character: must not be sliced there.
+            ("あいう.ico", true),
+            (r"\\?\あいう.ico", true),
         ] {
             assert_eq!(local(place), ok, "{place}");
         }
