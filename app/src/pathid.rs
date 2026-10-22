@@ -81,13 +81,24 @@ impl Idents {
     }
     /// `inner` is `outer` or somewhere below it. `inner` need not exist yet: its nearest
     /// existing ancestors are compared. Each ancestor is opened as named, so a junction on
-    /// the way counts as the folder it points to.
+    /// the way counts as the folder it points to. A junction pointing further down (J to
+    /// `outer\sub`) is not `outer` itself, so the ancestors of the resolved path count too.
     pub fn within(&mut self, inner: &Path, outer: &Path) -> bool {
         let Some(target) = self.get(outer) else {
             let (inner, outer) = (text(inner), text(outer));
             return inner == outer || inner.starts_with(&format!("{outer}\\"));
         };
+        let mut resolved = None;
         let mut path = Some(inner);
+        while let Some(p) = path {
+            match self.get(p) {
+                Some(id) if id == target => return true,
+                Some(_) if resolved.is_none() => resolved = std::fs::canonicalize(p).ok(),
+                _ => {}
+            }
+            path = p.parent();
+        }
+        let mut path = resolved.as_deref();
         while let Some(p) = path {
             if self.get(p) == Some(target) {
                 return true;
@@ -125,6 +136,12 @@ mod tests {
         // Through a junction: the same folder, and inside it.
         assert!(ids.same(&root.join("J"), &root.join("Real")));
         assert!(ids.within(&root.join(r"J\Sub"), &root.join("Real")));
+        // A junction to a folder inside: JS is Real\Sub, so it lies within Real.
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(root.join("JS")).arg(root.join(r"Real\Sub")).output().unwrap();
+        assert!(made.status.success());
+        assert!(ids.within(&root.join("JS"), &root.join("Real")));
+        assert!(ids.within(&root.join(r"JS\new\deeper"), &root.join("Real")));
+        assert!(!ids.within(&root.join("Real"), &root.join("JS")));
         // Not yet existing paths count by their existing ancestors.
         assert!(ids.within(&root.join(r"Real\Sub\new\deeper"), &root.join("Real")));
         assert!(!ids.within(&root.join("Realm"), &root.join("Real")));
