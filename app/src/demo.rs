@@ -157,11 +157,13 @@ fn light_extensions() -> Vec<(String, slint::Color)> {
 /// while, its effect, and a reply.
 const FAKE_CODEX: &str = "@echo off\r\nif \"%~1\"==\"--version\" (echo codex-cli 0.162.0& exit /b 0)\r\nchcp 65001 >nul\r\nfindstr \"^\" >nul\r\n\
 echo {\"type\":\"thread.started\",\"thread_id\":\"demo-1\"}\r\n\
-echo {\"type\":\"item.started\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"powershell.exe -Command Get-ChildItem *.jpg,*.png | ForEach-Object { magick $_.Name -resize 256x256 256/$($_.Name) }\",\"status\":\"in_progress\"}}\r\n\
+echo {\"type\":\"item.started\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"powershell.exe -Command Get-ChildItem *.jpg,*.png | ForEach-Object { $d = $_.LastWriteTime.ToString('yyyy-MM-dd'); mkdir -Force $d; Move-Item $_ $d }\",\"status\":\"in_progress\"}}\r\n\
 ping -n 3 127.0.0.1 >nul\r\n\
-mkdir 256\r\ncopy *.jpg 256 >nul\r\ncopy *.png 256 >nul\r\n\
-echo {\"type\":\"item.completed\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"powershell.exe -Command Get-ChildItem *.jpg,*.png | ForEach-Object { magick $_.Name -resize 256x256 256/$($_.Name) }\",\"exit_code\":0,\"status\":\"completed\"}}\r\n\
-echo {\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"5 枚を 256×256 に縮小して 256 フォルダに保存しました。元の画像はそのままです。縦横比の違う画像は 256×256 に収まるよう引き伸ばしています。縦横比を保ちたいときは「縦横比を維持して」と続けて指示してください。ファイル名は元と同じです。\"}}\r\n";
+mkdir 2026-09-06 2026-09-07 2026-09-13\r\n\
+move IMG_0412.jpg 2026-09-06 >nul\r\nmove IMG_0413.jpg 2026-09-06 >nul\r\n\
+move IMG_0420.png 2026-09-07 >nul\r\nmove panorama.jpg 2026-09-07 >nul\r\nmove screen.png 2026-09-13 >nul\r\n\
+echo {\"type\":\"item.completed\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"powershell.exe -Command Get-ChildItem *.jpg,*.png | ForEach-Object { $d = $_.LastWriteTime.ToString('yyyy-MM-dd'); mkdir -Force $d; Move-Item $_ $d }\",\"exit_code\":0,\"status\":\"completed\"}}\r\n\
+echo {\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"5 枚を更新日ごとに 3 つのフォルダへ移動しました（2026-09-06 に 2 枚、2026-09-07 に 2 枚、2026-09-13 に 1 枚）。写真の撮影日（Exif）で分けたいときや、フォルダ名を「2026年9月」のように月単位にしたいときは、続けて指示してください。\"}}\r\n";
 
 type Act = Box<dyn Fn(&App, &Rc<RefCell<Controller>>)>;
 enum Step {
@@ -335,7 +337,7 @@ fn script(root: &Path) -> Script {
     s.caption("Ctrl+I", "エージェントに頼む（Codex CLI を呼び出す）");
     s.show(1200);
     s.key("Ctrl+I", 900);
-    s.typed("画像を全部 256×256 に縮小して 256 フォルダへ", 110);
+    s.typed("画像を日付ごとのフォルダに分けて", 110);
     s.window_key(Key::Return, 700);
     s.0.push(Step::Wait(600));
     s.caption("", "現在のフォルダと選択を渡し、サンドボックスの中で実行");
@@ -345,6 +347,11 @@ fn script(root: &Path) -> Script {
     s.show(3200);
     s.caption("Esc", "パネルを閉じる");
     s.window_key(Key::Escape, 1000);
+    // Into one of the new folders, to show the pictures really moved.
+    s.caption("", "画像は日付のフォルダへ移動済み");
+    s.key("Home", 380);
+    s.key("Down", 600);
+    s.key("Enter", 2000);
     s.caption("ファイル > 設定", "エージェントが書き込める範囲とメモリ");
     s.act(|ui, c| {
         c.borrow_mut().open_settings();
