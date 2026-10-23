@@ -2035,6 +2035,15 @@ impl Controller {
             post(Reply::Opened(result.map(drop).map_err(|e| format!("ターミナルを起動できません: {e}"))));
         });
     }
+    /// An Explorer window on the folder shown.
+    fn open_explorer(&mut self, p: usize) {
+        let dir = self.data(p).dir.clone();
+        if dir.as_os_str().is_empty() {
+            return self.message("フォルダーを開いてから実行してください");
+        }
+        // ShellExecute can wait on slow drives.
+        std::thread::spawn(move || post(Reply::Opened(shell::explore(&dir))));
+    }
     fn blank_menu(&mut self, p: usize, extended: bool) {
         self.active(p);
         let dir = self.data(p).dir.clone();
@@ -3144,6 +3153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 40 => c.toggle_compare(),
                 41 => c.open_terminal(p),
                 42 => c.properties(p),
+                43 => c.open_explorer(p),
                 _ => {}
             }
         });

@@ -1655,6 +1655,7 @@ export component App inherits Window {
             MenuEntry { text: "ペインの比較 (Ctrl+Shift+D)"; clicked => { root.close-menu(); root.menu-command(40); } }
             MenuEntry { text: "エージェントに依頼 (Ctrl+I)"; clicked => { root.close-menu(); root.agent-show(); } }
             MenuEntry { text: "ここでターミナルを開く (Ctrl+@)"; clicked => { root.close-menu(); root.menu-command(41); } }
+            MenuEntry { text: "ここでエクスプローラーを開く"; clicked => { root.close-menu(); root.menu-command(43); } }
         }
     }
     settings-dialog := SettingsDialog {
