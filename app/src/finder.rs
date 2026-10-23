@@ -297,3 +297,88 @@ fn located(mut entry: Entry, location: &str) -> Entry {
     entry.location = location.to_string();
     entry
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{path::Path, sync::mpsc};
+
+    struct Tree(PathBuf);
+    impl Tree {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("enyfile-finder-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for file in [r"top.rs", r"a\mid.rs", r"a\b\deep.rs", r"a\b\notes.txt", r"c\src\x.rs", r"src\y.rs"] {
+                let path = root.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "").unwrap();
+            }
+            Self(root)
+        }
+    }
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn start(root: &Path, limit: usize) -> (Finder, mpsc::Receiver<Event>) {
+        let (tx, rx) = mpsc::channel();
+        (Finder::start(root.to_path_buf(), false, false, limit, move |event| tx.send(event).is_ok()), rx)
+    }
+    /// The located names of query `id`, in the order they came, and whether the walk overflowed.
+    fn answer(finder: &Finder, rx: &mpsc::Receiver<Event>, id: u64, text: &str) -> (Vec<String>, bool) {
+        finder.query(id, Pattern::new(text).unwrap());
+        let (mut found, mut overflow) = (Vec::new(), false);
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                Event::Found(i, batch, done) if i == id => {
+                    found.extend(batch.into_iter().map(|e| format!("{}{}", e.location, e.name)));
+                    if done.is_some() {
+                        return (found, overflow);
+                    }
+                }
+                Event::Overflow => overflow = true,
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn shallow_matches_come_first() {
+        let tree = Tree::new("order");
+        let (finder, rx) = start(&tree.0, INDEX_LIMIT);
+        let (found, overflow) = answer(&finder, &rx, 1, "*.rs");
+        assert_eq!(found, [r"top.rs", r"a\mid.rs", r"src\y.rs", r"a\b\deep.rs", r"c\src\x.rs"]);
+        assert!(!overflow);
+    }
+    #[test]
+    fn path_patterns_match_below_the_root() {
+        let tree = Tree::new("path");
+        let (finder, rx) = start(&tree.0, INDEX_LIMIT);
+        let (mut any, _) = answer(&finder, &rx, 1, "src/*.rs");
+        any.sort();
+        assert_eq!(any, [r"c\src\x.rs", r"src\y.rs"], "in any src folder");
+        let (top, _) = answer(&finder, &rx, 2, r"\src\*.rs");
+        assert_eq!(top, [r"src\y.rs"], "only the one right under the root");
+    }
+    #[test]
+    fn later_queries_reuse_the_walk() {
+        let tree = Tree::new("reuse");
+        let (finder, rx) = start(&tree.0, INDEX_LIMIT);
+        assert_eq!(answer(&finder, &rx, 1, "deep").0, [r"a\b\deep.rs"]);
+        // Gone from the disk, still in the kept walk: proof that the second query did not read again.
+        std::fs::remove_file(tree.0.join(r"a\b\notes.txt")).unwrap();
+        assert_eq!(answer(&finder, &rx, 2, "NOTES").0, [r"a\b\notes.txt"], "case is ignored");
+        assert!(answer(&finder, &rx, 3, "nothing-like-this").0.is_empty());
+    }
+    #[test]
+    fn past_the_index_limit_each_query_walks_again() {
+        let tree = Tree::new("overflow");
+        let (finder, rx) = start(&tree.0, 3);
+        let (found, overflow) = answer(&finder, &rx, 1, "*.rs");
+        assert!(overflow);
+        assert_eq!(found.len(), 5, "the kept items and the rest of the walk: {found:?}");
+        std::fs::remove_file(tree.0.join(r"a\b\deep.rs")).unwrap();
+        assert_eq!(answer(&finder, &rx, 2, "deep").0, Vec::<String>::new(), "the second query reads the disk again");
+    }
+}

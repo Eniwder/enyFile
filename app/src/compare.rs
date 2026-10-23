@@ -132,4 +132,50 @@ mod tests {
         assert_eq!(only.pairs.len(), 5);
         assert!(shown[0].iter().all(|e| e.name != "a.txt"));
     }
+    #[test]
+    fn a_folder_and_a_file_of_one_name_are_two_rows() {
+        let (aligned, _) = align(&[entry("data", true, 0, 0)], &[entry("data", false, 1, 0)], false);
+        let kinds: Vec<i32> = aligned.diffs.iter().map(|d| d.kind).collect();
+        assert_eq!(kinds, [2, 1]);
+        assert_eq!(aligned.pairs, [[Some(0), None], [None, Some(0)]]);
+    }
+    #[test]
+    fn which_cells_differ() {
+        let with = |mut e: Entry, attributes: u32| {
+            e.attributes = attributes;
+            e
+        };
+        let old = [
+            entry("dir", true, 0, 100),
+            entry("t2", false, 1, 100),
+            entry("t3", false, 1, 100),
+            with(entry("r", false, 1, 100), 0x20),
+            with(entry("n", false, 1, 100), 0x20),
+        ];
+        let new = [
+            entry("dir", true, 4096, 100),
+            entry("t2", false, 1, 98),
+            entry("t3", false, 1, 103),
+            with(entry("r", false, 1, 100), 0x21),
+            with(entry("n", false, 1, 100), 0xA0),
+        ];
+        let (aligned, shown) = align(&old, &new, false);
+        let diff = |name: &str| aligned.diffs[aligned.pairs.iter().position(|p| shown[0][p[0].unwrap()].name == name).unwrap()];
+        assert_eq!(diff("dir").kind, 0, "folder sizes are not compared");
+        assert_eq!(diff("t2").kind, 0, "2 s apart (either way) is the same time");
+        assert_eq!(diff("t3"), Diff { kind: 3, size: false, time: true, attr: false });
+        assert_eq!(diff("r"), Diff { kind: 3, size: false, time: false, attr: true }, "read-only differs");
+        assert_eq!(diff("n").kind, 0, "attributes other than A R H S are ignored");
+    }
+    #[test]
+    fn one_side_empty() {
+        let new = [entry("a", false, 1, 0), entry("b", false, 1, 0)];
+        let (aligned, shown) = align(&[], &new, false);
+        assert_eq!(aligned.counts, [0, 2, 0, 0]);
+        assert!(shown[0].is_empty());
+        assert_eq!(aligned.rows[1], [0, 1]);
+        let (aligned, shown) = align(&new, &[], true);
+        assert_eq!(aligned.counts, [2, 0, 0, 0]);
+        assert_eq!(shown[0].len(), 2);
+    }
 }
