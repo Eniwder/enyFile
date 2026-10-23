@@ -504,8 +504,8 @@ impl Controller {
             ui.invoke_focus_pane(self.active as i32);
         }
         let shape = match (self.config.panes, columns) {
-            (3, false) => "（横長・縦に3段）",
-            (3, true) => "（縦長・横に3列）",
+            (3, false) => "（縦並び）",
+            (3, true) => "（横並び）",
             _ => "",
         };
         self.message(format!("{} ペイン{shape}", self.config.panes));
