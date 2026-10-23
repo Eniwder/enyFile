@@ -24,6 +24,7 @@ impl Controller {
             ui.set_settings_agent_path(self.config.agent_path.as_ref().map_or(String::new(), |p| display(p)).into());
             let access = agent::Access::ALL.iter().position(|a| *a == self.config.agent_access).unwrap_or(0);
             ui.set_settings_agent_access(access as i32);
+            ui.set_settings_agent_panes(self.config.agent_panes);
             ui.set_settings_agent_memory(display(&self.config.agent_memory()).into());
             ui.set_settings_agent_detected("".into());
         }
@@ -218,6 +219,7 @@ impl Controller {
                 let access = ui.get_settings_agent_access().clamp(0, 2) as usize;
                 self.config.agent_access = agent::Access::ALL[access];
                 self.config.agent_folders = self.settings_agent_folders.clone();
+                self.config.agent_panes = ui.get_settings_agent_panes();
                 self.sync_agent();
             }
             self.config.colors = self.settings_colors.clone();

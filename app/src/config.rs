@@ -80,6 +80,8 @@ pub struct Config {
     pub agent_path: Option<PathBuf>,
     pub agent_access: agent::Access,
     pub agent_folders: Vec<PathBuf>,
+    /// With `Access::Folder` / `Extra`: the other shown panes' folders are writable too.
+    pub agent_panes: bool,
 }
 fn default_extensions() -> Vec<(String, slint::Color)> {
     theme::EXTENSIONS
@@ -216,6 +218,7 @@ impl Config {
         };
         let agent = &raw["agent"];
         let agent_path = agent["path"].as_str().filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+        let agent_panes = agent["panes"].as_bool().unwrap_or(false);
         let agent_access = agent["access"].as_str().and_then(agent::Access::from_key).unwrap_or(agent::Access::Folder);
         let agent_folders = agent["folders"]
             .as_array()
@@ -249,6 +252,7 @@ impl Config {
             agent_path,
             agent_access,
             agent_folders,
+            agent_panes,
         }
     }
     /// The agent's memory beside the settings, in a folder of its own: the agent may write
@@ -327,6 +331,7 @@ impl Config {
             "path": self.agent_path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()),
             "access": self.agent_access.key(),
             "folders": self.agent_folders.iter().map(|d| d.to_string_lossy()).collect::<Vec<_>>(),
+            "panes": self.agent_panes,
         });
         self.raw["bookmarks"] = Value::Array(
             self.bookmarks
@@ -409,11 +414,14 @@ mod tests {
         config.save().unwrap();
         assert_eq!(Config::load(file.clone()).window, Some(placement));
         assert_eq!(config.agent_access, agent::Access::Folder, "the narrowest mode by default");
+        assert!(!config.agent_panes, "other panes are read-only by default");
+        config.agent_panes = true;
         config.agent_access = agent::Access::Extra;
         config.agent_folders = vec![r"H:\写真".into()];
         config.save().unwrap();
         let again = Config::load(file.clone());
         assert_eq!((again.agent_access, again.agent_folders.clone(), again.agent_path.clone()), (agent::Access::Extra, vec![PathBuf::from(r"H:\写真")], None));
+        assert!(again.agent_panes);
         assert_eq!(again.agent_memory(), dir.join("agent").join("memory.md"));
         let _ = std::fs::remove_dir_all(&dir);
     }

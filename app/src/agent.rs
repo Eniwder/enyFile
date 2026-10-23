@@ -53,6 +53,10 @@ pub struct Request {
     pub access: Access,
     /// Writable besides `cwd` with `Access::Extra`.
     pub extra: Vec<PathBuf>,
+    /// The folders of the other shown panes ("the other pane" in a request), and whether
+    /// they are writable (with `Access::Folder` / `Extra`).
+    pub panes: Vec<PathBuf>,
+    pub panes_writable: bool,
     pub memory: PathBuf,
     /// Continue this conversation; None starts a new one.
     pub session: Option<String>,
@@ -168,6 +172,32 @@ pub fn start(request: Request, sink: impl Fn(Event) -> bool + Send + 'static) ->
     run
 }
 
+/// Writable besides the working folder (A / B modes): the other panes when allowed, the
+/// extra folders that exist (B; `missing` hears of the others) and the memory's folder.
+fn writable(request: &Request, mut missing: impl FnMut(&Path)) -> Vec<PathBuf> {
+    let mut writable: Vec<PathBuf> = Vec::new();
+    if request.panes_writable && request.access != Access::Full {
+        for dir in &request.panes {
+            if *dir != request.cwd && !writable.contains(dir) {
+                writable.push(dir.clone());
+            }
+        }
+    }
+    if request.access == Access::Extra {
+        for dir in &request.extra {
+            if !dir.is_dir() {
+                missing(dir);
+            } else if !writable.contains(dir) {
+                writable.push(dir.clone());
+            }
+        }
+    }
+    // Asked to remember something, the agent writes its memory file.
+    if let Some(dir) = request.memory.parent() {
+        writable.push(dir.to_path_buf());
+    }
+    writable
+}
 fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> Outcome {
     let program = match codex::locate(request.program.as_deref()) {
         Ok(program) => program,
@@ -177,20 +207,9 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
         Ok(memory) => memory,
         Err(e) => return Outcome::Failed(format!("メモリファイルを用意できません: {e}")),
     };
-    let mut writable = Vec::new();
-    if request.access == Access::Extra {
-        for dir in &request.extra {
-            if dir.is_dir() {
-                writable.push(dir.clone());
-            } else {
-                sink(Event::Log(Kind::Info, format!("追加フォルダが見つからないため除きました: {}", dir.display())));
-            }
-        }
-    }
-    // Asked to remember something, the agent writes its memory file.
-    if let Some(dir) = request.memory.parent() {
-        writable.push(dir.to_path_buf());
-    }
+    let writable = writable(request, |dir| {
+        sink(Event::Log(Kind::Info, format!("追加フォルダが見つからないため除きました: {}", dir.display())));
+    });
     let prompt = codex::prompt(request, &memory, &writable);
     let mut command = codex::command(&program, request, &writable);
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -401,6 +420,14 @@ mod codex {
             ));
         }
         text.push_str(&format!("Current folder: {}\n", request.cwd.display()));
+        // Every turn: the panes and the setting can change between requests.
+        if !request.panes.is_empty() {
+            let writable = request.panes_writable || request.access == Access::Full;
+            text.push_str(&format!("Folders shown in the other panes ({}):\n", if writable { "writable" } else { "read-only" }));
+            for dir in &request.panes {
+                text.push_str(&format!("- {}\n", dir.display()));
+            }
+        }
         if request.selection.is_empty() {
             text.push_str("Selected items: none\n");
         } else if request.cursor {
@@ -506,6 +533,8 @@ mod tests {
             text: "画像を全部 256×256 にして".into(),
             access,
             extra: Vec::new(),
+            panes: vec![PathBuf::from(r"H:\縮小")],
+            panes_writable: false,
             memory: PathBuf::from(r"C:\enyFile\agent\memory.md"),
             session: session.map(Into::into),
         }
@@ -541,6 +570,30 @@ mod tests {
         assert!(first.contains(r"- D:\写真 2024\a b.png") && first.ends_with("Request:\n画像を全部 256×256 にして\n"));
         let next = codex::prompt(&request(Some("x"), Access::Folder), "- 画像の保存先は H:\\Pictures", &[]);
         assert!(!next.contains("<memory>") && next.contains("Selected items (1)"));
+        // The other panes go with every turn, saying whether they may be written.
+        assert!(next.contains("Folders shown in the other panes (read-only):\n- H:\\縮小\n"));
+        let open = Request { panes_writable: true, ..request(Some("x"), Access::Folder) };
+        assert!(codex::prompt(&open, "", &[]).contains("other panes (writable)"));
+    }
+    #[test]
+    fn writable_folders() {
+        let memory = PathBuf::from(r"C:\enyFile\agent");
+        let none = |_: &Path| {};
+        // Read-only by default: only the memory's folder besides the working folder.
+        assert_eq!(writable(&request(None, Access::Folder), none), [memory.clone()]);
+        let mut open = Request { panes_writable: true, ..request(None, Access::Folder) };
+        // The working folder shown twice (two panes on it) is not added again.
+        open.panes.push(open.cwd.clone());
+        assert_eq!(writable(&open, none), [PathBuf::from(r"H:\縮小"), memory.clone()]);
+        // B: the extra folders too, those that exist; C needs no list.
+        let existing = std::env::temp_dir();
+        let gone = PathBuf::from(r"Z:\enyfile-no-such-folder");
+        let extra = Request { access: Access::Extra, extra: vec![existing.clone(), gone.clone()], ..open };
+        let mut missed = Vec::new();
+        assert_eq!(writable(&extra, |d| missed.push(d.to_path_buf())), [PathBuf::from(r"H:\縮小"), existing, memory.clone()]);
+        assert_eq!(missed, [gone]);
+        let full = Request { panes_writable: true, ..request(None, Access::Full) };
+        assert_eq!(writable(&full, none), [memory]);
     }
     #[test]
     fn events() {

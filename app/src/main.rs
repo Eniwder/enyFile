@@ -1328,9 +1328,10 @@ impl Controller {
     /// The panel header: the CLI, what the agent may write, and the run's state.
     fn sync_agent(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
+        let panes = if self.config.agent_panes { " + ほかのペイン" } else { "" };
         let access = match self.config.agent_access {
-            agent::Access::Folder => "書き込み: 表示中のフォルダ以下 · ネット遮断".to_string(),
-            agent::Access::Extra => format!("書き込み: 表示中のフォルダ以下 + 追加 {} 件 · ネット遮断", self.config.agent_folders.len()),
+            agent::Access::Folder => format!("書き込み: 表示中のフォルダ以下{panes} · ネット遮断"),
+            agent::Access::Extra => format!("書き込み: 表示中のフォルダ以下{panes} + 追加 {} 件 · ネット遮断", self.config.agent_folders.len()),
             agent::Access::Full => "制限なし（サンドボックス解除）".to_string(),
         };
         let cli = match &self.agent.version {
@@ -1459,7 +1460,19 @@ impl Controller {
             (true, None) => "選択なし".to_string(),
             (false, _) => format!("選択 {} 件", selection.len()),
         };
-        self.agent_push(1, format!("{}  ·  {passed}", shown(&cwd)));
+        // The other shown panes, for "the other pane" in a request (writable when allowed).
+        let mut panes: Vec<PathBuf> = Vec::new();
+        for q in (0..self.visible()).filter(|&q| q != p) {
+            let dir = self.data(q).dir.clone();
+            if let Some(dir) = shell::os_path(&dir).ok().filter(|d| !d.as_os_str().is_empty() && *d != cwd) {
+                if !panes.contains(&dir) {
+                    panes.push(dir);
+                }
+            }
+        }
+        let panes_writable = self.config.agent_panes && self.config.agent_access != agent::Access::Full;
+        let others = if panes_writable && !panes.is_empty() { format!("  ·  ほかのペイン {} 件にも書き込み可", panes.len()) } else { String::new() };
+        self.agent_push(1, format!("{}  ·  {passed}{others}", shown(&cwd)));
         self.agent_push(0, format!("› {text}"));
         if self.agent.history.last().is_none_or(|last| last != text) {
             self.agent.history.push(text.to_string());
@@ -1477,6 +1490,8 @@ impl Controller {
             text: text.to_string(),
             access: self.config.agent_access,
             extra: self.config.agent_folders.clone(),
+            panes,
+            panes_writable,
             memory: self.config.agent_memory(),
             session: self.agent.session.clone(),
         };

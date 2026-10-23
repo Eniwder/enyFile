@@ -1290,6 +1290,9 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(args.contains("-s workspace-write") && args.contains("--add-dir") && !args.contains("resume"), &format!("new conversation in the sandbox: {args}"))?;
                     let prompt = std::fs::read_to_string(root.join("agent-prompt.txt")).map_err(|e| e.to_string())?;
                     expect(prompt.contains("<memory>") && prompt.contains("size.txt") && prompt.contains("make a file"), "the prompt carries memory, selection and request")?;
+                    // The other pane is named but stays read-only by default.
+                    let other = display(&c.borrow().data(1).dir);
+                    expect(prompt.contains("other panes (read-only)") && prompt.contains(&other) && !args.contains(&format!("--add-dir {other} ")), &format!("the other pane is read-only by default: {args}"))?;
                     expect(c.borrow().config.agent_memory().is_file(), "the memory file is created")?;
                     expect(ui.get_agent_cli() == "Codex 9.9.9-fake", &format!("the CLI version in the header: {}", ui.get_agent_cli()))?;
                     s.pass("Ctrl+I: request with folder and selection, steps and reply, list refreshed");
@@ -1301,6 +1304,8 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     // Nothing selected: the cursor row (size.txt) goes instead.
                     fkey(&ui, 0, slint::platform::Key::Escape);
                     expect(selected(&c, 0).is_empty(), "Esc clears the selection")?;
+                    // From here the other pane may be written too.
+                    c.borrow_mut().config.agent_panes = true;
                     expect(ui.invoke_agent_send("and again".into()), "a follow-up is sent")?;
                 }
                 64 => {
@@ -1312,7 +1317,10 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let prompt = std::fs::read_to_string(root.join("agent-prompt.txt")).map_err(|e| e.to_string())?;
                     expect(!prompt.contains("<memory>") && prompt.contains("and again"), "a follow-up sends only the context and request")?;
                     expect(prompt.contains("under the cursor") && prompt.contains("size.txt"), "with nothing selected, the cursor item is passed")?;
-                    expect(agent_texts(&c).iter().any(|l| l.ends_with("カーソル: size.txt")), "the log says the cursor item was passed")?;
+                    let other = display(&c.borrow().data(1).dir);
+                    expect(args.contains(&format!("--add-dir {other} ")) && prompt.contains("other panes (writable)"), &format!("the setting makes the other pane writable: {args}"))?;
+                    expect(agent_texts(&c).iter().any(|l| l.contains("カーソル: size.txt")), "the log says the cursor item was passed")?;
+                    expect(agent_texts(&c).iter().any(|l| l.ends_with("ほかのペイン 1 件にも書き込み可")), "the log says the other pane may be written")?;
                     s.pass("follow-up continues the conversation with the same sandbox; cursor item when nothing is selected; ↑ ↓ recall");
                     // The wheel over the log goes back through the conversation (and stays).
                     for i in 0..80 {
