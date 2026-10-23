@@ -973,7 +973,9 @@ pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch>
         let filter = FILE_NOTIFY_CHANGE_FILE_NAME
             | FILE_NOTIFY_CHANGE_DIR_NAME
             | FILE_NOTIFY_CHANGE_SIZE
-            | FILE_NOTIFY_CHANGE_LAST_WRITE;
+            | FILE_NOTIFY_CHANGE_LAST_WRITE
+            // Attribute edits (e.g. in the Explorer properties dialog) touch no other field.
+            | FILE_NOTIFY_CHANGE_ATTRIBUTES;
         let Ok(change) =
             (unsafe { FindFirstChangeNotificationW(PCWSTR(dir.as_ptr()), false, filter) })
         else {
