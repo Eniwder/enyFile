@@ -521,7 +521,7 @@ pub fn with_kept(message: String, kept: &[PathBuf]) -> String {
         return message;
     }
     let names: Vec<_> = kept.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy()).collect();
-    format!("{message}（置換前のフォルダーが残っています: {}）", names.join("、"))
+    format!("{message}（置換前のフォルダが残っています: {}）", names.join("、"))
 }
 /// Same-folder renames: instant, and they fail rather than replace an existing item.
 /// A virus scanner or the indexer may hold something inside open for a moment (the copy
@@ -629,7 +629,7 @@ fn set_aside(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
         match renamed {
             Ok(temp) => aside.push((path.clone(), temp)),
             Err(e) => {
-                let e = format!("置換するフォルダーを退避できません: {}: {e}", shell_path(path).display());
+                let e = format!("置換するフォルダを退避できません: {}: {e}", shell_path(path).display());
                 return Err(with_kept(e, &restore(&aside)));
             }
         }

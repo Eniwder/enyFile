@@ -161,7 +161,7 @@ echo {\"type\":\"item.started\",\"item\":{\"id\":\"1\",\"type\":\"command_execut
 ping -n 3 127.0.0.1 >nul\r\n\
 mkdir 256\r\ncopy *.jpg 256 >nul\r\ncopy *.png 256 >nul\r\n\
 echo {\"type\":\"item.completed\",\"item\":{\"id\":\"1\",\"type\":\"command_execution\",\"command\":\"powershell.exe -Command Get-ChildItem *.jpg,*.png | ForEach-Object { magick $_.Name -resize 256x256 256/$($_.Name) }\",\"exit_code\":0,\"status\":\"completed\"}}\r\n\
-echo {\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"5 枚を 256×256 に縮小して 256 フォルダーに保存しました。元の画像はそのままです。縦横比の違う画像は 256×256 に収まるよう引き伸ばしています。縦横比を保ちたいときは「縦横比を維持して」と続けて指示してください。ファイル名は元と同じです。\"}}\r\n";
+echo {\"type\":\"item.completed\",\"item\":{\"id\":\"2\",\"type\":\"agent_message\",\"text\":\"5 枚を 256×256 に縮小して 256 フォルダに保存しました。元の画像はそのままです。縦横比の違う画像は 256×256 に収まるよう引き伸ばしています。縦横比を保ちたいときは「縦横比を維持して」と続けて指示してください。ファイル名は元と同じです。\"}}\r\n";
 
 type Act = Box<dyn Fn(&App, &Rc<RefCell<Controller>>)>;
 enum Step {
@@ -263,9 +263,9 @@ fn script(root: &Path) -> Script {
     s.key("Down", 380);
     s.key("Down", 380);
     s.key("Up", 600);
-    s.caption("Enter", "フォルダーを開く");
+    s.caption("Enter", "フォルダを開く");
     s.key("Enter", 1500);
-    s.caption("Backspace", "親フォルダーへ");
+    s.caption("Backspace", "親フォルダへ");
     s.key("Backspace", 1300);
     s.caption("Tab", "反対側のペインへ");
     s.key("Tab", 1000);
@@ -282,7 +282,7 @@ fn script(root: &Path) -> Script {
     s.key("Esc", 1300);
 
     // Comparing the two folders.
-    s.caption("Ctrl+Shift+D", "左右のフォルダーを比較（- 左だけ / + 右だけ / 黄 違うところ）");
+    s.caption("Ctrl+Shift+D", "左右のフォルダを比較（- 左だけ / + 右だけ / 黄 違うところ）");
     s.key("Ctrl+Shift+D", 3200);
     s.caption("↓", "カーソルは左右で連動");
     s.key("Down", 420);
@@ -335,10 +335,10 @@ fn script(root: &Path) -> Script {
     s.caption("Ctrl+I", "エージェントに頼む（Codex CLI を呼び出す）");
     s.show(1200);
     s.key("Ctrl+I", 900);
-    s.typed("画像を全部 256×256 に縮小して 256 フォルダーへ", 110);
+    s.typed("画像を全部 256×256 に縮小して 256 フォルダへ", 110);
     s.window_key(Key::Return, 700);
     s.0.push(Step::Wait(600));
-    s.caption("", "現在のフォルダーと選択を渡し、サンドボックスの中で実行");
+    s.caption("", "現在のフォルダと選択を渡し、サンドボックスの中で実行");
     s.show(1800);
     s.0.push(Step::Wait(2600));
     s.caption("", "終わると一覧を更新。続けて指示すると同じ会話の続きになる");

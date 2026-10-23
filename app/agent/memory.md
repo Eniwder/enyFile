@@ -7,4 +7,4 @@
 ## ファイル操作の習慣
 
 - 削除はごみ箱経由にする（PowerShell では Microsoft.VisualBasic の FileSystem.DeleteFile / DeleteDirectory に RecycleOption.SendToRecycleBin を指定）。完全に消すのは、そう頼まれたときだけ
-- 作業フォルダーがドライブのルートやユーザーフォルダーなど広すぎる場合は、変更する前に何をするかを伝えて確認を取る
+- 作業フォルダがドライブのルートやユーザーフォルダなど広すぎる場合は、変更する前に何をするかを伝えて確認を取る

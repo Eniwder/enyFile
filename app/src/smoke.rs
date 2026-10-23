@@ -561,7 +561,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("drive list shown under the entries");
                     ui.invoke_focus_pane(0);
                     fkey(&ui, 0, slint::platform::Key::F7);
-                    expect(ui.get_name_open() && ui.get_name_initial() == "新しいフォルダー", "F7 opens the new-folder dialog")?;
+                    expect(ui.get_name_open() && ui.get_name_initial() == "新しいフォルダ", "F7 opens the new-folder dialog")?;
                     ui.invoke_name_done(true, "新規 A".into());
                 }
                 27 => {

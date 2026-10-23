@@ -336,18 +336,18 @@ impl Plan {
         let mut ids = crate::pathid::Idents::default();
         // Replacing deletes the whole folder: without an ID a swap could not be told apart.
         if self.remove_ids.len() != self.remove.len() {
-            return Err("置換するフォルダーを識別できないため中止しました".into());
+            return Err("置換するフォルダを識別できないため中止しました".into());
         }
         for (path, planned) in self.remove.iter().zip(&self.remove_ids) {
             if planned.is_none() {
-                return Err(format!("置換するフォルダーを識別できないため中止しました: {}", path.display()));
+                return Err(format!("置換するフォルダを識別できないため中止しました: {}", path.display()));
             }
             if crate::pathid::ident(path) != *planned {
-                return Err(format!("置換するフォルダーが確認後に変わったため中止しました: {}", path.display()));
+                return Err(format!("置換するフォルダが確認後に変わったため中止しました: {}", path.display()));
             }
         }
         if let Some(op) = self.ops.iter().find(|op| ids.within(&op.dir, &op.source)) {
-            return Err(format!("フォルダーをその中へは貼り付けられません: {}", op.source.display()));
+            return Err(format!("フォルダをその中へは貼り付けられません: {}", op.source.display()));
         }
         let mut inside = Vec::new();
         for op in &self.ops {

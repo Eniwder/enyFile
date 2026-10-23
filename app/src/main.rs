@@ -1034,7 +1034,7 @@ impl Controller {
             return;
         }
         if self.panes[p].pending.as_ref().is_some_and(|m| !matches!(m, Mode::Sort)) {
-            self.message("フォルダーの読み込み中です");
+            self.message("フォルダの読み込み中です");
             return;
         }
         if !self.session(p, false) {
@@ -1196,7 +1196,7 @@ impl Controller {
             return;
         }
         if panes.iter().any(|&p| self.panes[p].pending.as_ref().is_some_and(|m| !matches!(m, Mode::Sort))) {
-            self.message("フォルダーの読み込み中です");
+            self.message("フォルダの読み込み中です");
             return;
         }
         let sort = panes.map(|p| (self.panes[p].column, self.panes[p].descending));
@@ -1322,15 +1322,15 @@ impl Controller {
     fn place(&mut self, i: usize) {
         match self.config.place(i) {
             Some(path) => self.navigate(self.active, path, Mode::New(None)),
-            None => self.message("このフォルダーは設定されていません"),
+            None => self.message("このフォルダは設定されていません"),
         }
     }
     /// The panel header: the CLI, what the agent may write, and the run's state.
     fn sync_agent(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let access = match self.config.agent_access {
-            agent::Access::Folder => "書き込み: 表示中のフォルダー以下 · ネット遮断".to_string(),
-            agent::Access::Extra => format!("書き込み: 表示中のフォルダー以下 + 追加 {} 件 · ネット遮断", self.config.agent_folders.len()),
+            agent::Access::Folder => "書き込み: 表示中のフォルダ以下 · ネット遮断".to_string(),
+            agent::Access::Extra => format!("書き込み: 表示中のフォルダ以下 + 追加 {} 件 · ネット遮断", self.config.agent_folders.len()),
             agent::Access::Full => "制限なし（サンドボックス解除）".to_string(),
         };
         let cli = match &self.agent.version {
@@ -1441,7 +1441,7 @@ impl Controller {
         let p = self.active;
         let data = self.data(p);
         if data.dir.as_os_str().is_empty() {
-            self.message("フォルダーを開いてから依頼してください");
+            self.message("フォルダを開いてから依頼してください");
             return false;
         }
         let cwd = match shell::os_path(&data.dir) {
@@ -1608,7 +1608,7 @@ impl Controller {
                         } else if outcome.missed {
                             format!("{verb}できなかった項目があります → {}", shown(&dir))
                         } else if outcome.inside > 0 {
-                            format!("フォルダーをその中へは貼り付けられないため {} 件をスキップしました → {}", outcome.inside, shown(&dir))
+                            format!("フォルダをその中へは貼り付けられないため {} 件をスキップしました → {}", outcome.inside, shown(&dir))
                         } else if outcome.skipped {
                             format!("{verb}しました（一部スキップ） → {}", shown(&dir))
                         } else {
@@ -2031,7 +2031,7 @@ impl Controller {
     fn open_terminal(&mut self, p: usize) {
         let dir = self.data(p).dir.clone();
         if dir.as_os_str().is_empty() {
-            return self.message("フォルダーを開いてから実行してください");
+            return self.message("フォルダを開いてから実行してください");
         }
         let dir = match shell::os_path(&dir) {
             Ok(dir) => dir,
@@ -2067,7 +2067,7 @@ impl Controller {
     fn open_explorer(&mut self, p: usize) {
         let dir = self.data(p).dir.clone();
         if dir.as_os_str().is_empty() {
-            return self.message("フォルダーを開いてから実行してください");
+            return self.message("フォルダを開いてから実行してください");
         }
         // ShellExecute can wait on slow drives.
         std::thread::spawn(move || post(Reply::Opened(shell::explore(&dir))));
@@ -2114,7 +2114,7 @@ impl Controller {
                 ("名前の変更", name, path.is_dir())
             }
             NameKind::NewFile => ("新規ファイル", unique("新しいテキスト ドキュメント.txt", false, &taken), false),
-            NameKind::NewFolder => ("新規フォルダー", unique("新しいフォルダー", true, &taken), true),
+            NameKind::NewFolder => ("新規フォルダ", unique("新しいフォルダ", true, &taken), true),
         };
         let stem = paste::stem_len(&initial, folder);
         self.naming = Some(Naming {
@@ -2328,7 +2328,7 @@ impl Controller {
         };
         let detail = |m: &paste::Meta, newer: bool| {
             let kind = if m.directory {
-                "フォルダー".to_string()
+                "フォルダ".to_string()
             } else {
                 format!("{} バイト", m.size)
             };
@@ -2767,7 +2767,7 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
     let same_folder = !paths.is_empty() && paths.iter().all(|path| path.parent().is_some_and(|d| ids.same(d, dir)));
     if same_folder {
         if moved {
-            return Err("切り取った項目は既にこのフォルダーにあります".into());
+            return Err("切り取った項目は既にこのフォルダにあります".into());
         }
         return shell::duplicate(&paths, dir).map(done);
     }
@@ -2822,10 +2822,10 @@ fn config_file(smoke_root: Option<&Path>) -> PathBuf {
 /// (the exe lives in `app\target\<profile>`), never a system or user folder.
 /// Created with a few sample files on first use.
 fn sandbox() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let app = app_dir().ok_or("app フォルダーが見つかりません。開くフォルダーを引数で指定してください")?;
+    let app = app_dir().ok_or("app フォルダが見つかりません。開くフォルダを引数で指定してください")?;
     let root = app.join("data").join("sandbox");
     if !root.join("left").is_dir() {
-        std::fs::create_dir_all(root.join("left").join("フォルダー A"))?;
+        std::fs::create_dir_all(root.join("left").join("フォルダ A"))?;
         std::fs::create_dir_all(root.join("right"))?;
         for (name, text) in [
             ("メモ.txt", "サンプル"),
@@ -2848,9 +2848,9 @@ fn sandbox() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// is never entered either way.
 fn link_example(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let start = dir.join("検索の起点");
-    std::fs::create_dir_all(start.join("ふつうのフォルダー"))?;
+    std::fs::create_dir_all(start.join("ふつうのフォルダ"))?;
     std::fs::create_dir_all(dir.join("起点の外"))?;
-    std::fs::write(start.join("ふつうのフォルダー").join("資料 1.txt"), "検索の起点の中")?;
+    std::fs::write(start.join("ふつうのフォルダ").join("資料 1.txt"), "検索の起点の中")?;
     std::fs::write(dir.join("起点の外").join("資料 2.txt"), "リンク先（検索の起点の外）")?;
     std::fs::write(
         dir.join("説明.txt"),
@@ -2875,7 +2875,7 @@ fn default_start(side: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if app_dir().is_some() {
         return Ok(sandbox()?.join(["left", "right"][side]));
     }
-    config::known_folder(side).ok_or_else(|| "既定のフォルダーが見つかりません。開くフォルダーを引数で指定してください".into())
+    config::known_folder(side).ok_or_else(|| "既定のフォルダが見つかりません。開くフォルダを引数で指定してください".into())
 }
 
 /// A panic (on any thread) is appended to `crash.log` beside the settings: released builds

@@ -183,7 +183,7 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
             if dir.is_dir() {
                 writable.push(dir.clone());
             } else {
-                sink(Event::Log(Kind::Info, format!("追加フォルダーが見つからないため除きました: {}", dir.display())));
+                sink(Event::Log(Kind::Info, format!("追加フォルダが見つからないため除きました: {}", dir.display())));
             }
         }
     }
