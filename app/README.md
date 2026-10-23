@@ -127,6 +127,8 @@ Windows専用の2ペインファイラー。概要・インストールはルー
 ## 構成
 
 - `src/main.rs` UIスレッドの制御。各ペインの一覧ワーカー、結果は `invoke_from_event_loop` で受け取る
+- `src/rows.rs` ペインの一覧の Slint モデル（".."・項目・ドライブ、ページ単位で表示）
+- `src/settings.rs` 設定ダイアログ・配色・フォント・ブックマーク・設定ファイルの保存
 - `src/listing.rs` 列挙・自然順ソート・選択モデル
 - `src/paste.rs` 貼り付けの計画（1件ずつの質問、再帰結合、別名と検証）
 - `src/shell.rs` クリップボード、IFileOperation、既定アプリ起動、フォルダー監視
