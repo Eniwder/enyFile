@@ -1,2 +1,4 @@
 // Explorer/taskbar pick the lowest icon ID as the exe's icon.
 1 ICON "icon.ico"
+// RT_MANIFEST (24), ID 1: the application manifest.
+1 24 "enyfile.manifest"

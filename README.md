@@ -27,6 +27,11 @@ Windows 専用の、キーボード中心の 2 ペインファイラー。Rust +
 
 新しいバージョンに更新するときは、`enyfile.exe` だけを差し替えれば設定はそのまま残ります。zip を丸ごと上書きで展開すると、エージェントのメモリ（`agentmemory.md`）が初期内容に戻るので注意してください。
 
+ダウンロードした zip が Release のものと同じかは、次のどちらかで確かめられます。
+
+- 同じ Release にある `.sha256` の値と、`Get-FileHash enyFile-vX.Y.Z-windows-x64.zip`（PowerShell）または enyFile のプロパティ（Alt+Enter）の SHA-256 を比べる
+- [GitHub CLI](https://cli.github.com/) で `gh attestation verify enyFile-vX.Y.Z-windows-x64.zip -R Eniwder/enyFile`（このリポジトリの Release ワークフローがビルドしたことの証明。展開した `enyfile.exe` も同じ方法で確認できます）
+
 `enyfile.exe` にはコード署名がないため、初回の起動時に Windows SmartScreen の「Windows によって PC が保護されました」が出ることがあります。その場合は「詳細情報」→「実行」で起動できます。
 
 `config.json` が壊れていて読めないときは、`config.json.broken-日時` に退避して既定の設定で起動します。異常終了したときは、同じフォルダーの `crash.log` に記録が残ります（不具合の報告に添えてください）。
@@ -40,6 +45,7 @@ Windows 専用の、キーボード中心の 2 ペインファイラー。Rust +
 | Enter / Backspace | 開く / 親フォルダーへ |
 | Tab | ペインの切り替え |
 | F2 | リネーム |
+| Alt+Enter | プロパティ（日時・属性、ダウンロード元、SHA-256） |
 | Ctrl+F / Ctrl+G | 検索 / 次を検索（`*` `?` 可） |
 | Ctrl+Shift+F / Esc | フィルター / 解除 |
 | Ctrl+Alt+Shift+F | フォルダー以下を検索（入力しながら絞り込み、Esc で戻る） |
@@ -105,8 +111,8 @@ git push origin v0.1.1
 
 | ワークフロー | タイミング | 内容 |
 | --- | --- | --- |
-| [CI](.github/workflows/ci.yml) | main への push / PR | ビルドと単体テスト |
-| [Release](.github/workflows/release.yml) | `v*` タグの push | バージョン照合・テスト・ビルド後、zip を Release に添付 |
+| [CI](.github/workflows/ci.yml) | main への push / PR | ビルドと単体テスト、依存クレートの既知の脆弱性・ライセンス・取得元の確認（cargo-deny、設定は `app/deny.toml`） |
+| [Release](.github/workflows/release.yml) | `v*` タグの push | バージョン照合・テスト・ビルド後、zip と SHA-256 を Release に添付し、zip と exe のビルド来歴（attestation）を記録 |
 
 ## 構成
 
@@ -123,6 +129,7 @@ app/
     ├── listing.rs      列挙・自然順ソート・選択モデル
     ├── paste.rs        貼り付けの計画（衝突の質問、再帰結合、別名）
     ├── pathid.rs       パスの同一性の判定（ファイル ID、リンクを辿る）
+    ├── props.rs        プロパティ画面（ダウンロード元、代替データストリーム、SHA-256）
     ├── finder.rs       フォルダー以下の検索
     ├── compare.rs      ペインの比較
     ├── shell.rs        クリップボード、IFileOperation、フォルダー監視

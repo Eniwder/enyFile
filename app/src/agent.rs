@@ -316,7 +316,8 @@ mod codex {
             };
         }
         if let Some(paths) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&paths) {
+            // A relative entry (".") would pick up a program in our working folder.
+            for dir in std::env::split_paths(&paths).filter(|dir| dir.is_absolute()) {
                 for name in ["codex.exe", "codex.cmd"] {
                     let program = dir.join(name);
                     if program.is_file() {

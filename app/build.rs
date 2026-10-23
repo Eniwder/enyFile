@@ -1,17 +1,22 @@
-// Embeds icon.ico as the exe icon with the Windows SDK's rc.exe, avoiding an extra
-// build dependency (builds are offline). Without rc.exe the exe just has no icon.
+// Embeds icon.ico as the exe icon and enyfile.manifest with the Windows SDK's rc.exe,
+// avoiding an extra build dependency (builds are offline). Without rc.exe the exe just has
+// neither.
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=icon.rc");
     println!("cargo:rerun-if-changed=icon.ico");
+    println!("cargo:rerun-if-changed=enyfile.manifest");
     println!("cargo:rerun-if-env-changed=RC");
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         return;
     }
+    // The loader resolves the exe's own imports (dwmapi, uxtheme, ...) from System32 only,
+    // never from the exe's folder; shell::harden_dll_search covers later loads.
+    println!("cargo:rustc-link-arg-bin=enyfile=/DEPENDENTLOADFLAG:0x800");
     let Some(rc) = find_rc() else {
-        println!("cargo:warning=rc.exe not found; enyfile.exe will have no icon");
+        println!("cargo:warning=rc.exe not found; enyfile.exe will have no icon or manifest");
         return;
     };
     let res = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("icon.res");
@@ -23,7 +28,7 @@ fn main() {
         .status()
         .is_ok_and(|s| s.success());
     if !ok {
-        println!("cargo:warning=rc.exe failed; enyfile.exe will have no icon");
+        println!("cargo:warning=rc.exe failed; enyfile.exe will have no icon or manifest");
         return;
     }
     // link.exe accepts compiled .res files as inputs.

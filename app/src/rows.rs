@@ -3,6 +3,7 @@
 use crate::{Row, compare, icons, listing::{self, Drive, Entry, Selection}};
 use slint::{Model, ModelNotify, ModelTracker};
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     collections::HashMap,
     path::PathBuf,
@@ -192,7 +193,7 @@ impl RowsModel {
                 let drives = self.drives.borrow();
                 let drive = &drives[i];
                 return Some(Row {
-                    name: drive.name.clone().into(),
+                    name: listing::visible(&drive.name).as_ref().into(),
                     // No medium (empty optical drive): no bar, no free space.
                     kind: if drive.total > 0 { format!("{} フリー", listing::format_size(drive.free)) } else { String::new() }.into(),
                     drive: true,
@@ -218,15 +219,18 @@ impl RowsModel {
         let selection = self.selection.borrow();
         let (date, time) = listing::format_date(entry.modified, chrono::Local::now().date_naive());
         let tint = (!entry.directory).then(|| self.ext_colors.borrow().get(&entry.ext.to_lowercase()).copied()).flatten();
+        let [location, name, ext] = [&entry.location, &entry.stem, &entry.ext].map(|s| listing::visible(s));
+        let spoof = [&location, &name, &ext].iter().any(|s| matches!(s, Cow::Owned(_)));
         Some(Row {
             icon: icon_image(&entry.icon, &entry.type_icon),
             hidden: entry.hidden(),
             readonly: entry.attributes & 0x1 != 0,
             tinted: tint.is_some(),
             tint: tint.unwrap_or_default(),
-            location: entry.location.clone().into(),
-            name: entry.stem.clone().into(),
-            ext: entry.ext.clone().into(),
+            location: location.as_ref().into(),
+            name: name.as_ref().into(),
+            ext: ext.as_ref().into(),
+            spoof,
             size: if entry.directory {
                 "[DIR]".into()
             } else {

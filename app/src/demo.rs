@@ -75,8 +75,17 @@ pub fn prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         // Content does not matter; the size is what the list shows.
         std::fs::write(&path, vec![b'.'; *size as usize])?;
     }
+    // Downloaded, as a browser leaves it: the properties dialog shows where from. Before the
+    // times below, since writing the stream touches the file.
+    std::fs::write(
+        root.join("Projects/release.zip:Zone.Identifier"),
+        "[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=https://example.com/download\r\nHostUrl=https://example.com/files/release.zip\r\n",
+    )?;
     for (path, _, (day, hour, minute)) in &files {
-        std::fs::File::options().write(true).open(root.join(path))?.set_modified(at(*day, *hour, *minute))?;
+        use std::os::windows::fs::FileTimesExt;
+        // Created as well: the properties dialog shows it.
+        let times = std::fs::FileTimes::new().set_modified(at(*day, *hour, *minute)).set_created(at(*day, *hour, *minute));
+        std::fs::File::options().write(true).open(root.join(path))?.set_times(times)?;
     }
     // Folders last (writing files touched them): one time, so the comparison shows no
     // folder differences.
@@ -283,6 +292,21 @@ fn script(root: &Path) -> Script {
     s.key("Ctrl+Shift+D", 2800);
     s.caption("Esc", "比較を終了");
     s.key("Esc", 1200);
+
+    // Properties: where a download came from, and its SHA-256.
+    s.caption("rel", "名前の頭文字でカーソル移動");
+    s.key("r", 150);
+    s.key("e", 150);
+    s.key("l", 900);
+    s.caption("Alt+Enter", "プロパティ（ダウンロード元と SHA-256）");
+    s.act(|ui, c| {
+        let p = c.borrow().active as i32;
+        let _ = ui.invoke_key_event(p, key_event("Alt+Enter"));
+    });
+    // The hash of 1.4 MB is done in a moment.
+    s.0.push(Step::Wait(500));
+    s.show(3400);
+    s.window_key(Key::Escape, 800);
 
     // Four panes (from the top of the list: the shorter panes show fewer rows per page).
     s.act(|ui, c| {

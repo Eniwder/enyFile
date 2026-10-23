@@ -20,6 +20,26 @@ use windows::{
     core::{HRESULT, Interface, PCWSTR, w},
 };
 
+/// DLLs loaded by name come from System32 only, not from the exe's folder (often Downloads,
+/// where a planted DLL would run as us) or the working folder. Shell extensions still find
+/// their own DLLs: COM loads them by full path with the altered search order.
+/// The exe's static imports are covered by /DEPENDENTLOADFLAG (build.rs).
+pub fn harden_dll_search() {
+    use windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
+    let _ = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) };
+}
+/// System32, for starting Windows' own programs by full path: a bare name is looked up in
+/// the exe's folder first.
+pub fn system_dir() -> PathBuf {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buffer = [0u16; 260];
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+    if len == 0 || len >= buffer.len() {
+        return PathBuf::from(r"C:\Windows\System32");
+    }
+    PathBuf::from(OsString::from_wide(&buffer[..len]))
+}
+
 /// OLE (not plain COM) is required for the OLE clipboard; each worker thread owns one.
 pub struct Apartment;
 impl Apartment {
@@ -85,8 +105,9 @@ fn win32_alters(name: &str) -> bool {
 fn wide(path: &Path) -> Result<Vec<u16>, String> {
     Ok(os_path(path)?.as_os_str().encode_wide().chain(Some(0)).collect())
 }
-/// The `\\?\` form, for Win32 calls on paths that may exceed MAX_PATH (the exe does not
-/// declare itself long-path aware). A plain path is normalized first, as Win32 would.
+/// The `\\?\` form, for Win32 calls on paths that may exceed MAX_PATH (the manifest's
+/// long-path awareness only counts where the system enables it). A plain path is normalized
+/// first, as Win32 would.
 fn verbatim(path: &Path) -> PathBuf {
     let text: Vec<u16> = path.as_os_str().encode_wide().collect();
     if text.starts_with(&r"\\?\".encode_utf16().collect::<Vec<_>>()) {

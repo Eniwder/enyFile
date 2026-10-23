@@ -183,6 +183,46 @@ pub fn format_attributes(attributes: u32) -> String {
         .map(|&(bit, c)| if attributes & bit != 0 { c } else { '_' })
         .collect()
 }
+/// Names as shown: characters that reorder or hide text become visible marks. With
+/// U+202E (RLO), "invoice\u{202E}fdp.exe" would read as "invoiceexe.pdf".
+/// Owned exactly when something was replaced.
+pub fn visible(text: &str) -> std::borrow::Cow<'_, str> {
+    fn mark(c: char) -> Option<&'static str> {
+        Some(match c {
+            '\u{061C}' => "ALM",
+            '\u{200E}' => "LRM",
+            '\u{200F}' => "RLM",
+            '\u{202A}' => "LRE",
+            '\u{202B}' => "RLE",
+            '\u{202C}' => "PDF",
+            '\u{202D}' => "LRO",
+            '\u{202E}' => "RLO",
+            '\u{2066}' => "LRI",
+            '\u{2067}' => "RLI",
+            '\u{2068}' => "FSI",
+            '\u{2069}' => "PDI",
+            _ => return None,
+        })
+    }
+    // Zero-width joiners (U+200C / U+200D) stay: emoji and some scripts need them.
+    let hidden = |c: char| {
+        c.is_control()
+            || mark(c).is_some()
+            || matches!(c, '\u{200B}' | '\u{2028}' | '\u{2029}' | '\u{2060}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}')
+    };
+    if !text.chars().any(hidden) {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        match mark(c) {
+            Some(name) => out.push_str(&format!("[{name}]")),
+            None if hidden(c) => out.push_str(&format!("[U+{:04X}]", c as u32)),
+            None => out.push(c),
+        }
+    }
+    out.into()
+}
 
 pub struct Volume {
     /// e.g. "D_SSD (D:)"
@@ -592,5 +632,16 @@ mod tests {
         selection.select(&rows, 8, true, false, true);
         assert!(selection.contains(&rows[8].path));
         assert_eq!(selection.count(), 9);
+    }
+    #[test]
+    fn hidden_characters_become_visible() {
+        use std::borrow::Cow;
+        assert!(matches!(visible("報告書 (2).pdf"), Cow::Borrowed(_)));
+        // Emoji sequences keep their joiner.
+        assert!(matches!(visible("👨\u{200D}💻.txt"), Cow::Borrowed(_)));
+        assert_eq!(visible("invoice\u{202E}fdp.exe"), "invoice[RLO]fdp.exe");
+        assert_eq!(visible("a\u{2066}b\u{2069}"), "a[LRI]b[PDI]");
+        assert_eq!(visible("tab\there"), "tab[U+0009]here");
+        assert_eq!(visible("x\u{200B}y\u{E0041}"), "x[U+200B]y[U+E0041]");
     }
 }

@@ -9,6 +9,7 @@ mod icons;
 mod listing;
 mod paste;
 mod pathid;
+mod props;
 mod rows;
 mod settings;
 mod shell;
@@ -27,7 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::HWND;
-slint::slint! { export { App, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine } from "src/ui.slint"; }
+slint::slint! { export { App, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine, PropRow } from "src/ui.slint"; }
 
 #[derive(Clone)]
 struct Saved {
@@ -93,6 +94,9 @@ enum Reply {
     /// The settings dialog's hint for an empty agent program field.
     AgentFound(String),
     AgentVersion(Result<String, String>),
+    /// The properties dialog `u64` (Alt+Enter): the item read, then its SHA-256.
+    Props(u64, Result<props::Info, String>),
+    Hash(u64, props::Hashing),
 }
 /// `Reply::Picked` for 設定 > エージェント's folder list rather than a place.
 const AGENT_FOLDER: usize = 100;
@@ -383,6 +387,9 @@ struct Controller {
     previous: usize,
     /// `--demo`: drives and volume names (this machine's) are not shown.
     demo: bool,
+    /// Alt+Enter: the properties dialog, and how many have been opened (its id).
+    props: Option<props::Props>,
+    props_opened: u64,
 }
 /// "D:" for a path on drive D (with or without `\\?\`); None for network shares.
 fn drive_of(path: &Path) -> Option<String> {
@@ -395,6 +402,11 @@ fn drive_of(path: &Path) -> Option<String> {
 }
 fn display(path: &Path) -> String {
     shell::shell_path(path).to_string_lossy().into_owned()
+}
+/// [`display`] for reading only (messages, dialogs): hidden characters as visible marks.
+/// Text that may be edited or copied keeps the real path.
+fn shown(path: &Path) -> String {
+    listing::visible(&display(path)).into_owned()
 }
 fn hwnd(ui: &App) -> Option<HWND> {
     let handle = ui.window().window_handle();
@@ -740,7 +752,7 @@ impl Controller {
             .map(|a| {
                 let label = a.file_name().map_or_else(
                     || display(a).trim_end_matches('\\').to_string(),
-                    |n| n.to_string_lossy().into_owned(),
+                    |n| listing::visible(&n.to_string_lossy()).into_owned(),
                 );
                 (label, a.to_path_buf())
             })
@@ -1443,11 +1455,11 @@ impl Controller {
         let cursor = self.selected_paths(p).is_empty();
         let selection: Vec<PathBuf> = self.targets(p).iter().map(|p| shell::shell_path(p)).collect();
         let passed = match (cursor, selection.first()) {
-            (true, Some(item)) => format!("カーソル: {}", item.file_name().map_or_else(|| display(item), |n| n.to_string_lossy().into_owned())),
+            (true, Some(item)) => format!("カーソル: {}", listing::visible(&item.file_name().map_or_else(|| display(item), |n| n.to_string_lossy().into_owned()))),
             (true, None) => "選択なし".to_string(),
             (false, _) => format!("選択 {} 件", selection.len()),
         };
-        self.agent_push(1, format!("{}  ·  {passed}", display(&cwd)));
+        self.agent_push(1, format!("{}  ·  {passed}", shown(&cwd)));
         self.agent_push(0, format!("› {text}"));
         if self.agent.history.last().is_none_or(|last| last != text) {
             self.agent.history.push(text.to_string());
@@ -1594,13 +1606,13 @@ impl Controller {
                         } else if outcome.aborted {
                             format!("{verb}は途中で中止されました")
                         } else if outcome.missed {
-                            format!("{verb}できなかった項目があります → {}", display(&dir))
+                            format!("{verb}できなかった項目があります → {}", shown(&dir))
                         } else if outcome.inside > 0 {
-                            format!("フォルダーをその中へは貼り付けられないため {} 件をスキップしました → {}", outcome.inside, display(&dir))
+                            format!("フォルダーをその中へは貼り付けられないため {} 件をスキップしました → {}", outcome.inside, shown(&dir))
                         } else if outcome.skipped {
-                            format!("{verb}しました（一部スキップ） → {}", display(&dir))
+                            format!("{verb}しました（一部スキップ） → {}", shown(&dir))
                         } else {
-                            format!("{verb}しました → {}", display(&dir))
+                            format!("{verb}しました → {}", shown(&dir))
                         };
                         self.message(shell::with_kept(message, &outcome.kept));
                     }
@@ -1632,7 +1644,7 @@ impl Controller {
             }
             Reply::Made(p, dir, before, result) => match result {
                 Ok(path) => {
-                    self.message(format!("完了: {}", display(&path)));
+                    self.message(format!("完了: {}", shown(&path)));
                     if self.data(p).dir == dir && self.panes[p].pending.is_none() && self.panes[p].found.is_none() {
                         self.navigate(p, dir, Mode::Pasted(before, Arc::new(vec![path])));
                     }
@@ -1669,6 +1681,8 @@ impl Controller {
                     self.message(format!("開けません: {e}"));
                 }
             }
+            Reply::Props(id, info) => self.props_info(id, info),
+            Reply::Hash(id, hashing) => self.props_hash(id, hashing),
         }
     }
     fn complete(&mut self, p: usize, generation: u64, result: Result<Arc<Snapshot>, String>) {
@@ -1987,9 +2001,16 @@ impl Controller {
         }
     }
     /// Right click on the empty part of the list: the folder background menu.
-    /// Alt+Enter: the Windows Properties of the selection, else of the cursor item; on ".."
-    /// the folder shown, on a drive row that drive.
+    /// Alt+Enter: enyFile's properties of one item (props.rs), else Windows'.
     fn properties(&mut self, p: usize) {
+        let drive = matches!(self.panes[p].model.special.get(), Some(Special::Drive(_)));
+        if drive || !self.open_props(p) {
+            self.windows_properties(p);
+        }
+    }
+    /// Alt+Shift+Enter: the Windows Properties of the selection, else of the cursor item; on
+    /// ".." the folder shown, on a drive row that drive.
+    fn windows_properties(&mut self, p: usize) {
         let data = self.data(p);
         let target = match self.panes[p].model.special.get() {
             Some(Special::Drive(i)) if self.selected_paths(p).is_empty() => match self.drives.get(i) {
@@ -2016,7 +2037,7 @@ impl Controller {
             Ok(dir) => dir,
             Err(e) => return self.message(e),
         };
-        self.message(format!("ターミナルを開きます: {}", display(&dir)));
+        self.message(format!("ターミナルを開きます: {}", shown(&dir)));
         // Looking along PATH and starting a process can wait on slow drives.
         std::thread::spawn(move || {
             use std::os::windows::process::CommandExt;
@@ -2024,13 +2045,20 @@ impl Controller {
             let terminal = std::env::var_os("PATH")
                 .into_iter()
                 .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+                // A relative entry (".") would pick up a wt.exe in our working folder.
+                .filter(|dir| dir.is_absolute())
                 .map(|dir| dir.join("wt.exe"))
                 .find(|wt| wt.is_file());
             // The folder goes in as the working folder, never as text Windows Terminal would
             // parse (";" separates its commands).
             let result = match terminal {
                 Some(wt) => std::process::Command::new(wt).args(["-d", "."]).current_dir(&dir).spawn(),
-                None => std::process::Command::new("powershell.exe").arg("-NoLogo").current_dir(&dir).creation_flags(CREATE_NEW_CONSOLE).spawn(),
+                // By full path: a bare name is looked up next to enyfile.exe first.
+                None => std::process::Command::new(shell::system_dir().join(r"WindowsPowerShell\v1.0\powershell.exe"))
+                    .arg("-NoLogo")
+                    .current_dir(&dir)
+                    .creation_flags(CREATE_NEW_CONSOLE)
+                    .spawn(),
             };
             post(Reply::Opened(result.map(drop).map_err(|e| format!("ターミナルを起動できません: {e}"))));
         });
@@ -2216,7 +2244,7 @@ impl Controller {
     fn apply_opacity(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         if let Some(h) = hwnd(&ui) {
-            let opacity = if ui.get_settings_open() || ui.get_name_open() {
+            let opacity = if ui.get_settings_open() || ui.get_name_open() || ui.get_props_open() {
                 1.0
             } else if ui.get_open_menu() >= 0 {
                 (self.config.opacity + 0.1).min(1.0)
@@ -2281,7 +2309,7 @@ impl Controller {
         let dir = dir.unwrap_or_else(|| data.dir.clone());
         let before = data.positions.clone();
         self.operations += 1;
-        self.message(format!("貼り付け中 → {}", display(&dir)));
+        self.message(format!("貼り付け中 → {}", shown(&dir)));
         std::thread::spawn(move || paste_job(p, dir, before));
     }
     fn ask(&mut self, p: usize, question: paste::Question, reply: AnswerTx) {
@@ -2307,7 +2335,7 @@ impl Controller {
             let date = chrono::DateTime::<chrono::Local>::from(m.modified).format("%Y-%m-%d %H:%M:%S");
             format!("{kind}  ·  {date}{}", if newer { "  （新しい）" } else { "" })
         };
-        let name = q.target.file_name().unwrap().to_string_lossy().into_owned();
+        let name = listing::visible(&q.target.file_name().unwrap().to_string_lossy()).into_owned();
         let info = AskInfo {
             kind: match q.kind {
                 paste::Kind::File => 0,
@@ -2315,10 +2343,10 @@ impl Controller {
                 paste::Kind::Mismatch => 2,
             },
             stem: paste::stem_len(&q.auto_name, q.from.directory) as i32,
-            existing_path: display(&q.target).into(),
+            existing_path: shown(&q.target).into(),
             existing_detail: detail(&q.to, q.to.modified > q.from.modified).into(),
             incoming_label: if q.moved { "移動する項目:" } else { "コピーする項目:" }.into(),
-            incoming_path: display(&q.source).into(),
+            incoming_path: shown(&q.source).into(),
             incoming_detail: detail(&q.from, q.from.modified > q.to.modified).into(),
             rename: q.auto_name.clone().into(),
             name: name.into(),
@@ -2557,7 +2585,11 @@ impl Controller {
             .unwrap_or(0)
             .min(entries.saturating_sub(1));
         if is(Key::Return) && alt {
-            self.properties(p);
+            if shift {
+                self.windows_properties(p);
+            } else {
+                self.properties(p);
+            }
             return true;
         }
         if is(Key::Return) {
@@ -2868,6 +2900,8 @@ fn crash_log(file: PathBuf) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // First, before anything loads a DLL by name (the graphics stack, the Shell).
+    shell::harden_dll_search();
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
     // `--demo <root> <frames>`: records the README animation (demo.rs) in a fresh `<root>`.
@@ -2976,6 +3010,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compare: None,
         previous: 0,
         demo: demo.is_some(),
+        props: None,
+        props_opened: 0,
     }));
     CONTROLLER.with(|c| *c.borrow_mut() = Some(controller.clone()));
     {
@@ -3169,6 +3205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 41 => c.open_terminal(p),
                 42 => c.properties(p),
                 43 => c.open_explorer(p),
+                44 => c.windows_properties(p),
                 _ => {}
             }
         });
@@ -3238,6 +3275,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
+        ui.on_props_close(move || c.borrow_mut().close_props());
+    }
+    {
+        let c = controller.clone();
+        ui.on_props_copy(move || c.borrow_mut().props_copy());
+    }
+    {
+        let c = controller.clone();
+        ui.on_props_hash_key(move || c.borrow_mut().props_hash_key());
+    }
+    {
+        let c = controller.clone();
+        ui.on_props_windows(move || c.borrow_mut().props_windows());
+    }
+    {
+        let c = controller.clone();
         ui.on_ask_answer(move |code, name, all| c.borrow_mut().answer(code, name.to_string(), all));
     }
     {
@@ -3248,6 +3301,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let c = controller.clone();
         ui.window().on_close_requested(move || {
             if let Ok(mut c) = c.try_borrow_mut() {
+                // A hash in progress stops reading the file.
+                c.close_props();
                 c.remember_window();
                 // The folders last shown on each drive change all the time; written once here.
                 c.save_config();

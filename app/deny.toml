@@ -1,0 +1,31 @@
+# cargo-deny, run by CI: known vulnerabilities (RustSec), licenses that may ship in the
+# GPL-3.0-only release, and crates from crates.io only.
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+
+[advisories]
+# Unmaintained crates deep in Slint's tree are not ours to replace; our own dependencies are.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# GPL-3.0-only: Slint's licensing choice for this app (and the app's own release license).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "GPL-3.0-only",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -7,6 +7,10 @@ on:
 
 permissions:
   contents: write
+  # Build provenance (actions/attest): signs which workflow run and commit built the files.
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   release:
@@ -42,12 +46,22 @@ jobs:
           New-Item -ItemType Directory -Path "$name/agent" | Out-Null
           Copy-Item app/agent/memory.md -Destination "$name/agent"
           Compress-Archive -Path $name -DestinationPath "$name.zip"
+          # sha256sum's format: `sha256sum -c` reads it, and the hash is easy to compare by eye.
+          $hash = (Get-FileHash -Algorithm SHA256 "$name.zip").Hash.ToLower()
+          [IO.File]::WriteAllText("$name.zip.sha256", "$hash *$name.zip`n")
           "ASSET=$name.zip" >> $env:GITHUB_ENV
+          "EXE=$name/enyfile.exe" >> $env:GITHUB_ENV
+      # Checked with `gh attestation verify <file> -R Eniwder/enyFile` (the zip or the exe).
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ env.ASSET }}
+            ${{ env.EXE }}
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         # Releases are immutable once published: the zip goes onto a draft first.
         run: |
-          gh release create $env:GITHUB_REF_NAME $env:ASSET --repo $env:GITHUB_REPOSITORY --draft --title "enyFile $env:GITHUB_REF_NAME" --generate-notes
+          gh release create $env:GITHUB_REF_NAME $env:ASSET "$env:ASSET.sha256" --repo $env:GITHUB_REPOSITORY --draft --title "enyFile $env:GITHUB_REF_NAME" --generate-notes
           if ($LASTEXITCODE -ne 0) { exit 1 }
           gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --draft=false
