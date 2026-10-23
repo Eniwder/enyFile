@@ -1032,7 +1032,46 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.window().dispatch_event(WindowEvent::PointerPressed { position: away, button: PointerEventButton::Left });
                     ui.window().dispatch_event(WindowEvent::PointerReleased { position: away, button: PointerEventButton::Left });
                     expect(ui.get_open_menu() == -1, "a click outside closes the menu")?;
-                    s.pass("menu bar: hover switches between open menus, outside click closes");
+                    {
+                        use windows::Win32::{Foundation::{LPARAM, WPARAM}, UI::WindowsAndMessaging::*};
+                        ui.invoke_show_menu(1);
+                        expect(ui.get_open_menu() == 1, "menu reopened")?;
+                        let h = hwnd(&ui).ok_or("no window")?;
+                        // HTNOWHERE: the frame press arrives without starting a real move loop.
+                        unsafe { SendMessageW(h, WM_NCLBUTTONDOWN, Some(WPARAM(HTNOWHERE as usize)), Some(LPARAM(0))) };
+                        expect(ui.get_open_menu() == -1, "a press on the title bar closes the menu")?;
+                        // A lone Alt, as Windows sends it (scan code 0x38), activates the bar.
+                        let alt = 1 | (0x38 << 16) | (1 << 29);
+                        unsafe { SendMessageW(h, WM_SYSKEYDOWN, Some(WPARAM(0x12)), Some(LPARAM(alt))) };
+                        unsafe { SendMessageW(h, WM_SYSKEYUP, Some(WPARAM(0x12)), Some(LPARAM(alt | (3 << 30)))) };
+                        expect(ui.get_bar_focus() == 0 && ui.get_open_menu() == -1, "a lone Alt highlights ファイル")?;
+                    }
+                    let key = |text: &str| {
+                        use slint::platform::WindowEvent;
+                        ui.window().dispatch_event(WindowEvent::KeyPressed { text: text.into() });
+                        ui.window().dispatch_event(WindowEvent::KeyReleased { text: text.into() });
+                    };
+                    key("w");
+                    expect(ui.get_open_menu() == 2 && ui.get_menu_item() == 0, "W opens 表示 at its first item")?;
+                    // Name, size, time, extension, (separator), サイズの表示.
+                    for _ in 0..4 {
+                        key("\u{F701}");
+                    }
+                    expect(ui.get_menu_item() == 5, &format!("Down skips the separator (at {})", ui.get_menu_item()))?;
+                    let shown = ui.get_columns().size;
+                    key("\n");
+                    expect(ui.get_open_menu() == -1 && ui.get_columns().size != shown, "Enter runs the item")?;
+                    ui.invoke_menu_command(20);
+                    let mut e = slint::language::KeyEvent::default();
+                    e.text = "t".into();
+                    e.modifiers.alt = true;
+                    ui.invoke_key_event(0, e);
+                    expect(ui.get_open_menu() == 3, "Alt+T opens ツール")?;
+                    key("\u{F702}");
+                    expect(ui.get_open_menu() == 2, "Left moves to 表示")?;
+                    key("\u{1b}");
+                    expect(ui.get_open_menu() == -1 && ui.get_bar_focus() == -1, "Esc closes the menu")?;
+                    s.pass("menu bar: hover switches between open menus, outside or title bar click closes; Alt / Alt+letter / arrows / Enter / Esc");
                     // Ctrl+Alt+Shift+F: a small tree with a junction back to its own root.
                     let tree = root.join("tree");
                     for dir in ["a/b", "b"] {

@@ -2490,6 +2490,20 @@ impl Controller {
             self.command(p, 3);
             return true;
         }
+        // Alt+F / E / W / T: the menu bar's access keys.
+        if alt && !ctrl && !shift {
+            let menu = match letter.as_str() {
+                "f" => Some(0),
+                "e" => Some(1),
+                "w" => Some(2),
+                "t" => Some(3),
+                _ => None,
+            };
+            if let (Some(menu), Some(ui)) = (menu, self.ui.upgrade()) {
+                ui.invoke_key_menu(menu);
+                return true;
+            }
+        }
         if alt && is(Key::LeftArrow) {
             self.command(p, 0);
             return true;
@@ -3020,6 +3034,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let c = controller.clone();
         ui.on_open_settings(move || c.borrow_mut().open_settings());
     }
+    ui.on_alt_tapped(shell::take_alt_tap);
     {
         let c = controller.clone();
         ui.on_menu_shown(move || {
@@ -3261,6 +3276,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 shell::revoke_drop_target(h);
                 shell::dark_title_bar(h);
                 shell::window_icon(h);
+                let weak = weak.clone();
+                shell::hook_window(h, Box::new(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.invoke_dismiss_menu();
+                    }
+                }));
                 if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
                     c.borrow().apply_opacity();
                 }

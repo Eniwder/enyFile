@@ -46,6 +46,8 @@ export global Theme {
 // `diff` 0 same, 1 only here and new ("+"), 2 only here and old ("-"), 3 differs in the
 // cells flagged by size-diff / time-diff / attr-diff.
 export struct Row { compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
+// Menu bar item: `checkable` shows a check column; a separator ignores the rest.
+export struct MenuItem { text: string, command: int, checkable: bool, checked: bool, separator: bool }
 export struct Columns { size: bool, date: bool, time: bool, attr: bool, kind: bool }
 export struct ColorRow { label: string, color: color, r: int, g: int, b: int }
 export struct ExtRow { exts: string, color: color, r: int, g: int, b: int }
@@ -93,9 +95,13 @@ component MenuEntry inherits Rectangle {
     in property <string> text;
     // -1: plain item; 0 / 1: checkable, unchecked / checked (shown in its own column).
     in property <int> check: -1;
+    // Highlighted from the keyboard; `track-hover: false` leaves the highlight to it alone.
+    in property <bool> lit;
+    in property <bool> track-hover: true;
+    out property <bool> hovered: touch.has-hover;
     callback clicked;
     height: 26px;
-    background: touch.has-hover ? Theme.hover : transparent;
+    background: (root.track-hover && touch.has-hover) || root.lit ? Theme.hover : transparent;
     if root.check >= 0 : Text { x: 8px; width: 16px; text: root.check == 1 ? "✓" : ""; color: Theme.accent; vertical-alignment: center; }
     Text { x: root.check >= 0 ? 26px : 10px; text: root.text; color: Theme.text; vertical-alignment: center; }
     touch := TouchArea { clicked => { root.clicked(); } }
@@ -318,6 +324,7 @@ component Pane inherits Rectangle {
     callback page-resized(int);
     callback page-step(bool);
     callback copy-path();
+    callback alt-released();
     property <length> menu-x;
     changed page-size => { root.page-resized(root.page-size); }
     // The full name of the cursor row when the list cuts it short (window coordinates).
@@ -411,6 +418,7 @@ component Pane inherits Rectangle {
     keys := FocusScope {
         x: 0; y: 0; width: 0; height: 0; focus-on-click: false;
         key-pressed(e) => { return root.key-event(e) ? accept : reject; }
+        key-released(e) => { if e.text == Key.Alt { root.alt-released(); } return reject; }
     }
     // One page of rows. Clicks on the empty part reach this area; the wheel turns pages.
     list := TouchArea {
@@ -1240,8 +1248,84 @@ export component App inherits Window {
     // A shown menu makes the window a little more opaque (Rust sets the window opacity).
     callback menu-shown();
     changed open-menu => { root.menu-shown(); }
-    function show-menu(menu: int) { root.open-menu = menu; menu-keys.focus(); }
-    function close-menu() { root.open-menu = -1; root.focus-pane(root.active-pane); }
+    // Bar entry highlighted after a lone Alt, no menu shown yet: -1 none.
+    out property <int> bar-focus: -1;
+    // Item highlighted in the shown menu (keyboard or hover): -1 none.
+    out property <int> menu-item: -1;
+    public function show-menu(menu: int) { root.open-menu = menu; root.bar-focus = -1; root.menu-item = -1; menu-keys.focus(); }
+    // From the keyboard the first item starts highlighted, as in Windows menus.
+    public function key-menu(menu: int) { root.show-menu(menu); root.menu-item = 0; }
+    function close-menu() { root.open-menu = -1; root.bar-focus = -1; root.menu-item = -1; root.focus-pane(root.active-pane); }
+    // A click on the window frame (title bar), which Slint never sees; Rust calls this.
+    public function dismiss-menu() { if root.open-menu >= 0 || root.bar-focus >= 0 { root.close-menu(); } }
+    // A lone Alt press in a pane: Rust tells whether it was really one (see shell::take_alt_tap).
+    callback alt-tapped() -> bool;
+    function alt-released() {
+        if root.alt-tapped() { root.open-menu = -1; root.menu-item = -1; root.bar-focus = 0; menu-keys.focus(); }
+    }
+    // Commands 0-49 go to Rust as they are; the rest are handled here.
+    function run-menu(command: int) {
+        root.close-menu();
+        if command == 50 { root.open-settings(); }
+        else if command == 51 { root.agent-show(); }
+        else if command >= 60 && command <= 63 { root.sort(root.active-pane, command - 60); }
+        else { root.menu-command(command); }
+    }
+    property <[MenuItem]> file-items: [
+        { text: "新規ファイル (Ctrl+N)", command: 0 },
+        { text: "新規フォルダー (F7)", command: 1 },
+        { separator: true },
+        { text: "プロパティ (Alt+Enter)", command: 42 },
+        { separator: true },
+        { text: "設定...", command: 50 },
+    ];
+    property <[MenuItem]> edit-items: [
+        { text: "コピー (Ctrl+C)", command: 3 },
+        { text: "貼り付け (Ctrl+V)", command: 4 },
+        { text: "削除 (Delete)", command: 5 },
+        { separator: true },
+        { text: "絶対パスのコピー", command: 6 },
+        { text: "ファイル名のコピー", command: 7 },
+        { separator: true },
+        { text: "同じ拡張子をすべて選択", command: 8 },
+        { separator: true },
+        { text: "検索 (Ctrl+F)", command: 30 },
+        { text: "次を検索 (Ctrl+G)", command: 31 },
+        { text: "フィルター (Ctrl+Shift+F)", command: 32 },
+        { text: "フォルダー以下を検索 (Ctrl+Alt+Shift+F)", command: 34 },
+    ];
+    property <[MenuItem]> view-items: [
+        { text: "名前で並べ替え (Ctrl+Shift+N)", command: 60 },
+        { text: "サイズで並べ替え (Ctrl+Shift+S)", command: 61 },
+        { text: "更新日時で並べ替え (Ctrl+Shift+T)", command: 62 },
+        { text: "拡張子で並べ替え (Ctrl+Shift+E)", command: 63 },
+        { separator: true },
+        { text: "サイズの表示", command: 20, checkable: true, checked: root.columns.size },
+        { text: "日付の表示", command: 21, checkable: true, checked: root.columns.date },
+        { text: "時刻の表示", command: 22, checkable: true, checked: root.columns.time },
+        { text: "属性の表示", command: 23, checkable: true, checked: root.columns.attr },
+        { text: "種類の表示", command: 24, checkable: true, checked: root.columns.kind },
+        { text: "隠しファイルの表示 (Alt+Z)", command: 2, checkable: true, checked: root.active-hidden },
+        { separator: true },
+        { text: "2 ペイン (Ctrl+Shift+2)", command: 10, checkable: true, checked: root.pane-count == 2 },
+        { text: "3 ペイン 縦長 (Ctrl+Shift+3)", command: 13, checkable: true, checked: root.pane-count == 3 && root.three-columns },
+        { text: "3 ペイン 横長 (Ctrl+Shift+3 2回)", command: 11, checkable: true, checked: root.pane-count == 3 && !root.three-columns },
+        { text: "4 ペイン (Ctrl+Shift+4)", command: 12, checkable: true, checked: root.pane-count == 4 },
+    ];
+    property <[MenuItem]> tool-items: [
+        { text: "ペインの比較 (Ctrl+Shift+D)", command: 40 },
+        { text: "エージェントに依頼 (Ctrl+I)", command: 51 },
+        { text: "ここでターミナルを開く (Ctrl+@)", command: 41 },
+        { text: "ここでエクスプローラーを開く", command: 43 },
+    ];
+    property <[MenuItem]> shown-items: root.open-menu == 0 ? root.file-items : root.open-menu == 1 ? root.edit-items : root.open-menu == 2 ? root.view-items : root.tool-items;
+    // Next item up (-1) or down (1), wrapping; separators are never next to each other.
+    function step-item(d: int) {
+        let n = root.shown-items.length;
+        let start = root.menu-item >= 0 ? root.menu-item : d > 0 ? -1 : 0;
+        let next = mod(start + d + n, n);
+        root.menu-item = root.shown-items[next].separator ? mod(next + d + n, n) : next;
+    }
     init => { Palette.color-scheme = ColorScheme.dark; }
 
     // Toolbar: history, then places (paths from the config file) and bookmarks.
@@ -1324,7 +1408,7 @@ export component App inherits Window {
         active: root.active-pane == 0; busy: root.p0-busy; row-h: root.row-h;
         navigate(p) => { root.navigate(0, p); } command(c) => { root.command(0, c); } crumb(i) => { root.crumb(0, i); }
         pointer(i, c, s, k) => { root.pointer(0, i, c, s, k); } key-event(e) => { return root.key-event(0, e); }
-        blank => { root.blank(0); } blank-menu(s) => { root.blank-menu(0, s); }
+        blank => { root.blank(0); } blank-menu(s) => { root.blank-menu(0, s); } alt-released => { root.alt-released(); }
         page-resized(n) => { root.page-resized(0, n); } copy-path => { root.copy-path(0); } page-step(f) => { root.page-step(0, f); }
     }
     p1 := Pane {
@@ -1337,7 +1421,7 @@ export component App inherits Window {
         active: root.active-pane == 1; busy: root.p1-busy; row-h: root.row-h;
         navigate(p) => { root.navigate(1, p); } command(c) => { root.command(1, c); } crumb(i) => { root.crumb(1, i); }
         pointer(i, c, s, k) => { root.pointer(1, i, c, s, k); } key-event(e) => { return root.key-event(1, e); }
-        blank => { root.blank(1); } blank-menu(s) => { root.blank-menu(1, s); }
+        blank => { root.blank(1); } blank-menu(s) => { root.blank-menu(1, s); } alt-released => { root.alt-released(); }
         page-resized(n) => { root.page-resized(1, n); } copy-path => { root.copy-path(1); } page-step(f) => { root.page-step(1, f); }
     }
     p2 := Pane {
@@ -1351,7 +1435,7 @@ export component App inherits Window {
         active: root.active-pane == 2; busy: root.p2-busy; row-h: root.row-h;
         navigate(p) => { root.navigate(2, p); } command(c) => { root.command(2, c); } crumb(i) => { root.crumb(2, i); }
         pointer(i, c, s, k) => { root.pointer(2, i, c, s, k); } key-event(e) => { return root.key-event(2, e); }
-        blank => { root.blank(2); } blank-menu(s) => { root.blank-menu(2, s); }
+        blank => { root.blank(2); } blank-menu(s) => { root.blank-menu(2, s); } alt-released => { root.alt-released(); }
         page-resized(n) => { root.page-resized(2, n); } copy-path => { root.copy-path(2); } page-step(f) => { root.page-step(2, f); }
     }
     p3 := Pane {
@@ -1363,7 +1447,7 @@ export component App inherits Window {
         active: root.active-pane == 3; busy: root.p3-busy; row-h: root.row-h;
         navigate(p) => { root.navigate(3, p); } command(c) => { root.command(3, c); } crumb(i) => { root.crumb(3, i); }
         pointer(i, c, s, k) => { root.pointer(3, i, c, s, k); } key-event(e) => { return root.key-event(3, e); }
-        blank => { root.blank(3); } blank-menu(s) => { root.blank-menu(3, s); }
+        blank => { root.blank(3); } blank-menu(s) => { root.blank-menu(3, s); } alt-released => { root.alt-released(); }
         page-resized(n) => { root.page-resized(3, n); } copy-path => { root.copy-path(3); } page-step(f) => { root.page-step(3, f); }
     }
     // 2 panes.
@@ -1549,113 +1633,80 @@ export component App inherits Window {
         x: 0; y: 0; width: parent.width; height: parent.height;
         pointer-event(e) => { if e.kind == PointerEventKind.down { root.close-menu(); } }
     }
+    // Keyboard while the bar is active (lone Alt) or a menu is shown: Windows menu keys.
+    // The letters are the bar's access keys; Alt+letter from a pane is handled in Rust.
     menu-keys := FocusScope {
         x: 0; y: 0; width: 0; height: 0; focus-on-click: false;
         key-pressed(e) => {
-            if root.open-menu < 0 { return reject; }
-            if e.text == Key.Escape { root.close-menu(); }
-            if e.text == Key.LeftArrow { root.open-menu = mod(root.open-menu + 3, 4); }
-            if e.text == Key.RightArrow { root.open-menu = mod(root.open-menu + 1, 4); }
+            if root.open-menu < 0 && root.bar-focus < 0 { return reject; }
+            let bar = root.open-menu >= 0 ? root.open-menu : root.bar-focus;
+            let letter = e.text.to-lowercase();
+            if e.text == Key.Escape || e.text == Key.Alt || e.text == Key.F10 { root.close-menu(); }
+            else if e.text == Key.LeftArrow || e.text == Key.RightArrow {
+                let next = mod(bar + (e.text == Key.LeftArrow ? 3 : 1), 4);
+                if root.open-menu >= 0 { root.key-menu(next); } else { root.bar-focus = next; }
+            }
+            else if root.open-menu < 0 && (e.text == Key.DownArrow || e.text == Key.UpArrow || e.text == Key.Return || e.text == " ") { root.key-menu(bar); }
+            else if e.text == Key.DownArrow { root.step-item(1); }
+            else if e.text == Key.UpArrow { root.step-item(-1); }
+            else if (e.text == Key.Return || e.text == " ") && root.menu-item >= 0 { root.run-menu(root.shown-items[root.menu-item].command); }
+            else if letter == "f" { root.key-menu(0); }
+            else if letter == "e" { root.key-menu(1); }
+            else if letter == "w" { root.key-menu(2); }
+            else if letter == "t" { root.key-menu(3); }
+            // Other keys stay here, as in Windows menu mode.
             return accept;
         }
-        changed has-focus => { if !self.has-focus { root.open-menu = -1; } }
+        changed has-focus => { if !self.has-focus { root.open-menu = -1; root.bar-focus = -1; root.menu-item = -1; } }
     }
     HorizontalLayout {
         x: 4px; y: 0px; height: 24px; alignment: start;
         file-button := FlatButton {
             text: "ファイル(F)";
-            lit: root.open-menu == 0;
+            lit: root.open-menu == 0 || root.bar-focus == 0;
             clicked => { if root.open-menu == 0 { root.close-menu(); } else { root.show-menu(0); } }
-            changed hovered => { if self.hovered && root.open-menu >= 0 { root.open-menu = 0; } }
+            changed hovered => { if self.hovered && root.open-menu >= 0 && root.open-menu != 0 { root.show-menu(0); } }
         }
         edit-button := FlatButton {
             text: "編集(E)";
-            lit: root.open-menu == 1;
+            lit: root.open-menu == 1 || root.bar-focus == 1;
             clicked => { if root.open-menu == 1 { root.close-menu(); } else { root.show-menu(1); } }
-            changed hovered => { if self.hovered && root.open-menu >= 0 { root.open-menu = 1; } }
+            changed hovered => { if self.hovered && root.open-menu >= 0 && root.open-menu != 1 { root.show-menu(1); } }
         }
         view-button := FlatButton {
             text: "表示(W)";
-            lit: root.open-menu == 2;
+            lit: root.open-menu == 2 || root.bar-focus == 2;
             clicked => { if root.open-menu == 2 { root.close-menu(); } else { root.show-menu(2); } }
-            changed hovered => { if self.hovered && root.open-menu >= 0 { root.open-menu = 2; } }
+            changed hovered => { if self.hovered && root.open-menu >= 0 && root.open-menu != 2 { root.show-menu(2); } }
         }
         tool-button := FlatButton {
             text: "ツール(T)";
-            lit: root.open-menu == 3;
+            lit: root.open-menu == 3 || root.bar-focus == 3;
             clicked => { if root.open-menu == 3 { root.close-menu(); } else { root.show-menu(3); } }
-            changed hovered => { if self.hovered && root.open-menu >= 0 { root.open-menu = 3; } }
+            changed hovered => { if self.hovered && root.open-menu >= 0 && root.open-menu != 3 { root.show-menu(3); } }
         }
     }
-    if root.open-menu == 0 : Rectangle {
-        x: 4px + file-button.x; y: 24px; width: 230px; height: file-list.preferred-height;
+    if root.open-menu >= 0 : Rectangle {
+        x: 4px + [file-button.x, edit-button.x, view-button.x, tool-button.x][root.open-menu];
+        y: 24px; width: [230px, 320px, 300px, 250px][root.open-menu]; height: menu-list.preferred-height;
         background: Theme.dialog; border-width: 1px; border-color: Theme.border;
         TouchArea { }
-        file-list := VerticalLayout {
+        menu-list := VerticalLayout {
             padding: 4px;
-            MenuEntry { text: "新規ファイル (Ctrl+N)"; clicked => { root.close-menu(); root.menu-command(0); } }
-            MenuEntry { text: "新規フォルダー (F7)"; clicked => { root.close-menu(); root.menu-command(1); } }
-            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "プロパティ (Alt+Enter)"; clicked => { root.close-menu(); root.menu-command(42); } }
-            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "設定..."; clicked => { root.close-menu(); root.open-settings(); } }
-        }
-    }
-    if root.open-menu == 1 : Rectangle {
-        x: 4px + edit-button.x; y: 24px; width: 320px; height: edit-list.preferred-height;
-        background: Theme.dialog; border-width: 1px; border-color: Theme.border;
-        TouchArea { }
-        edit-list := VerticalLayout {
-            padding: 4px;
-            MenuEntry { text: "コピー (Ctrl+C)"; clicked => { root.close-menu(); root.menu-command(3); } }
-            MenuEntry { text: "貼り付け (Ctrl+V)"; clicked => { root.close-menu(); root.menu-command(4); } }
-            MenuEntry { text: "削除 (Delete)"; clicked => { root.close-menu(); root.menu-command(5); } }
-            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "絶対パスのコピー"; clicked => { root.close-menu(); root.menu-command(6); } }
-            MenuEntry { text: "ファイル名のコピー"; clicked => { root.close-menu(); root.menu-command(7); } }
-            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "同じ拡張子をすべて選択"; clicked => { root.close-menu(); root.menu-command(8); } }
-            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "検索 (Ctrl+F)"; clicked => { root.close-menu(); root.menu-command(30); } }
-            MenuEntry { text: "次を検索 (Ctrl+G)"; clicked => { root.close-menu(); root.menu-command(31); } }
-            MenuEntry { text: "フィルター (Ctrl+Shift+F)"; clicked => { root.close-menu(); root.menu-command(32); } }
-            MenuEntry { text: "フォルダー以下を検索 (Ctrl+Alt+Shift+F)"; clicked => { root.close-menu(); root.menu-command(34); } }
-        }
-    }
-    if root.open-menu == 2 : Rectangle {
-        x: 4px + view-button.x; y: 24px; width: 300px; height: view-list.preferred-height;
-        background: Theme.dialog; border-width: 1px; border-color: Theme.border;
-        TouchArea { }
-        view-list := VerticalLayout {
-            padding: 4px;
-            MenuEntry { text: "名前で並べ替え (Ctrl+Shift+N)"; clicked => { root.close-menu(); root.sort(root.active-pane, 0); } }
-            MenuEntry { text: "サイズで並べ替え (Ctrl+Shift+S)"; clicked => { root.close-menu(); root.sort(root.active-pane, 1); } }
-            MenuEntry { text: "更新日時で並べ替え (Ctrl+Shift+T)"; clicked => { root.close-menu(); root.sort(root.active-pane, 2); } }
-            MenuEntry { text: "拡張子で並べ替え (Ctrl+Shift+E)"; clicked => { root.close-menu(); root.sort(root.active-pane, 3); } }
-            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "サイズの表示"; check: root.columns.size ? 1 : 0; clicked => { root.close-menu(); root.menu-command(20); } }
-            MenuEntry { text: "日付の表示"; check: root.columns.date ? 1 : 0; clicked => { root.close-menu(); root.menu-command(21); } }
-            MenuEntry { text: "時刻の表示"; check: root.columns.time ? 1 : 0; clicked => { root.close-menu(); root.menu-command(22); } }
-            MenuEntry { text: "属性の表示"; check: root.columns.attr ? 1 : 0; clicked => { root.close-menu(); root.menu-command(23); } }
-            MenuEntry { text: "種類の表示"; check: root.columns.kind ? 1 : 0; clicked => { root.close-menu(); root.menu-command(24); } }
-            MenuEntry { text: "隠しファイルの表示 (Alt+Z)"; check: root.active-hidden ? 1 : 0; clicked => { root.close-menu(); root.menu-command(2); } }
-            Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-            MenuEntry { text: "2 ペイン (Ctrl+Shift+2)"; check: root.pane-count == 2 ? 1 : 0; clicked => { root.close-menu(); root.menu-command(10); } }
-            MenuEntry { text: "3 ペイン 縦長 (Ctrl+Shift+3)"; check: root.pane-count == 3 && root.three-columns ? 1 : 0; clicked => { root.close-menu(); root.menu-command(13); } }
-            MenuEntry { text: "3 ペイン 横長 (Ctrl+Shift+3 2回)"; check: root.pane-count == 3 && !root.three-columns ? 1 : 0; clicked => { root.close-menu(); root.menu-command(11); } }
-            MenuEntry { text: "4 ペイン (Ctrl+Shift+4)"; check: root.pane-count == 4 ? 1 : 0; clicked => { root.close-menu(); root.menu-command(12); } }
-        }
-    }
-    if root.open-menu == 3 : Rectangle {
-        x: 4px + tool-button.x; y: 24px; width: 250px; height: tool-list.preferred-height;
-        background: Theme.dialog; border-width: 1px; border-color: Theme.border;
-        TouchArea { }
-        tool-list := VerticalLayout {
-            padding: 4px;
-            MenuEntry { text: "ペインの比較 (Ctrl+Shift+D)"; clicked => { root.close-menu(); root.menu-command(40); } }
-            MenuEntry { text: "エージェントに依頼 (Ctrl+I)"; clicked => { root.close-menu(); root.agent-show(); } }
-            MenuEntry { text: "ここでターミナルを開く (Ctrl+@)"; clicked => { root.close-menu(); root.menu-command(41); } }
-            MenuEntry { text: "ここでエクスプローラーを開く"; clicked => { root.close-menu(); root.menu-command(43); } }
+            for item[i] in root.shown-items : Rectangle {
+                height: item.separator ? 9px : 26px;
+                if item.separator : Rectangle { y: 4px; height: 1px; background: Theme.border; }
+                if !item.separator : MenuEntry {
+                    text: item.text;
+                    check: item.checkable ? (item.checked ? 1 : 0) : -1;
+                    track-hover: false;
+                    lit: root.menu-item == i;
+                    changed hovered => {
+                        if self.hovered { root.menu-item = i; } else if root.menu-item == i { root.menu-item = -1; }
+                    }
+                    clicked => { root.run-menu(item.command); }
+                }
+            }
         }
     }
     settings-dialog := SettingsDialog {

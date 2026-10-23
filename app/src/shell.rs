@@ -832,6 +832,48 @@ pub fn on_screen(x: i32, y: i32, width: u32) -> bool {
     let strip = RECT { left: x, top: y, right: x.saturating_add(width as i32), bottom: y.saturating_add(32) };
     !unsafe { MonitorFromRect(&strip, MONITOR_DEFAULTTONULL) }.is_invalid()
 }
+thread_local! {
+    // Alt went down and nothing else has happened since.
+    static ALT_ALONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // ...and then came up: a lone Alt tap, taken by take_alt_tap.
+    static ALT_TAP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Whether the Alt release being handled ends a lone Alt tap. Slint cannot tell: winit also
+/// sends a synthetic Alt release when the window loses focus (Alt+Tab away).
+pub fn take_alt_tap() -> bool {
+    ALT_TAP.with(|t| t.replace(false))
+}
+/// Watches the main window's messages: calls `on_click` when a mouse button goes down on the
+/// window frame (title bar, borders), which Slint never sees, and notes lone Alt taps.
+/// Installed once for the main window, so `on_click` is never freed.
+pub fn hook_window(hwnd: HWND, on_click: Box<dyn Fn()>) {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    const VK_MENU: usize = 0x12;
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, data: usize) -> LRESULT {
+        let repeat = lparam.0 & (1 << 30) != 0;
+        match msg {
+            WM_SYSKEYDOWN if wparam.0 == VK_MENU => {
+                if !repeat {
+                    ALT_ALONE.set(true);
+                }
+            }
+            WM_SYSKEYUP if wparam.0 == VK_MENU => ALT_TAP.set(ALT_ALONE.replace(false)),
+            WM_KEYDOWN | WM_SYSKEYDOWN | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_KILLFOCUS => {
+                ALT_ALONE.set(false);
+                ALT_TAP.set(false);
+            }
+            // Before the default handling: a title bar press enters the modal move loop there.
+            WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN | WM_NCMBUTTONDOWN => {
+                ALT_ALONE.set(false);
+                unsafe { (*(data as *const Box<dyn Fn()>))() };
+            }
+            _ => {}
+        }
+        unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+    }
+    let data = Box::into_raw(Box::new(on_click)) as usize;
+    let _ = unsafe { SetWindowSubclass(hwnd, Some(proc), 1, data) };
+}
 /// Dark title bar to match the dark theme (ignored on Windows versions without it).
 pub fn dark_title_bar(hwnd: HWND) {
     use windows::{
