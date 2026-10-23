@@ -2254,12 +2254,16 @@ impl Controller {
             Err(e) => self.message(e),
         }
     }
-    /// The settings and name dialogs are always shown opaque, and an open menu a step more
-    /// opaque than the window; the configured opacity returns when they close.
+    /// Dialogs (settings, name, properties, paste conflicts) are always shown opaque, and an
+    /// open menu a step more opaque than the window; the configured opacity returns when they close.
     fn apply_opacity(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         if let Some(h) = hwnd(&ui) {
-            let opacity = if ui.get_settings_open() || ui.get_name_open() || ui.get_props_open() {
+            let opacity = if ui.get_settings_open()
+                || ui.get_name_open()
+                || ui.get_props_open()
+                || ui.get_ask_open()
+            {
                 1.0
             } else if ui.get_open_menu() >= 0 {
                 (self.config.opacity + 0.1).min(1.0)
@@ -2339,6 +2343,7 @@ impl Controller {
                 ui.set_ask_open(false);
                 ui.invoke_focus_pane(self.active as i32);
             }
+            self.apply_opacity();
             return;
         };
         let detail = |m: &paste::Meta, newer: bool| {
@@ -2372,6 +2377,7 @@ impl Controller {
             ui.set_ask_open(true);
             ui.invoke_focus_ask();
         }
+        self.apply_opacity();
     }
     fn validate(&self, name: &str) -> &'static str {
         self.asking
