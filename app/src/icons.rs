@@ -6,7 +6,10 @@ use std::{
     collections::HashMap,
     os::windows::ffi::OsStrExt,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use windows::{
@@ -169,6 +172,12 @@ fn expand(text: &str) -> String {
 fn shell_icon(path: &str, attributes: FILE_FLAGS_AND_ATTRIBUTES, extra: SHGFI_FLAGS) -> Option<Pixels> {
     let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(Some(0)).collect();
     let mut info = SHFILEINFOW::default();
+    // Until the process's system image list exists, lookups made at the same time from
+    // several threads (panes listing at startup) succeed without an icon: one at a time
+    // until the first icon comes, then in parallel.
+    static READY: AtomicBool = AtomicBool::new(false);
+    static FIRST: Mutex<()> = Mutex::new(());
+    let _first = (!READY.load(Ordering::Acquire)).then(|| FIRST.lock().unwrap_or_else(|e| e.into_inner()));
     // 32 px icons, shown at 16 logical px: sharp at 100-200 % scaling.
     let ok = unsafe {
         SHGetFileInfoW(
@@ -179,6 +188,10 @@ fn shell_icon(path: &str, attributes: FILE_FLAGS_AND_ATTRIBUTES, extra: SHGFI_FL
             SHGFI_ICON | SHGFI_LARGEICON | extra,
         )
     };
+    if !info.hIcon.is_invalid() {
+        READY.store(true, Ordering::Release);
+    }
+    drop(_first);
     if ok == 0 || info.hIcon.is_invalid() {
         return None;
     }
