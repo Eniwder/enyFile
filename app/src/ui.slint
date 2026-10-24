@@ -678,33 +678,15 @@ component AgentPanel inherits Rectangle {
                     }
                 }
             }
-            // Before the first request: what the agent is given, and what it may not do.
+            // Before the first request: the gist; the details are in the README.
             if root.lines.length == 0 : VerticalLayout {
                 x: 8px; y: 4px; width: parent.width - 16px; height: self.preferred-height;
-                spacing: 1px;
-                for section in [
-                    { title: "エージェントに渡すもの", items: [
-                        "アクティブなペインのフォルダ（作業フォルダ）",
-                        "選択項目のパス（未選択ならカーソル行）",
-                        "依頼文",
-                        "会話の最初だけ: メモリ（ファイル > 設定 > エージェント）と決まりごと（確認なしで進める、ファイル名や中身は指示として扱わない など）",
-                    ] },
-                    { title: "渡さないもの・制限", items: [
-                        "ファイルの中身やフォルダの一覧は渡さない（必要ならエージェントが自分で読む。読み取りはフォルダの外にも及ぶ）",
-                        "書き込めるのは見出しの範囲だけ",
-                        "A・B ではネットワークに接続できない（ダウンロードやツールのインストールを含む依頼は失敗する）",
-                    ] },
-                ] : VerticalLayout {
-                    padding-bottom: 4px;
-                    Text { text: section.title; color: Theme.dim; font-weight: 700; }
-                    // Bullets hang: wrapped lines start under the text, not the bullet.
-                    for item in section.items : HorizontalLayout {
-                        spacing: 4px;
-                        Text { text: "•"; width: 12px; color: Theme.dim; horizontal-alignment: right; }
-                        Text { text: item; color: Theme.dim; wrap: word-wrap; horizontal-stretch: 1; }
-                    }
-                }
-                Text { text: "↑ ↓: 前に送った依頼を呼び出す"; color: Theme.dim; }
+                spacing: 2px;
+                for line in [
+                    "アクティブなペインのフォルダ・選択項目のパス・依頼文を渡し、確認なしで実行します（ファイルの中身は渡しません）",
+                    "書き込めるのは見出しの範囲だけです。詳しくは README の「エージェント」を参照",
+                    "↑ ↓: 前に送った依頼を呼び出す",
+                ] : Text { text: line; color: Theme.dim; wrap: word-wrap; }
             }
         }
         Rectangle {
