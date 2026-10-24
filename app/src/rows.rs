@@ -157,6 +157,27 @@ impl RowsModel {
         let size = self.page_size.get().max(1);
         (self.page_start.get() / size + 1, self.total().div_ceil(size).max(1))
     }
+    /// The shown page's widest name (with its search location) and kind, guessed by
+    /// character count with wide characters counting double. The pane measures these two
+    /// to widen the kind column into room the names leave.
+    pub fn widest(&self) -> (String, String) {
+        let guess = |s: &str| s.chars().map(|c| if c.len_utf8() > 2 { 2 } else { 1 }).sum::<usize>();
+        let (mut name, mut kind) = (String::new(), String::new());
+        let start = self.page_start.get();
+        for row in (start..start + self.row_count()).filter_map(|i| self.row_at(i)) {
+            if row.drive || row.gap {
+                continue;
+            }
+            let shown = format!("{}{}", row.location, row.name);
+            if guess(&shown) > guess(&name) {
+                name = shown;
+            }
+            if guess(&row.kind) > guess(&kind) {
+                kind = row.kind.to_string();
+            }
+        }
+        (name, kind)
+    }
 }
 impl Model for RowsModel {
     type Data = Row;

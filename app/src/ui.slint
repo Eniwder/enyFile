@@ -52,7 +52,7 @@ export struct MenuItem { text: string, command: int, checkable: bool, checked: b
 export struct Columns { size: bool, date: bool, time: bool, attr: bool, kind: bool }
 export struct ColorRow { label: string, color: color, r: int, g: int, b: int }
 export struct ExtRow { exts: string, color: color, r: int, g: int, b: int }
-export struct PaneInfo { folders: string, files: string, total: string, volume: string, free: string, selected: string, page: string, filter: string, search: string, compare: string }
+export struct PaneInfo { folders: string, files: string, total: string, volume: string, free: string, selected: string, page: string, filter: string, search: string, compare: string, widest-name: string, widest-kind: string }
 export struct BookmarkRow { name: string, path: string }
 export struct PlaceRow { label: string, value: string, fallback: string }
 // Agent panel log. kind: 0 request, 1 step, 2 reply, 3 error, 4 note.
@@ -403,6 +403,15 @@ component Pane inherits Rectangle {
     // Rust hides the tip when the cursor moves: the row that would have hidden it may be
     // gone already (page turned, list rebuilt).
     public function hide-tip() { root.tip-shown = false; }
+    // The kind column: 130 px, wider when the page's names leave room (Rust picks the widest
+    // name and kind; they are measured here). Every row gets the same width so columns line up.
+    name-probe := Text { visible: false; text: root.info.widest-name; }
+    kind-probe := Text { visible: false; text: root.info.widest-kind; }
+    property <length> fixed-columns: 8px + 10px + 16px + 7px + 40px + 7px
+        + (root.columns.size ? 67px : 0) + (root.columns.date ? 93px : 0)
+        + (root.columns.time ? 49px : 0) + (root.columns.attr ? 39px : 0) + 7px;
+    property <length> name-spare: max(0px, root.width - 2px - root.fixed-columns - 130px - name-probe.preferred-width - 12px);
+    property <length> kind-w: min(max(130px, kind-probe.preferred-width + 2px), 130px + root.name-spare);
     background: Theme.pane;
     border-width: 1px;
     border-color: root.active ? Theme.border-active : Theme.border;
@@ -571,7 +580,7 @@ component Pane inherits Rectangle {
                     width: 32px; background: row.attr-diff ? Theme.diff-change-bg : transparent;
                     Text { x: 1px; width: parent.width - 1px; text: row.attr; color: row.attr-diff ? Theme.text : item.lit || row.selected || row.hidden ? item.column-dim : Theme.attr-text; vertical-alignment: center; }
                 }
-                if !root.compact && root.columns.kind : Text { text: row.kind; color: item.lit ? Theme.cursor-text : Theme.kind; overflow: elide; width: 130px; vertical-alignment: center; }
+                if !root.compact && root.columns.kind : Text { text: row.kind; color: item.lit ? Theme.cursor-text : Theme.kind; overflow: elide; width: root.kind-w; vertical-alignment: center; }
             }
             // Drive list under the entries: name, used-space bar, free space.
             if row.drive : HorizontalLayout {

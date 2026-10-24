@@ -766,7 +766,10 @@ impl Controller {
         let folders = data.rows.iter().filter(|e| e.directory).count();
         let total: u64 = data.rows.iter().filter(|e| !e.directory).map(|e| e.size).sum();
         let selected = self.panes[p].model.selection.borrow().count();
+        let (widest_name, widest_kind) = self.panes[p].model.widest();
         PaneInfo {
+            widest_name: widest_name.into(),
+            widest_kind: widest_kind.into(),
             folders: folders.to_string().into(),
             files: (data.rows.len() - folders).to_string().into(),
             total: listing::format_size(total).into(),
