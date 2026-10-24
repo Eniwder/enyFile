@@ -979,7 +979,8 @@ component SettingsDialog inherits Rectangle {
                             spacing: 6px; horizontal-stretch: 1;
                             Text { text: "拡張子の色分け"; font-weight: 700; color: Theme.text; }
                             Rectangle {
-                                background: #2b2b2b; border-width: 1px; border-color: Theme.border;
+                                // The pane background: the colors look as they will in the list.
+                                background: Theme.pane; border-width: 1px; border-color: Theme.border;
                                 ListView {
                                     for r[i] in root.extensions : Rectangle {
                                         height: 24px;
