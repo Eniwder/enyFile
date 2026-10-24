@@ -178,7 +178,8 @@ fn shell_icon(path: &str, attributes: FILE_FLAGS_AND_ATTRIBUTES, extra: SHGFI_FL
     static READY: AtomicBool = AtomicBool::new(false);
     static FIRST: Mutex<()> = Mutex::new(());
     let _first = (!READY.load(Ordering::Acquire)).then(|| FIRST.lock().unwrap_or_else(|e| e.into_inner()));
-    // 32 px icons, shown at 16 logical px: sharp at 100-200 % scaling.
+    // Large icons (32 px, more with a larger Shell icon size), cut to 32 px, shown at 16
+    // logical px: sharp at 100-200 % scaling.
     let ok = unsafe {
         SHGetFileInfoW(
             PCWSTR(wide.as_ptr()),
@@ -199,7 +200,61 @@ fn shell_icon(path: &str, attributes: FILE_FLAGS_AND_ATTRIBUTES, extra: SHGFI_FL
     unsafe {
         let _ = DestroyIcon(info.hIcon);
     }
-    pixels
+    pixels.map(|p| shrink(p, SIZE))
+}
+
+/// Icon pixels are kept at this size at most.
+const SIZE: u32 = 32;
+/// Area-averaged downscale to `to` px. The renderer's bilinear filter reads only 2x2 source
+/// pixels, so drawing a 48 px icon at 16 px skips pixels and breaks thin lines into jaggies.
+fn shrink(pixels: Pixels, to: u32) -> Pixels {
+    let (w, h) = (pixels.width(), pixels.height());
+    if w <= to && h <= to {
+        return pixels;
+    }
+    let (tw, th) = ((w * to / w.max(h)).max(1), (h * to / w.max(h)).max(1));
+    // Premultiplied, so transparent pixels do not darken the edges.
+    let src: Vec<[f32; 4]> = pixels
+        .as_slice()
+        .iter()
+        .map(|p| {
+            let a = p.a as f32 / 255.0;
+            [p.r as f32 * a, p.g as f32 * a, p.b as f32 * a, p.a as f32]
+        })
+        .collect();
+    // Each output pixel covers `scale` source pixels per axis, partly at the ends.
+    let weights = |from: u32, into: u32| -> Vec<Vec<(usize, f32)>> {
+        let scale = from as f32 / into as f32;
+        (0..into)
+            .map(|d| {
+                let (start, end) = (d as f32 * scale, (d + 1) as f32 * scale);
+                (start.floor() as u32..(end.ceil() as u32).min(from))
+                    .map(|s| (s as usize, ((s + 1) as f32).min(end) - (s as f32).max(start)))
+                    .filter(|&(_, cover)| cover > 0.0)
+                    .map(|(s, cover)| (s, cover / scale))
+                    .collect()
+            })
+            .collect()
+    };
+    let (across, down) = (weights(w, tw), weights(h, th));
+    let mut out = Vec::with_capacity((tw * th * 4) as usize);
+    for rows in &down {
+        for cols in &across {
+            let mut sum = [0f32; 4];
+            for &(y, wy) in rows {
+                for &(x, wx) in cols {
+                    let p = src[y * w as usize + x];
+                    for c in 0..4 {
+                        sum[c] += p[c] * wx * wy;
+                    }
+                }
+            }
+            let a = sum[3];
+            let color = |v: f32| if a > 0.0 { (v * 255.0 / a).round().clamp(0.0, 255.0) as u8 } else { 0 };
+            out.extend([color(sum[0]), color(sum[1]), color(sum[2]), a.round().clamp(0.0, 255.0) as u8]);
+        }
+    }
+    SharedPixelBuffer::clone_from_slice(&out, tw, th)
 }
 
 /// HICON -> RGBA. Uses the alpha channel when present, otherwise the AND mask.
@@ -284,6 +339,23 @@ mod tests {
             let pixels = shell_icon(probe, attributes, SHGFI_USEFILEATTRIBUTES).unwrap();
             assert!((16..=256).contains(&pixels.width()) && pixels.width() == pixels.height(), "{probe}");
         }
+    }
+    #[test]
+    fn large_icons_are_area_averaged() {
+        let px = |r: u8, a: u8| [r, 0, 0, a];
+        let buffer = |pixels: &[[u8; 4]], w, h| SharedPixelBuffer::clone_from_slice(pixels.as_flattened(), w, h);
+        // One-pixel stripes of white and black: every output pixel is their mix, none skipped.
+        let stripes: Vec<_> = (0..48 * 48).map(|i| if i % 2 == 0 { px(255, 255) } else { px(0, 255) }).collect();
+        let out = shrink(buffer(&stripes, 48, 48), 32);
+        assert_eq!((out.width(), out.height()), (32, 32));
+        // Each output pixel covers 1.5 stripes: 1/3 or 2/3 white.
+        assert!(out.as_slice().iter().all(|p| [85, 170].contains(&p.r) && p.a == 255));
+        // A transparent neighbor makes the edge fainter, not darker.
+        let edge: Vec<_> = (0..64 * 64).map(|i| if i % 2 == 0 { px(255, 255) } else { px(0, 0) }).collect();
+        let out = shrink(buffer(&edge, 64, 64), 32);
+        assert!(out.as_slice().iter().all(|p| p.r == 255 && p.a == 128));
+        let small = buffer(&stripes[..16 * 16], 16, 16);
+        assert_eq!(shrink(small, 32).width(), 16);
     }
     #[test]
     fn url_shortcut_places() {
