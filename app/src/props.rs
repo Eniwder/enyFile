@@ -15,7 +15,10 @@ use std::{
 use windows::{
     Win32::{
         Security::Cryptography::{BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData},
-        Storage::FileSystem::{FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, WIN32_FIND_STREAM_DATA},
+        Storage::FileSystem::{
+            FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO,
+            VerQueryValueW, WIN32_FIND_STREAM_DATA,
+        },
     },
     core::PCWSTR,
 };
@@ -29,6 +32,8 @@ pub struct Info {
     /// Of the item itself, not a link's target.
     pub attributes: u32,
     pub link: Option<PathBuf>,
+    /// File version from the version resource (exe, dll, ...), as Explorer's 詳細 tab shows it.
+    pub version: Option<String>,
     pub zone: Option<Zone>,
     /// Alternate data streams: name (without ":$DATA") and size.
     pub streams: Vec<(String, u64)>,
@@ -69,9 +74,36 @@ pub fn read(path: &Path) -> Result<Info, String> {
         created: meta.created().ok(),
         attributes: own.file_attributes(),
         link,
+        // A cloud file would be downloaded just to look.
+        version: (!meta.is_dir() && own.file_attributes() & REMOTE == 0).then(|| version(path)).flatten(),
         zone,
         streams,
     })
+}
+
+fn version(path: &Path) -> Option<String> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let size = GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None);
+        if size == 0 {
+            return None;
+        }
+        // u32s: VS_FIXEDFILEINFO inside the block is read in place.
+        let mut block = vec![0u32; (size as usize).div_ceil(4)];
+        GetFileVersionInfoW(PCWSTR(wide.as_ptr()), None, size, block.as_mut_ptr().cast()).ok()?;
+        let mut fixed = std::ptr::null_mut();
+        let mut len = 0;
+        let root: Vec<u16> = "\\".encode_utf16().chain(Some(0)).collect();
+        if !VerQueryValueW(block.as_ptr().cast(), PCWSTR(root.as_ptr()), &mut fixed, &mut len).as_bool()
+            || fixed.is_null()
+            || (len as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>()
+        {
+            return None;
+        }
+        let f = std::ptr::read_unaligned(fixed as *const VS_FIXEDFILEINFO);
+        let (ms, ls) = (f.dwFileVersionMS, f.dwFileVersionLS);
+        Some(format!("{}.{}.{}.{}", ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF))
+    }
 }
 
 fn streams(path: &Path) -> Vec<(String, u64)> {
@@ -411,6 +443,9 @@ impl Controller {
         if let Some(link) = &info.link {
             rows.push(row("リンク先", shown(link)));
         }
+        if let Some(version) = &info.version {
+            rows.push(row("バージョン", version.clone()));
+        }
         if let Some(zone) = &info.zone {
             rows.push(heading("ダウンロード情報"));
             rows.push(row("取得元", zone.host.as_deref().map_or_else(|| "記録なし".into(), text)));
@@ -471,6 +506,16 @@ fn hash_job(id: u64, path: &Path, total: u64, cancel: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn file_version() {
+        let notepad = PathBuf::from(std::env::var("SystemRoot").unwrap()).join(r"System32\notepad.exe");
+        let found = read(&notepad).unwrap().version.unwrap();
+        assert_eq!(found.split('.').filter(|n| n.parse::<u16>().is_ok()).count(), 4, "{found}");
+        let text = std::env::temp_dir().join(format!("enyfile-version-{}.txt", std::process::id()));
+        std::fs::write(&text, "no version here").unwrap();
+        assert_eq!(read(&text).unwrap().version, None);
+        let _ = std::fs::remove_file(&text);
+    }
     #[test]
     fn zone_identifier() {
         let text = b"[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=https://example.com/download\r\nHostUrl=https://example.com/files/sample.zip\r\n";
