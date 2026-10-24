@@ -1,4 +1,4 @@
-// Embeds icon.ico as the exe icon and enyfile.manifest with the Windows SDK's rc.exe,
+// Embeds icon.ico as the exe icon, enyfile.manifest and the version resource with the Windows SDK's rc.exe,
 // avoiding an extra build dependency (builds are offline). Without rc.exe the exe just has
 // neither.
 use std::path::PathBuf;
@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-changed=icon.rc");
     println!("cargo:rerun-if-changed=icon.ico");
     println!("cargo:rerun-if-changed=enyfile.manifest");
+    println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-env-changed=RC");
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         return;
@@ -19,9 +20,22 @@ fn main() {
         println!("cargo:warning=rc.exe not found; enyfile.exe will have no icon or manifest");
         return;
     };
-    let res = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("icon.res");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    // The version resource takes its numbers from Cargo.toml.
+    let version = |part: &str| std::env::var(format!("CARGO_PKG_VERSION_{part}")).unwrap();
+    let header = format!(
+        "#define VER_MAJOR {}\n#define VER_MINOR {}\n#define VER_PATCH {}\n#define VER_STRING \"{}\"\n",
+        version("MAJOR"),
+        version("MINOR"),
+        version("PATCH"),
+        std::env::var("CARGO_PKG_VERSION").unwrap(),
+    );
+    std::fs::write(out.join("version.h"), header).unwrap();
+    let res = out.join("icon.res");
     let ok = Command::new(&rc)
         .arg("/nologo")
+        .arg("/i")
+        .arg(&out)
         .arg("/fo")
         .arg(&res)
         .arg("icon.rc")

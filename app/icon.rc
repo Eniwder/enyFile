@@ -2,3 +2,29 @@
 1 ICON "icon.ico"
 // RT_MANIFEST (24), ID 1: the application manifest.
 1 24 "enyfile.manifest"
+
+// Version resource (exe properties > 詳細). version.h is written by build.rs from Cargo.toml.
+#include "version.h"
+1 VERSIONINFO
+FILEVERSION VER_MAJOR, VER_MINOR, VER_PATCH, 0
+PRODUCTVERSION VER_MAJOR, VER_MINOR, VER_PATCH, 0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "enyFile"
+            VALUE "FileVersion", VER_STRING
+            VALUE "ProductName", "enyFile"
+            VALUE "ProductVersion", VER_STRING
+            VALUE "LegalCopyright", "Copyright (C) Eniel120"
+            VALUE "OriginalFilename", "enyfile.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
