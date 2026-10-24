@@ -2958,6 +2958,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ole = shell::Apartment::new()?;
     let ui = App::new()?;
+    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     let panes = std::array::from_fn(|p| Pane {
         model: Rc::new(RowsModel {
             compare: RefCell::new(None),

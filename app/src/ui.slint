@@ -865,6 +865,7 @@ component SettingsDialog inherits Rectangle {
     in-out property <string> font-family;
     in-out property <int> font-size;
     in-out property <int> window-opacity;
+    in property <string> app-version;
     in-out property <bool> search-links;
     // エージェント: program (empty = found automatically, shown dim), write access 0 / 1 / 2,
     // the folders access 1 adds, and the memory file.
@@ -1040,8 +1041,8 @@ component SettingsDialog inherits Rectangle {
                             height: 90px; background: Theme.pane; border-width: 1px; border-color: Theme.border;
                             VerticalLayout {
                                 padding: 10px; spacing: 4px;
-                                Text { text: "サンプル Sample 0123456789"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.text; }
-                                Text { text: "日本語表示MOD_0.1.0.json   20.4 MB   2025-05-17 09:33"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.dim; }
+                                Text { text: "enyFile v" + root.app-version + "   サンプル Sample 0123456789"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.text; }
+                                Text { text: "日本語のファイル名.txt   20.4 MB   2025-05-17 09:33"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.dim; }
                             }
                         }
                     }
@@ -1301,6 +1302,8 @@ export component App inherits Window {
     in property <string> settings-font-family;
     in property <int> settings-font-size;
     in-out property <int> settings-opacity: 100;
+    // Shown in the font sample of the settings dialog.
+    in property <string> app-version;
     in-out property <bool> settings-search-links;
     in-out property <string> settings-agent-path;
     in property <string> settings-agent-detected;
@@ -1858,6 +1861,7 @@ export component App inherits Window {
         visible: root.settings-open;
         places: root.settings-places;
         tab <=> root.settings-tab;
+        app-version: root.app-version;
         colors: root.settings-colors;
         extensions: root.settings-ext;
         fonts: root.fonts;
