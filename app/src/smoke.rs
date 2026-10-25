@@ -1483,8 +1483,8 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                 }
                 72 => {
                     let rows: Vec<(String, String, bool)> = ui.get_props_rows().iter().map(|r| (r.label.to_string(), r.value.to_string(), r.dim)).collect();
-                    let Some(skipped) = rows.iter().find(|(l, _, _)| l == "除外") else { return Ok(false) };
-                    expect(skipped.1.starts_with("リンク 1 件"), &format!("the junction is skipped: {rows:?}"))?;
+                    let Some(skipped) = rows.iter().find(|(l, _, _)| l == "集計外") else { return Ok(false) };
+                    expect(skipped.1.starts_with("リンク 1件"), &format!("the junction is skipped: {rows:?}"))?;
                     let value = |label: &str| rows.iter().find(|(l, _, _)| l == label).map(|(_, v, _)| v.clone()).unwrap_or_default();
                     expect(value("サイズ") == listing::format_size(4321) && value("内容") == "ファイル 1、フォルダー 1", &format!("folder totals: {rows:?}"))?;
                     ui.invoke_props_close();

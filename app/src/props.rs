@@ -548,13 +548,13 @@ impl Controller {
                 rows.push(row("内容", format!("ファイル {}、フォルダー {}", grouped(u.files), grouped(u.folders))));
                 let mut skipped = Vec::new();
                 if u.links > 0 {
-                    skipped.push(format!("リンク {} 件", grouped(u.links)));
+                    skipped.push(format!("リンク {}件", grouped(u.links)));
                 }
                 if u.unreadable > 0 {
-                    skipped.push(format!("読めないフォルダー {} 件", grouped(u.unreadable)));
+                    skipped.push(format!("読めないフォルダー {}件", grouped(u.unreadable)));
                 }
                 if !skipped.is_empty() {
-                    rows.push(row("除外", skipped.join("、")));
+                    rows.push(row("集計外", skipped.join("、")));
                 }
             }
             UsageState::Failed(e) => rows.push(PropRow { dim: true, ..row("サイズ", format!("計算できません: {e}")) }),
