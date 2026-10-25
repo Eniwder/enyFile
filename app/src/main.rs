@@ -1396,7 +1396,8 @@ impl Controller {
     }
     /// Asks the CLI for its version once (again after the settings change its program).
     fn agent_version(&mut self) {
-        if self.agent.version.is_some() || self.agent.version_asked {
+        // Turned off: the CLI is never started, whatever the caller.
+        if !self.config.agent_enabled || self.agent.version.is_some() || self.agent.version_asked {
             return;
         }
         self.agent.version_asked = true;
@@ -1438,7 +1439,7 @@ impl Controller {
     /// field (nothing was sent).
     fn agent_send(&mut self, text: &str) -> bool {
         let text = text.trim();
-        if text.is_empty() {
+        if text.is_empty() || !self.config.agent_enabled {
             return false;
         }
         if self.agent.run.is_some() {

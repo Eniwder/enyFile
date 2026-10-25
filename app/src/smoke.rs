@@ -1378,6 +1378,8 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ctrl_key(&ui, 0, "i");
                     ui.invoke_agent_show();
                     expect(!ui.get_agent_open() && !ui.get_agent_enabled(), "turned off, nothing opens the panel")?;
+                    // Not only the panel: the CLI itself is never started.
+                    expect(!ui.invoke_agent_send("一覧を見せて".into()) && c.borrow().agent.run.is_none(), "turned off, a request starts no CLI")?;
                     ui.invoke_open_settings();
                     expect(ui.get_settings_agent_cli() == 1, "the settings show it turned off")?;
                     ui.set_settings_agent_cli(0);

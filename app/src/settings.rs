@@ -27,17 +27,20 @@ impl Controller {
             ui.set_settings_agent_access(access as i32);
             ui.set_settings_agent_panes(self.config.agent_panes);
             ui.set_settings_agent_memory(display(&self.config.agent_memory()).into());
-            ui.set_settings_agent_detected("".into());
+            ui.set_settings_agent_detected("空欄: 自動で検出".into());
         }
         self.settings_agent_folders = self.config.agent_folders.clone();
         self.settings_agent_rows();
-        // Looking along PATH can touch slow drives: off the UI thread.
-        std::thread::spawn(|| {
-            post(Reply::AgentFound(match agent::locate(None) {
-                Ok(program) => format!("空欄: 自動で検出（{}）", display(&program)),
-                Err(_) => "空欄: 自動で検出（今は見つかりません。codex.exe の場所を入力できます）".into(),
-            }));
-        });
+        // Turned off: not even looked for.
+        if self.config.agent_enabled {
+            // Looking along PATH can touch slow drives: off the UI thread.
+            std::thread::spawn(|| {
+                post(Reply::AgentFound(match agent::locate(None) {
+                    Ok(program) => format!("空欄: 自動で検出（{}）", display(&program)),
+                    Err(_) => "空欄: 自動で検出（今は見つかりません。codex.exe の場所を入力できます）".into(),
+                }));
+            });
+        }
         if let Some(ui) = self.ui.upgrade() {
             ui.set_settings_open(true);
             ui.invoke_focus_settings();
