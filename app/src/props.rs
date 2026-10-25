@@ -548,7 +548,7 @@ impl Controller {
                 rows.push(row("内容", format!("ファイル {}、フォルダー {}", grouped(u.files), grouped(u.folders))));
                 let mut skipped = Vec::new();
                 if u.links > 0 {
-                    skipped.push(format!("リンク {} 件（ジャンクション・シンボリックリンク。中は数えない）", grouped(u.links)));
+                    skipped.push(format!("リンク {} 件", grouped(u.links)));
                 }
                 if u.unreadable > 0 {
                     skipped.push(format!("読めないフォルダー {} 件", grouped(u.unreadable)));
