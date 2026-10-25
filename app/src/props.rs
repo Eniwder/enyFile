@@ -54,7 +54,8 @@ pub struct Usage {
     pub folders: u64,
     /// Junctions, symbolic links and mount points: counted, not entered.
     pub links: u64,
-    /// Folders below the top one that could not be listed (access denied, gone).
+    /// Folders that could not be listed (access denied, gone; never the top one, which fails
+    /// the whole count) or only partly (an error midway, an entry without metadata).
     pub unreadable: u64,
 }
 pub enum Measuring {
@@ -119,9 +120,18 @@ pub fn usage(root: &Path, cancel: &AtomicBool, mut progress: impl FnMut(&Usage) 
                 continue;
             }
         };
-        // An error midway keeps what was read.
-        for (n, entry) in entries.map_while(Result::ok).enumerate() {
-            let Ok(meta) = entry.metadata() else { continue };
+        // An error midway keeps what was read, and the folder counts as unreadable. The listing
+        // stops there: std's next call would only retry FindNextFileW, which may fail for good.
+        let mut partial = false;
+        for (n, entry) in entries.enumerate() {
+            let Ok(entry) = entry else {
+                partial = true;
+                break;
+            };
+            let Ok(meta) = entry.metadata() else {
+                partial = true;
+                continue;
+            };
             // is_symlink: a reparse point with a name-surrogate tag (junction, symbolic link,
             // mount point), not a cloud placeholder, which holds real data.
             if meta.file_type().is_symlink() {
@@ -137,6 +147,7 @@ pub fn usage(root: &Path, cancel: &AtomicBool, mut progress: impl FnMut(&Usage) 
                 return Ok(None);
             }
         }
+        total.unreadable += u64::from(partial);
         if cancel.load(Ordering::Relaxed) || !progress(&total) {
             return Ok(None);
         }
