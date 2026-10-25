@@ -1374,9 +1374,12 @@ impl Controller {
         }
         lines.push(AgentLine { kind, text: text.trim_end().into() });
     }
-    /// Ctrl+I, the File menu or a double-click on the history line.
+    /// Ctrl+I, the File menu or a double-click on the history line. Nothing when turned off.
     fn open_agent(&mut self) {
         let Some(ui) = self.ui.upgrade() else { return };
+        if !self.config.agent_enabled {
+            return;
+        }
         ui.set_agent_lines(ModelRc::from(self.agent.lines.clone()));
         ui.set_agent_open(true);
         self.agent_version();
@@ -3171,6 +3174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.set_quad_x(config.split4[0]);
         ui.set_quad_y(config.split4[1]);
         ui.set_agent_split(config.agent_split);
+        ui.set_agent_enabled(config.agent_enabled);
     }
     {
         let c = controller.clone();

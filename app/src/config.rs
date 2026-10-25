@@ -75,6 +75,8 @@ pub struct Config {
     pub drive_dirs: std::collections::BTreeMap<String, PathBuf>,
     /// Where the window was when it was last closed; None = Slint's default placement.
     pub window: Option<Placement>,
+    /// Ctrl+I: false = "cli": "none", the agent turned off (e.g. where its use is not allowed).
+    pub agent_enabled: bool,
     /// Ctrl+I: the agent CLI's program (None = looked for), where it may write, and the
     /// folders `Access::Extra` adds.
     pub agent_path: Option<PathBuf>,
@@ -217,6 +219,7 @@ impl Config {
             _ => None,
         };
         let agent = &raw["agent"];
+        let agent_enabled = agent["cli"].as_str() != Some("none");
         let agent_path = agent["path"].as_str().filter(|s| !s.trim().is_empty()).map(PathBuf::from);
         let agent_panes = agent["panes"].as_bool().unwrap_or(false);
         let agent_access = agent["access"].as_str().and_then(agent::Access::from_key).unwrap_or(agent::Access::Folder);
@@ -249,6 +252,7 @@ impl Config {
             search_links,
             drive_dirs,
             window,
+            agent_enabled,
             agent_path,
             agent_access,
             agent_folders,
@@ -325,9 +329,9 @@ impl Config {
         if let Some(w) = self.window {
             self.raw["window"] = json!({ "x": w.x, "y": w.y, "width": w.width, "height": w.height, "maximized": w.maximized });
         }
-        // Only Codex so far; "cli" names the CLI the other keys are for.
+        // Only Codex so far; "cli" names the CLI the other keys are for, or "none".
         self.raw["agent"] = json!({
-            "cli": "codex",
+            "cli": if self.agent_enabled { "codex" } else { "none" },
             "path": self.agent_path.as_ref().map_or(String::new(), |p| p.to_string_lossy().into_owned()),
             "access": self.agent_access.key(),
             "folders": self.agent_folders.iter().map(|d| d.to_string_lossy()).collect::<Vec<_>>(),
@@ -415,6 +419,8 @@ mod tests {
         assert_eq!(Config::load(file.clone()).window, Some(placement));
         assert_eq!(config.agent_access, agent::Access::Folder, "the narrowest mode by default");
         assert!(!config.agent_panes, "other panes are read-only by default");
+        assert!(config.agent_enabled, "Codex by default");
+        config.agent_enabled = false;
         config.agent_panes = true;
         config.agent_access = agent::Access::Extra;
         config.agent_folders = vec![r"H:\写真".into()];
@@ -422,6 +428,7 @@ mod tests {
         let again = Config::load(file.clone());
         assert_eq!((again.agent_access, again.agent_folders.clone(), again.agent_path.clone()), (agent::Access::Extra, vec![PathBuf::from(r"H:\写真")], None));
         assert!(again.agent_panes);
+        assert!(!again.agent_enabled, "turned off stays off");
         assert_eq!(again.agent_memory(), dir.join("agent").join("memory.md"));
         let _ = std::fs::remove_dir_all(&dir);
     }

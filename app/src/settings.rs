@@ -21,6 +21,7 @@ impl Controller {
             ui.set_settings_font_size(self.settings_font.1.round() as i32);
             ui.set_settings_opacity((self.config.opacity * 100.0).round() as i32);
             ui.set_settings_search_links(self.config.search_links);
+            ui.set_settings_agent_cli(if self.config.agent_enabled { 0 } else { 1 });
             ui.set_settings_agent_path(self.config.agent_path.as_ref().map_or(String::new(), |p| display(p)).into());
             let access = agent::Access::ALL.iter().position(|a| *a == self.config.agent_access).unwrap_or(0);
             ui.set_settings_agent_access(access as i32);
@@ -220,6 +221,15 @@ impl Controller {
                 self.config.agent_access = agent::Access::ALL[access];
                 self.config.agent_folders = self.settings_agent_folders.clone();
                 self.config.agent_panes = ui.get_settings_agent_panes();
+                self.config.agent_enabled = ui.get_settings_agent_cli() == 0;
+                ui.set_agent_enabled(self.config.agent_enabled);
+                if !self.config.agent_enabled {
+                    // Off means off now: no run goes on behind a closed panel.
+                    self.agent_cancel();
+                    if ui.get_agent_open() {
+                        self.close_agent();
+                    }
+                }
                 self.sync_agent();
             }
             self.config.colors = self.settings_colors.clone();

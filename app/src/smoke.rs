@@ -1370,7 +1370,22 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     // Through the window: the key reaches the panel's input, which has the focus.
                     window_ctrl_key(&ui, "i");
                     expect(!ui.get_agent_open(), "Ctrl+I in the panel closes it")?;
-                    s.pass("cancel stops the CLI and its children; 新しい会話 starts over");
+                    // 使用しない: Ctrl+I, the menu and the history line open nothing, and it is saved.
+                    ui.invoke_open_settings();
+                    ui.set_settings_agent_cli(1);
+                    ui.invoke_settings_done(true);
+                    expect(!config::Config::load(root.join("config.json")).agent_enabled, "使用しない is saved")?;
+                    ctrl_key(&ui, 0, "i");
+                    ui.invoke_agent_show();
+                    expect(!ui.get_agent_open() && !ui.get_agent_enabled(), "turned off, nothing opens the panel")?;
+                    ui.invoke_open_settings();
+                    expect(ui.get_settings_agent_cli() == 1, "the settings show it turned off")?;
+                    ui.set_settings_agent_cli(0);
+                    ui.invoke_settings_done(true);
+                    ctrl_key(&ui, 0, "i");
+                    expect(ui.get_agent_open(), "turned on again, Ctrl+I opens the panel")?;
+                    window_ctrl_key(&ui, "i");
+                    s.pass("cancel stops the CLI and its children; 新しい会話 starts over; 使用しない turns Ctrl+I off");
                 }
                 // Opening a file starts it in its own folder (as Explorer does), not in ours.
                 67 => {
