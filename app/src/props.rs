@@ -541,17 +541,17 @@ impl Controller {
             UsageState::Running(u) => {
                 let dim = |label: &str, value: String| PropRow { dim: true, ..row(label, value) };
                 rows.push(dim("サイズ", format!("計算中… {}", bytes(u.size))));
-                rows.push(dim("内容", format!("ファイル {}、フォルダー {}", grouped(u.files), grouped(u.folders))));
+                rows.push(dim("内容", format!("ファイル{}、フォルダー{}", grouped(u.files), grouped(u.folders))));
             }
             UsageState::Done(u) => {
                 rows.push(row("サイズ", bytes(u.size)));
-                rows.push(row("内容", format!("ファイル {}、フォルダー {}", grouped(u.files), grouped(u.folders))));
+                rows.push(row("内容", format!("ファイル{}、フォルダー{}", grouped(u.files), grouped(u.folders))));
                 let mut skipped = Vec::new();
                 if u.links > 0 {
-                    skipped.push(format!("リンク {}件", grouped(u.links)));
+                    skipped.push(format!("リンク{}件", grouped(u.links)));
                 }
                 if u.unreadable > 0 {
-                    skipped.push(format!("読めないフォルダー {}件", grouped(u.unreadable)));
+                    skipped.push(format!("読めないフォルダー{}件", grouped(u.unreadable)));
                 }
                 if !skipped.is_empty() {
                     rows.push(row("集計外", skipped.join("、")));

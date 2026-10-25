@@ -1320,7 +1320,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let other = display(&c.borrow().data(1).dir);
                     expect(args.contains(&format!("--add-dir {other} ")) && prompt.contains("other panes (writable)"), &format!("the setting makes the other pane writable: {args}"))?;
                     expect(agent_texts(&c).iter().any(|l| l.contains("カーソル: size.txt")), "the log says the cursor item was passed")?;
-                    expect(agent_texts(&c).iter().any(|l| l.ends_with("ほかのペイン 1 件にも書き込み可")), "the log says the other pane may be written")?;
+                    expect(agent_texts(&c).iter().any(|l| l.ends_with("ほかのペイン1件にも書き込み可")), "the log says the other pane may be written")?;
                     s.pass("follow-up continues the conversation with the same sandbox; cursor item when nothing is selected; ↑ ↓ recall");
                     // The wheel over the log goes back through the conversation (and stays).
                     for i in 0..80 {
@@ -1484,9 +1484,9 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                 72 => {
                     let rows: Vec<(String, String, bool)> = ui.get_props_rows().iter().map(|r| (r.label.to_string(), r.value.to_string(), r.dim)).collect();
                     let Some(skipped) = rows.iter().find(|(l, _, _)| l == "集計外") else { return Ok(false) };
-                    expect(skipped.1.starts_with("リンク 1件"), &format!("the junction is skipped: {rows:?}"))?;
+                    expect(skipped.1.starts_with("リンク1件"), &format!("the junction is skipped: {rows:?}"))?;
                     let value = |label: &str| rows.iter().find(|(l, _, _)| l == label).map(|(_, v, _)| v.clone()).unwrap_or_default();
-                    expect(value("サイズ") == listing::format_size(4321) && value("内容") == "ファイル 1、フォルダー 1", &format!("folder totals: {rows:?}"))?;
+                    expect(value("サイズ") == listing::format_size(4321) && value("内容") == "ファイル1、フォルダー1", &format!("folder totals: {rows:?}"))?;
                     ui.invoke_props_close();
                     s.pass("folder properties add up the size, skipping junctions");
                 }

@@ -601,7 +601,7 @@ fn beyond_shell(plan: &crate::paste::Plan, inside: &[Option<(usize, PathBuf)>]) 
             let from = op.source.parent().and_then(volume);
             if !plan.moved || from.is_none() || from != volume(&op.dir) {
                 return Err(format!(
-                    "パスが {} 文字を超える項目があるため中止しました（Windows のコピーエンジンが扱えません。同じドライブ内の移動はできます）: {}",
+                    "パスが{}文字を超える項目があるため中止しました（Windows のコピーエンジンが扱えません。同じドライブ内の移動はできます）: {}",
                     SHELL_MAX + 1,
                     shell_path(&op.source).display()
                 ));

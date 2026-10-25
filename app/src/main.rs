@@ -514,7 +514,7 @@ impl Controller {
             (3, true) => "（横並び）",
             _ => "",
         };
-        self.message(format!("{} ペイン{shape}", self.config.panes));
+        self.message(format!("{}ペイン{shape}", self.config.panes));
     }
     fn toggle_attributes(&mut self) {
         self.toggle_column(3);
@@ -562,7 +562,7 @@ impl Controller {
             .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
             .and_then(|h| shell::set_clipboard_text(h, &text));
         match result {
-            Ok(()) => self.message(format!("{} 件の{}をコピーしました", lines.len(), if names { "ファイル名" } else { "パス" })),
+            Ok(()) => self.message(format!("{}件の{}をコピーしました", lines.len(), if names { "ファイル名" } else { "パス" })),
             Err(e) => self.message(e),
         }
     }
@@ -588,7 +588,7 @@ impl Controller {
         *model.selection.borrow_mut() = selection;
         self.repaint(p);
         let label = if ext.is_empty() { "拡張子なし".to_string() } else { format!(".{ext}") };
-        self.message(format!("{label} を {count} 件選択"));
+        self.message(format!("{label} を{count}件選択"));
     }
     /// The find bar for pane `p`, in `Finding::mode`.
     fn open_find(&mut self, p: usize, mode: i32) {
@@ -1172,9 +1172,9 @@ impl Controller {
             Some(limited) => {
                 let count = self.data(p).rows.len();
                 self.message(if limited {
-                    format!("検索: {text} … {} 件で打ち切りました（Esc で戻る）", finder::RESULT_LIMIT)
+                    format!("検索: {text} … {}件で打ち切りました（Esc で戻る）", finder::RESULT_LIMIT)
                 } else {
-                    format!("検索: {text} … {count} 件（Esc で戻る）")
+                    format!("検索: {text} … {count}件（Esc で戻る）")
                 });
                 // The final sort; its reply ends the busy state.
                 self.rearrange(p);
@@ -1340,7 +1340,7 @@ impl Controller {
         let panes = if self.config.agent_panes { " + ほかのペイン" } else { "" };
         let access = match self.config.agent_access {
             agent::Access::Folder => format!("書き込み: 表示中のフォルダ以下{panes} · ネット遮断"),
-            agent::Access::Extra => format!("書き込み: 表示中のフォルダ以下{panes} + 追加 {} 件 · ネット遮断", self.config.agent_folders.len()),
+            agent::Access::Extra => format!("書き込み: 表示中のフォルダ以下{panes} + 追加{}件 · ネット遮断", self.config.agent_folders.len()),
             agent::Access::Full => "制限なし（サンドボックス解除）".to_string(),
         };
         let cli = match &self.agent.version {
@@ -1351,7 +1351,7 @@ impl Controller {
         ui.set_agent_cli(cli.into());
         // Closed panel: the history line shows that a run goes on.
         let badge = match &self.agent.run {
-            Some(_) if !ui.get_agent_open() => format!("エージェント実行中 {} 秒", self.agent.started.elapsed().as_secs()),
+            Some(_) if !ui.get_agent_open() => format!("エージェント実行中{}秒", self.agent.started.elapsed().as_secs()),
             _ => String::new(),
         };
         ui.set_agent_badge(badge.into());
@@ -1359,7 +1359,7 @@ impl Controller {
         ui.set_agent_danger(self.config.agent_access == agent::Access::Full);
         ui.set_agent_running(self.agent.run.is_some());
         let status = match &self.agent.run {
-            Some(_) => format!("{} 秒  {}", self.agent.started.elapsed().as_secs(), self.agent.status),
+            Some(_) => format!("{}秒  {}", self.agent.started.elapsed().as_secs(), self.agent.status),
             None => self.agent.status.clone(),
         };
         ui.set_agent_status(status.into());
@@ -1471,7 +1471,7 @@ impl Controller {
         let passed = match (cursor, selection.first()) {
             (true, Some(item)) => format!("カーソル: {}", listing::visible(&item.file_name().map_or_else(|| display(item), |n| n.to_string_lossy().into_owned()))),
             (true, None) => "選択なし".to_string(),
-            (false, _) => format!("選択 {} 件", selection.len()),
+            (false, _) => format!("選択{}件", selection.len()),
         };
         // The other shown panes, for "the other pane" in a request (writable when allowed).
         let mut panes: Vec<PathBuf> = Vec::new();
@@ -1484,7 +1484,7 @@ impl Controller {
             }
         }
         let panes_writable = self.config.agent_panes && self.config.agent_access != agent::Access::Full;
-        let others = if panes_writable && !panes.is_empty() { format!("  ·  ほかのペイン {} 件にも書き込み可", panes.len()) } else { String::new() };
+        let others = if panes_writable && !panes.is_empty() { format!("  ·  ほかのペイン{}件にも書き込み可", panes.len()) } else { String::new() };
         self.agent_push(1, format!("{}  ·  {passed}{others}", shown(&cwd)));
         self.agent_push(0, format!("› {text}"));
         if self.agent.history.last().is_none_or(|last| last != text) {
@@ -1559,7 +1559,7 @@ impl Controller {
                 let seconds = self.agent.started.elapsed().as_secs();
                 match outcome {
                     agent::Outcome::Done => {
-                        self.agent.status = format!("完了（{seconds} 秒）");
+                        self.agent.status = format!("完了（{seconds}秒）");
                         self.message("エージェント: 完了しました");
                     }
                     agent::Outcome::Cancelled => {
@@ -1605,7 +1605,7 @@ impl Controller {
                     finder::Event::Overflow => {
                         current.overflow = true;
                         self.message(format!(
-                            "{} 件を超えるため入力中の絞り込みを止めました。Enter で検索します",
+                            "{}件を超えるため入力中の絞り込みを止めました。Enter で検索します",
                             self.index_limit
                         ));
                     }
@@ -1636,7 +1636,7 @@ impl Controller {
                         } else if outcome.missed {
                             format!("{verb}できなかった項目があります → {}", shown(&dir))
                         } else if outcome.inside > 0 {
-                            format!("フォルダをその中へは貼り付けられないため {} 件をスキップしました → {}", outcome.inside, shown(&dir))
+                            format!("フォルダをその中へは貼り付けられないため{}件をスキップしました → {}", outcome.inside, shown(&dir))
                         } else if outcome.skipped {
                             format!("{verb}しました（一部スキップ） → {}", shown(&dir))
                         } else {
@@ -2320,7 +2320,7 @@ impl Controller {
             .and_then(|h| shell::set_clipboard(h, &paths, cut));
         match result {
             Ok(()) => self.message(format!(
-                "{} 件を{}しました",
+                "{}件を{}しました",
                 paths.len(),
                 if cut { "切り取り" } else { "コピー" }
             )),

@@ -171,7 +171,7 @@ pub fn format_date(modified: SystemTime, today: NaiveDate) -> (String, String) {
     let days = (today - local.date_naive()).num_days();
     let date = match days {
         0 => "今日".to_string(),
-        1..=6 => format!("{days} 日以前"),
+        1..=6 => format!("{days}日以前"),
         _ => local.format("%Y-%m-%d").to_string(),
     };
     (date, local.format("%H:%M").to_string())
@@ -578,7 +578,7 @@ mod tests {
             SystemTime::from(t.and_local_timezone(Local).unwrap())
         };
         assert_eq!(format_date(at(19), today), ("今日".into(), "09:05".into()));
-        assert_eq!(format_date(at(15), today).0, "4 日以前");
+        assert_eq!(format_date(at(15), today).0, "4日以前");
         assert_eq!(format_date(at(1), today).0, "2026-10-01");
     }
     #[test]
