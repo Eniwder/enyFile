@@ -97,6 +97,7 @@ enum Reply {
     /// The properties dialog `u64` (Alt+Enter): the item read, then its SHA-256.
     Props(u64, Result<props::Info, String>),
     Hash(u64, props::Hashing),
+    Usage(u64, props::Measuring),
 }
 /// `Reply::Picked` for 設定 > エージェント's folder list rather than a place.
 const AGENT_FOLDER: usize = 100;
@@ -1705,6 +1706,7 @@ impl Controller {
             }
             Reply::Props(id, info) => self.props_info(id, info),
             Reply::Hash(id, hashing) => self.props_hash(id, hashing),
+            Reply::Usage(id, measuring) => self.props_usage(id, measuring),
         }
     }
     fn complete(&mut self, p: usize, generation: u64, result: Result<Arc<Snapshot>, String>) {

@@ -1,23 +1,27 @@
 //! Alt+Enter: enyFile's own properties of one file or folder: times and attributes, where a
 //! download came from (the Zone.Identifier stream browsers attach), alternate data streams
 //! and the SHA-256. What comes from the file is only shown as text; no URL is opened.
+//! A folder's size is added up on a worker without entering junctions and symbolic links.
 //! SHA-256 is Windows' own (CNG, bcrypt.dll), so no hashing crate to keep up to date.
 use super::*;
 use std::{
+    ffi::OsString,
     io::Read,
     os::windows::{
-        ffi::OsStrExt,
+        ffi::{OsStrExt, OsStringExt},
         fs::{MetadataExt, OpenOptionsExt},
+        io::AsRawHandle,
     },
     sync::atomic::{AtomicBool, Ordering},
     time::SystemTime,
 };
 use windows::{
     Win32::{
+        Foundation::HANDLE,
         Security::Cryptography::{BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData},
         Storage::FileSystem::{
-            FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO,
-            VerQueryValueW, WIN32_FIND_STREAM_DATA,
+            FILE_FULL_DIR_INFO, FileFullDirectoryInfo, FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
+            GetFileInformationByHandleEx, GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW, WIN32_FIND_STREAM_DATA,
         },
     },
     core::PCWSTR,
@@ -45,6 +49,22 @@ pub struct Zone {
     pub host: Option<String>,
     pub referrer: Option<String>,
 }
+/// A folder's tree, added up by `usage`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Usage {
+    pub size: u64,
+    pub files: u64,
+    pub folders: u64,
+    /// Junctions, symbolic links and mount points: counted, not entered.
+    pub links: u64,
+    /// Folders below the top one that could not be listed (access denied, gone).
+    pub unreadable: u64,
+}
+pub enum Measuring {
+    Progress(Usage),
+    Done(Usage),
+    Failed(String),
+}
 pub enum Hashing {
     Progress(u64, u64),
     Done(String),
@@ -54,6 +74,12 @@ pub enum Hashing {
 const ZONE_STREAM: &str = "Zone.Identifier";
 /// Attribute bits that mean the data is not on this machine: reading it downloads it.
 const REMOTE: u32 = 0x1000 | 0x40000 | 0x400000;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+/// IsReparseTagNameSurrogate: the reparse point stands for another name (junction, symbolic
+/// link, mount point). Cloud placeholders (OneDrive) are reparse points too but hold real data.
+const NAME_SURROGATE: u32 = 0x2000_0000;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
 pub fn read(path: &Path) -> Result<Info, String> {
     let own = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
@@ -79,6 +105,68 @@ pub fn read(path: &Path) -> Result<Info, String> {
         zone,
         streams,
     })
+}
+
+/// Adds up the files below `root`; Ok(None) when cancelled. Folders that stand for another
+/// name are counted in `links` and not entered: Explorer goes through them, which counts the
+/// same data twice (or another drive, or loops). The directory listing carries each entry's
+/// size, so no file is opened. `progress` gets the totals after each batch of entries and
+/// stops the work by returning false.
+pub fn usage(root: &Path, cancel: &AtomicBool, mut progress: impl FnMut(&Usage) -> bool) -> Result<Option<Usage>, String> {
+    const FILE_LIST_DIRECTORY: u32 = 1;
+    let mut total = Usage::default();
+    let mut pending = vec![root.to_path_buf()];
+    // u64s: the entries in the buffer are 8-byte aligned.
+    let mut buffer = vec![0u64; 8192];
+    while let Some(dir) = pending.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let opened = std::fs::OpenOptions::new().access_mode(FILE_LIST_DIRECTORY).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(&dir);
+        let folder = match opened {
+            Ok(folder) => folder,
+            Err(e) if dir == root => return Err(e.to_string()),
+            Err(_) => {
+                total.unreadable += 1;
+                continue;
+            }
+        };
+        // Ends with ERROR_NO_MORE_FILES; an error midway keeps what was read.
+        while unsafe {
+            GetFileInformationByHandleEx(HANDLE(folder.as_raw_handle()), FileFullDirectoryInfo, buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32)
+        }
+        .is_ok()
+        {
+            let base = buffer.as_ptr().cast::<u8>();
+            let mut offset = 0;
+            loop {
+                let entry = unsafe { base.add(offset) }.cast::<FILE_FULL_DIR_INFO>();
+                let (next, attributes, tag, size, name) = unsafe {
+                    let name = std::slice::from_raw_parts(std::ptr::addr_of!((*entry).FileName).cast::<u16>(), (*entry).FileNameLength as usize / 2);
+                    // EaSize holds the reparse tag when the entry is a reparse point.
+                    ((*entry).NextEntryOffset, (*entry).FileAttributes, (*entry).EaSize, (*entry).EndOfFile, name)
+                };
+                if name == [b'.' as u16] || name == [b'.' as u16; 2] {
+                } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag & NAME_SURROGATE != 0 {
+                    total.links += 1;
+                } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                    total.folders += 1;
+                    pending.push(dir.join(OsString::from_wide(name)));
+                } else {
+                    total.files += 1;
+                    total.size += size.max(0) as u64;
+                }
+                if next == 0 {
+                    break;
+                }
+                offset += next as usize;
+            }
+            if cancel.load(Ordering::Relaxed) || !progress(&total) {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(total))
 }
 
 fn version(path: &Path) -> Option<String> {
@@ -231,6 +319,7 @@ pub(super) struct Props {
     kind: String,
     info: Option<Result<Info, String>>,
     hash: HashState,
+    usage: UsageState,
     cancel: Arc<AtomicBool>,
 }
 enum HashState {
@@ -240,6 +329,14 @@ enum HashState {
     Waiting,
     Running(u64, u64),
     Done(String),
+    Failed(String),
+}
+
+enum UsageState {
+    /// Files, or not read yet.
+    None,
+    Running(Usage),
+    Done(Usage),
     Failed(String),
 }
 
@@ -313,11 +410,13 @@ impl Controller {
             kind: entry.type_name.to_string(),
             info: None,
             hash: HashState::None,
+            usage: UsageState::None,
             cancel: cancel.clone(),
         });
         let path = path.clone();
         std::thread::spawn(move || {
             let info = read(&path);
+            let directory = matches!(&info, Ok(info) if info.directory);
             let start = match &info {
                 Ok(info) if !info.directory && info.attributes & REMOTE == 0 => Some(info.size),
                 _ => None,
@@ -325,7 +424,9 @@ impl Controller {
             if !post(Reply::Props(id, info)) {
                 return;
             }
-            if let Some(total) = start {
+            if directory {
+                usage_job(id, &path, &cancel);
+            } else if let Some(total) = start {
                 hash_job(id, &path, total, &cancel);
             }
         });
@@ -357,6 +458,9 @@ impl Controller {
             Ok(info) => HashState::Running(0, info.size),
             Err(_) => HashState::None,
         };
+        if matches!(&info, Ok(info) if info.directory) {
+            props.usage = UsageState::Running(Usage::default());
+        }
         props.info = Some(info);
         self.props_rows();
     }
@@ -366,6 +470,15 @@ impl Controller {
             Hashing::Progress(done, total) => HashState::Running(done, total),
             Hashing::Done(hex) => HashState::Done(hex),
             Hashing::Failed(e) => HashState::Failed(e),
+        };
+        self.props_rows();
+    }
+    pub(super) fn props_usage(&mut self, id: u64, measuring: Measuring) {
+        let Some(props) = self.props.as_mut().filter(|p| p.id == id) else { return };
+        props.usage = match measuring {
+            Measuring::Progress(usage) => UsageState::Running(usage),
+            Measuring::Done(usage) => UsageState::Done(usage),
+            Measuring::Failed(e) => UsageState::Failed(e),
         };
         self.props_rows();
     }
@@ -435,7 +548,30 @@ impl Controller {
             Some(Ok(info)) => info,
         };
         if !info.directory {
-            rows.push(row("サイズ", format!("{}（{} バイト）", listing::format_size(info.size), grouped(info.size))));
+            rows.push(row("サイズ", bytes(info.size)));
+        }
+        match &props.usage {
+            UsageState::None => {}
+            UsageState::Running(u) => {
+                let dim = |label: &str, value: String| PropRow { dim: true, ..row(label, value) };
+                rows.push(dim("サイズ", format!("計算中… {}", bytes(u.size))));
+                rows.push(dim("内容", format!("ファイル {}、フォルダー {}", grouped(u.files), grouped(u.folders))));
+            }
+            UsageState::Done(u) => {
+                rows.push(row("サイズ", bytes(u.size)));
+                rows.push(row("内容", format!("ファイル {}、フォルダー {}", grouped(u.files), grouped(u.folders))));
+                let mut skipped = Vec::new();
+                if u.links > 0 {
+                    skipped.push(format!("リンク {} 件（ジャンクション・シンボリックリンク。中は数えない）", grouped(u.links)));
+                }
+                if u.unreadable > 0 {
+                    skipped.push(format!("読めないフォルダー {} 件", grouped(u.unreadable)));
+                }
+                if !skipped.is_empty() {
+                    rows.push(row("除外", skipped.join("、")));
+                }
+            }
+            UsageState::Failed(e) => rows.push(PropRow { dim: true, ..row("サイズ", format!("計算できません: {e}")) }),
         }
         rows.push(row("更新日時", time(info.modified)));
         rows.push(row("作成日時", time(info.created)));
@@ -503,6 +639,24 @@ fn hash_job(id: u64, path: &Path, total: u64, cancel: &AtomicBool) {
     post(Reply::Hash(id, hashing));
 }
 
+/// Like `hash_job`, for a folder's size.
+fn usage_job(id: u64, path: &Path, cancel: &AtomicBool) {
+    let mut last = Instant::now();
+    let result = usage(path, cancel, |usage| {
+        if last.elapsed() < Duration::from_millis(100) {
+            return true;
+        }
+        last = Instant::now();
+        post(Reply::Usage(id, Measuring::Progress(*usage)))
+    });
+    let measuring = match result {
+        Ok(Some(usage)) => Measuring::Done(usage),
+        Ok(None) => return,
+        Err(e) => Measuring::Failed(e),
+    };
+    post(Reply::Usage(id, measuring));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +715,25 @@ mod tests {
         assert_eq!(info.streams, vec![("Zone.Identifier".to_string(), zone.len() as u64)]);
         assert_eq!(info.zone.unwrap().host.as_deref(), Some("https://example.com/a.zip"));
         assert!(read(&dir).unwrap().streams.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn folder_usage_skips_links() {
+        let dir = std::env::temp_dir().join(format!("enyfile-usage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(r"a\b")).unwrap();
+        std::fs::create_dir_all(dir.join("empty")).unwrap();
+        std::fs::write(dir.join("one.txt"), "12345").unwrap();
+        std::fs::write(dir.join(r"a\b\two.bin"), vec![7u8; 100_000]).unwrap();
+        // A junction back to the top folder: entering it would loop.
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(dir.join(r"a\loop")).arg(&dir).output().unwrap();
+        assert!(made.status.success());
+        let never = AtomicBool::new(false);
+        let found = usage(&dir, &never, |_| true).unwrap().unwrap();
+        assert_eq!((found.size, found.files, found.folders, found.links, found.unreadable), (100_005, 2, 3, 1, 0));
+        assert_eq!(usage(&dir, &AtomicBool::new(true), |_| true).unwrap(), None);
+        assert_eq!(usage(&dir, &never, |_| false).unwrap(), None);
+        assert!(usage(&dir.join("missing"), &never, |_| true).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]

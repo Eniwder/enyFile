@@ -1456,7 +1456,41 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(!ui.get_props_open() && c.borrow().props.is_none(), "the dialog closes")?;
                     s.pass("hidden bidi characters are marked; properties show the download source, streams and SHA-256");
                 }
-                71 => return Err("done".into()),
+                // Alt+Enter on a folder adds up its size on a worker, without entering a junction.
+                71 => {
+                    let folder = root.join("cmpL").join("sized");
+                    if !folder.exists() {
+                        std::fs::create_dir_all(folder.join("inner")).map_err(|e| e.to_string())?;
+                        std::fs::write(folder.join("inner").join("data.bin"), vec![1u8; 4321]).map_err(|e| e.to_string())?;
+                        std::process::Command::new("cmd")
+                            .args(["/c", "mklink", "/J"])
+                            .arg(folder.join("back"))
+                            .arg(root.join("cmpL"))
+                            .output()
+                            .map_err(|e| e.to_string())?;
+                    }
+                    if !idle(&c) || !names(&c, 0).contains(&"sized".to_string()) {
+                        return Ok(false);
+                    }
+                    let i = index(&c, 0, "sized")?;
+                    click(&ui, 0, i, false);
+                    fkey(&ui, 0, slint::platform::Key::Escape);
+                    let mut event = slint::language::KeyEvent::default();
+                    event.text = slint::platform::Key::Return.into();
+                    event.modifiers.alt = true;
+                    ui.invoke_key_event(0, event);
+                    expect(ui.get_props_open(), "Alt+Enter on a folder opens the properties")?;
+                }
+                72 => {
+                    let rows: Vec<(String, String, bool)> = ui.get_props_rows().iter().map(|r| (r.label.to_string(), r.value.to_string(), r.dim)).collect();
+                    let Some(skipped) = rows.iter().find(|(l, _, _)| l == "除外") else { return Ok(false) };
+                    expect(skipped.1.starts_with("リンク 1 件"), &format!("the junction is skipped: {rows:?}"))?;
+                    let value = |label: &str| rows.iter().find(|(l, _, _)| l == label).map(|(_, v, _)| v.clone()).unwrap_or_default();
+                    expect(value("サイズ") == listing::format_size(4321) && value("内容") == "ファイル 1、フォルダー 1", &format!("folder totals: {rows:?}"))?;
+                    ui.invoke_props_close();
+                    s.pass("folder properties add up the size, skipping junctions");
+                }
+                73 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)
