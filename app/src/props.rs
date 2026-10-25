@@ -339,7 +339,7 @@ fn grouped(n: u64) -> String {
 }
 /// `format_size` leaves small sizes without a unit (the list's size column).
 fn bytes(n: u64) -> String {
-    if n < 1000 { format!("{n} バイト") } else { listing::format_size(n) }
+    if n < 1000 { format!("{n} Byte") } else { listing::format_size(n) }
 }
 fn time(t: Option<SystemTime>) -> String {
     t.map_or_else(|| "—".into(), |t| chrono::DateTime::<chrono::Local>::from(t).format("%Y/%m/%d %H:%M:%S").to_string())
