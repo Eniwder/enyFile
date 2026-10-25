@@ -420,9 +420,10 @@ fn finish(op: &IFileOperation) -> Result<bool, String> {
 }
 
 /// Notes items the copy engine left out: an error the user skipped in its own dialog, which
-/// it does not count as aborting.
+/// it does not count as aborting. The callback runs before each item is deleted: Windows asks
+/// its own confirmation first, so the first call means the user said yes.
 #[windows::core::implement(IFileOperationProgressSink)]
-struct Missed(Arc<AtomicBool>);
+struct Missed(Arc<AtomicBool>, Option<Box<dyn Fn()>>);
 impl Missed {
     fn note(&self, hr: HRESULT) -> windows::core::Result<()> {
         if hr.is_err() || hr == COPYENGINE_S_USER_IGNORED {
@@ -458,6 +459,9 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
         self.note(hr)
     }
     fn PreDeleteItem(&self, _: u32, _: Item) -> windows::core::Result<()> {
+        if let Some(deleting) = &self.1 {
+            deleting();
+        }
         Ok(())
     }
     fn PostDeleteItem(&self, _: u32, _: Item, hr: HRESULT, _: Item) -> windows::core::Result<()> {
@@ -690,7 +694,7 @@ fn shell_ops<'a>(
         FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_NOCONFIRMMKDIR.0,
     ))?;
     let missed = Arc::new(AtomicBool::new(false));
-    let sink: IFileOperationProgressSink = Missed(missed.clone()).into();
+    let sink: IFileOperationProgressSink = Missed(missed.clone(), None).into();
     let mut folders = std::collections::HashMap::new();
     unsafe {
         op.Advise(&sink).map_err(|e| e.to_string())?;
@@ -774,8 +778,9 @@ pub fn rename(path: &Path, name: &str) -> Result<(), String> {
     }
 }
 
-/// Recycle Bin by default; `permanent` matches Shift+Delete. Windows shows its own confirmation.
-pub fn delete(paths: &[PathBuf], permanent: bool) -> Result<bool, String> {
+/// Recycle Bin by default; `permanent` matches Shift+Delete. Windows shows its own confirmation;
+/// `deleting` is called once it is answered yes and the first item is about to go.
+pub fn delete(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + 'static) -> Result<bool, String> {
     let _ole = Apartment::new()?;
     let flags = if permanent {
         FOF_WANTNUKEWARNING
@@ -783,7 +788,15 @@ pub fn delete(paths: &[PathBuf], permanent: bool) -> Result<bool, String> {
         FILEOPERATION_FLAGS(FOF_ALLOWUNDO.0 | FOFX_RECYCLEONDELETE.0)
     };
     let op = operation(flags)?;
+    let once = std::cell::Cell::new(false);
+    let deleting = move || {
+        if !once.replace(true) {
+            deleting();
+        }
+    };
+    let sink: IFileOperationProgressSink = Missed(Arc::new(AtomicBool::new(false)), Some(Box::new(deleting))).into();
     unsafe {
+        op.Advise(&sink).map_err(|e| e.to_string())?;
         for path in paths {
             op.DeleteItem(&item(path)?, None)
                 .map_err(|e| e.to_string())?;
@@ -1208,7 +1221,7 @@ mod tests {
             std::fs::File::options().read(true).share_mode(0).open(root.join(r"src\locked.txt")).unwrap()
         };
         let missed = Arc::new(AtomicBool::new(false));
-        let sink: IFileOperationProgressSink = Missed(missed.clone()).into();
+        let sink: IFileOperationProgressSink = Missed(missed.clone(), None).into();
         let op = operation(FILEOPERATION_FLAGS(FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0)).unwrap();
         unsafe {
             op.Advise(&sink).unwrap();

@@ -83,7 +83,10 @@ enum Reply {
     Changed(usize, PathBuf),
     Pasted(usize, PathBuf, Positions, Vec<PathBuf>, Result<PasteOutcome, String>),
     Ask(usize, paste::Question, AnswerTx),
-    Deleted(Result<bool, String>),
+    /// A delete's confirmation was answered yes (or there was none).
+    Deleting,
+    /// Whether `Deleting` came first.
+    Deleted(Result<bool, String>, bool),
     Opened(Result<(), String>),
     /// Folder chosen in the settings dialog for place `usize`.
     Picked(usize, PathBuf),
@@ -352,6 +355,8 @@ struct Controller {
     panes: [Pane; 4],
     active: usize,
     operations: usize,
+    /// Deletes whose Windows confirmation is not answered yet: pane keys wait.
+    confirming: usize,
     /// Conflict questions from paste workers; the front one is on screen.
     asking: VecDeque<(usize, paste::Question, AnswerTx)>,
     config: config::Config,
@@ -1645,8 +1650,12 @@ impl Controller {
                     self.navigate(p, dir, Mode::Pasted(before, Arc::new(targets)));
                 }
             }
-            Reply::Deleted(result) => {
+            Reply::Deleting => self.confirming -= 1,
+            Reply::Deleted(result, answered) => {
                 self.operations -= 1;
+                if !answered {
+                    self.confirming -= 1;
+                }
                 match result {
                     Ok(false) => self.message("削除しました"),
                     Ok(true) => self.message("削除は中止またはスキップを含みます"),
@@ -2418,10 +2427,24 @@ impl Controller {
             return;
         }
         self.operations += 1;
-        std::thread::spawn(move || post(Reply::Deleted(shell::delete(&paths, permanent))));
+        self.confirming += 1;
+        std::thread::spawn(move || {
+            let answered = Rc::new(Cell::new(false));
+            let yes = answered.clone();
+            let result = shell::delete(&paths, permanent, move || {
+                yes.set(true);
+                post(Reply::Deleting);
+            });
+            post(Reply::Deleted(result, answered.get()))
+        });
     }
     fn key(&mut self, p: usize, event: slint::language::KeyEvent) -> bool {
         use slint::platform::Key;
+        // Windows' confirmation takes a moment to appear: keys meant for it must not move the
+        // cursor away from what is being deleted.
+        if self.confirming > 0 {
+            return true;
+        }
         self.active(p);
         let data = self.data(p);
         let is = |k: Key| event.text == slint::SharedString::from(k);
@@ -3003,6 +3026,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         panes,
         active: 1,
         operations: 0,
+        confirming: 0,
         asking: VecDeque::new(),
         config,
         settings: Default::default(),
