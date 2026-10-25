@@ -47,9 +47,15 @@ fn etc(cf: u32) -> FORMATETC {
 fn dword(data: &IDataObject, cf: u32) -> Option<u32> {
     unsafe {
         let mut medium = data.GetData(&etc(cf)).ok()?;
-        let ptr = GlobalLock(medium.u.hGlobal);
-        let value = (!ptr.is_null()).then(|| *ptr.cast::<u32>());
-        let _ = GlobalUnlock(medium.u.hGlobal);
+        let value = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
+            let h = medium.u.hGlobal;
+            let ptr = GlobalLock(h);
+            let value = (!ptr.is_null() && GlobalSize(h) >= 4).then(|| u32::from_le_bytes(*ptr.cast::<[u8; 4]>()));
+            let _ = GlobalUnlock(h);
+            value
+        } else {
+            None
+        };
         ReleaseStgMedium(&mut medium);
         value
     }
@@ -84,7 +90,12 @@ fn main() -> windows::core::Result<()> {
                 let data: IDataObject = item.BindToHandler(None, &BHID_DataObject)?;
                 let effect: u32 = if mode == "cut" { 2 } else { 5 };
                 let h = GlobalAlloc(GMEM_MOVEABLE, 4)?;
-                *GlobalLock(h).cast::<u32>() = effect;
+                let ptr = GlobalLock(h);
+                if ptr.is_null() {
+                    let _ = windows::Win32::Foundation::GlobalFree(Some(h));
+                    return Err(windows::core::Error::from_thread());
+                }
+                *ptr.cast::<[u8; 4]>() = effect.to_le_bytes();
                 let _ = GlobalUnlock(h);
                 let medium = STGMEDIUM {
                     tymed: TYMED_HGLOBAL.0 as u32,
