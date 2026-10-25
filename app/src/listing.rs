@@ -90,7 +90,7 @@ pub fn entry(dir: &Path, raw: Raw) -> Entry {
     let type_icon = crate::icons::type_key(&ext, directory);
     crate::icons::ensure_type(&type_icon, directory);
     let path = Arc::new(dir.join(&raw.name));
-    let icon = if !directory && crate::icons::per_file(&ext) {
+    let icon = if (!directory && crate::icons::per_file(&ext)) || (directory && crate::shell::is_junction(&path)) {
         path.to_string_lossy().as_ref().into()
     } else {
         type_icon.clone()

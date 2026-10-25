@@ -340,6 +340,19 @@ mod tests {
             assert!((16..=256).contains(&pixels.width()) && pixels.width() == pixels.height(), "{probe}");
         }
     }
+    /// A shell junction (GodMode.{CLSID}) shows its virtual folder's icon, not the folder's.
+    #[test]
+    fn junction_has_its_own_icon() {
+        let _com = crate::shell::Apartment::new().unwrap();
+        let dir = std::env::temp_dir()
+            .join(format!("enyfile-junction-{}", std::process::id()))
+            .join("GodMode.{ED7BA470-8E54-465E-825C-99712043E01C}");
+        std::fs::create_dir_all(&dir).unwrap();
+        let junction = shell_icon(&dir.to_string_lossy(), FILE_FLAGS_AND_ATTRIBUTES(0), SHGFI_FLAGS(0)).unwrap();
+        let folder = shell_icon("folder", FILE_ATTRIBUTE_DIRECTORY, SHGFI_USEFILEATTRIBUTES).unwrap();
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        assert_ne!(junction.as_bytes(), folder.as_bytes());
+    }
     #[test]
     fn large_icons_are_area_averaged() {
         let px = |r: u8, a: u8| [r, 0, 0, a];
