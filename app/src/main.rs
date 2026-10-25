@@ -2299,7 +2299,10 @@ impl Controller {
         let Some(entry) = data.rows.get(index) else {
             return;
         };
-        if entry.directory {
+        if entry.directory && shell::is_junction(&entry.path) {
+            let path = entry.path.as_ref().clone();
+            std::thread::spawn(move || post(Reply::Opened(shell::explore(&path))));
+        } else if entry.directory {
             self.navigate(p, entry.path.as_ref().clone(), Mode::New(None));
         } else {
             let path = entry.path.as_ref().clone();

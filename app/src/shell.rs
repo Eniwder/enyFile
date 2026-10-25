@@ -812,6 +812,24 @@ pub fn delete(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + Send + S
 pub fn open(path: &Path) -> Result<(), String> {
     execute(w!("open"), path, path.parent())
 }
+/// A folder named "Name.{CLSID}" (e.g. GodMode) is a shell junction: Explorer shows the
+/// CLSID's virtual folder instead of the files inside, so only Explorer can open it.
+pub fn is_junction(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    let b = ext.as_bytes();
+    b.len() == 38
+        && b[0] == b'{'
+        && b[37] == b'}'
+        && b[1..37]
+            .iter()
+            .enumerate()
+            .all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { *c == b'-' } else { c.is_ascii_hexdigit() })
+}
 /// The "explore" verb, not "open": a folder's default verb may belong to another file manager.
 pub fn explore(dir: &Path) -> Result<(), String> {
     execute(w!("explore"), dir, None)
@@ -1024,6 +1042,15 @@ pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn junction_names() {
+        assert!(is_junction(Path::new(r"D:\ProgramFiles\GodMode.{ED7BA470-8E54-465E-825C-99712043E01C}")));
+        assert!(is_junction(Path::new(r"C:\x\.{ed7ba470-8e54-465e-825c-99712043e01c}")));
+        assert!(!is_junction(Path::new(r"C:\x\GodMode.{ED7BA470-8E54-465E-825C-99712043E01}")));
+        assert!(!is_junction(Path::new(r"C:\x\GodMode.{ED7BA470x8E54-465E-825C-99712043E01C}")));
+        assert!(!is_junction(Path::new(r"C:\x\{ED7BA470-8E54-465E-825C-99712043E01C}")));
+        assert!(!is_junction(Path::new(r"C:\x\notes.txt")));
+    }
     #[test]
     fn hdrop_layout_and_prefix_stripping() {
         let bytes = hdrop_bytes(&[
