@@ -2429,13 +2429,14 @@ impl Controller {
         self.operations += 1;
         self.confirming += 1;
         std::thread::spawn(move || {
-            let answered = Rc::new(Cell::new(false));
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let answered = Arc::new(AtomicBool::new(false));
             let yes = answered.clone();
             let result = shell::delete(&paths, permanent, move || {
-                yes.set(true);
+                yes.store(true, Ordering::Relaxed);
                 post(Reply::Deleting);
             });
-            post(Reply::Deleted(result, answered.get()))
+            post(Reply::Deleted(result, answered.load(Ordering::Relaxed)))
         });
     }
     fn key(&mut self, p: usize, event: slint::language::KeyEvent) -> bool {
