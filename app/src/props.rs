@@ -5,23 +5,20 @@
 //! SHA-256 is Windows' own (CNG, bcrypt.dll), so no hashing crate to keep up to date.
 use super::*;
 use std::{
-    ffi::OsString,
     io::Read,
     os::windows::{
-        ffi::{OsStrExt, OsStringExt},
+        ffi::OsStrExt,
         fs::{MetadataExt, OpenOptionsExt},
-        io::AsRawHandle,
     },
     sync::atomic::{AtomicBool, Ordering},
     time::SystemTime,
 };
 use windows::{
     Win32::{
-        Foundation::HANDLE,
         Security::Cryptography::{BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData},
         Storage::FileSystem::{
-            FILE_FULL_DIR_INFO, FileFullDirectoryInfo, FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
-            GetFileInformationByHandleEx, GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW, WIN32_FIND_STREAM_DATA,
+            FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetFileVersionInfoSizeW, GetFileVersionInfoW,
+            VS_FIXEDFILEINFO, VerQueryValueW, WIN32_FIND_STREAM_DATA,
         },
     },
     core::PCWSTR,
@@ -74,12 +71,6 @@ pub enum Hashing {
 const ZONE_STREAM: &str = "Zone.Identifier";
 /// Attribute bits that mean the data is not on this machine: reading it downloads it.
 const REMOTE: u32 = 0x1000 | 0x40000 | 0x400000;
-const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-/// IsReparseTagNameSurrogate: the reparse point stands for another name (junction, symbolic
-/// link, mount point). Cloud placeholders (OneDrive) are reparse points too but hold real data.
-const NAME_SURROGATE: u32 = 0x2000_0000;
-const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
 pub fn read(path: &Path) -> Result<Info, String> {
     let own = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
@@ -110,60 +101,44 @@ pub fn read(path: &Path) -> Result<Info, String> {
 /// Adds up the files below `root`; Ok(None) when cancelled. Folders that stand for another
 /// name are counted in `links` and not entered: Explorer goes through them, which counts the
 /// same data twice (or another drive, or loops). The directory listing carries each entry's
-/// size, so no file is opened. `progress` gets the totals after each batch of entries and
-/// stops the work by returning false.
+/// size and reparse tag (std reads both from the find data), so no file is opened.
+/// `progress` gets the totals after each batch of entries and stops the work by returning false.
 pub fn usage(root: &Path, cancel: &AtomicBool, mut progress: impl FnMut(&Usage) -> bool) -> Result<Option<Usage>, String> {
-    const FILE_LIST_DIRECTORY: u32 = 1;
+    const BATCH: usize = 512;
     let mut total = Usage::default();
     let mut pending = vec![root.to_path_buf()];
-    // u64s: the entries in the buffer are 8-byte aligned.
-    let mut buffer = vec![0u64; 8192];
     while let Some(dir) = pending.pop() {
         if cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let opened = std::fs::OpenOptions::new().access_mode(FILE_LIST_DIRECTORY).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(&dir);
-        let folder = match opened {
-            Ok(folder) => folder,
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
             Err(e) if dir == root => return Err(e.to_string()),
             Err(_) => {
                 total.unreadable += 1;
                 continue;
             }
         };
-        // Ends with ERROR_NO_MORE_FILES; an error midway keeps what was read.
-        while unsafe {
-            GetFileInformationByHandleEx(HANDLE(folder.as_raw_handle()), FileFullDirectoryInfo, buffer.as_mut_ptr().cast(), (buffer.len() * 8) as u32)
-        }
-        .is_ok()
-        {
-            let base = buffer.as_ptr().cast::<u8>();
-            let mut offset = 0;
-            loop {
-                let entry = unsafe { base.add(offset) }.cast::<FILE_FULL_DIR_INFO>();
-                let (next, attributes, tag, size, name) = unsafe {
-                    let name = std::slice::from_raw_parts(std::ptr::addr_of!((*entry).FileName).cast::<u16>(), (*entry).FileNameLength as usize / 2);
-                    // EaSize holds the reparse tag when the entry is a reparse point.
-                    ((*entry).NextEntryOffset, (*entry).FileAttributes, (*entry).EaSize, (*entry).EndOfFile, name)
-                };
-                if name == [b'.' as u16] || name == [b'.' as u16; 2] {
-                } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag & NAME_SURROGATE != 0 {
-                    total.links += 1;
-                } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                    total.folders += 1;
-                    pending.push(dir.join(OsString::from_wide(name)));
-                } else {
-                    total.files += 1;
-                    total.size += size.max(0) as u64;
-                }
-                if next == 0 {
-                    break;
-                }
-                offset += next as usize;
+        // An error midway keeps what was read.
+        for (n, entry) in entries.map_while(Result::ok).enumerate() {
+            let Ok(meta) = entry.metadata() else { continue };
+            // is_symlink: a reparse point with a name-surrogate tag (junction, symbolic link,
+            // mount point), not a cloud placeholder, which holds real data.
+            if meta.file_type().is_symlink() {
+                total.links += 1;
+            } else if meta.is_dir() {
+                total.folders += 1;
+                pending.push(entry.path());
+            } else {
+                total.files += 1;
+                total.size += meta.len();
             }
-            if cancel.load(Ordering::Relaxed) || !progress(&total) {
+            if (n + 1) % BATCH == 0 && (cancel.load(Ordering::Relaxed) || !progress(&total)) {
                 return Ok(None);
             }
+        }
+        if cancel.load(Ordering::Relaxed) || !progress(&total) {
+            return Ok(None);
         }
     }
     Ok(Some(total))
