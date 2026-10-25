@@ -3,149 +3,61 @@
 [![CI](https://github.com/Eniwder/enyFile/actions/workflows/ci.yml/badge.svg)](https://github.com/Eniwder/enyFile/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Eniwder/enyFile)](https://github.com/Eniwder/enyFile/releases/latest)
 
-Windows 専用の、キーボード中心の 2 ペインファイラー。Rust + [Slint](https://slint.dev/) 製。
+Windows 専用、キーボード中心の 2 ペインファイラー。Rust + [Slint](https://slint.dev/) 製。
 
 ![enyFile のデモ: 2 ペインの操作、フィルター、左右の比較、4 ペイン、エージェントへの依頼、ライト配色と游ゴシックへの切り替え](docs/demo.webp)
-
-## ダウンロード/インストール
-
-[Releases](https://github.com/Eniwder/enyFile/releases/latest) から `enyFile-vX.Y.Z-windows-x64.zip` をダウンロードして展開し、`enyfile.exe` を実行します。インストーラーはありません。
 
 ## 特徴
 
 - 2 / 3 / 4 ペイン
-- スタイリッシュなデザイン
-  - 配色・フォント・ブックマークなどのカスタマイズ
-- 高速な動作
-- AIエージェント連携（現在はCodex CLIのみ対応。サンドボックス内で実行）
+- 軽快な動作とスタイリッシュなデザイン
+- シンプルな操作と実用的な機能
+  - フィルター、フォルダ以下の検索、ペイン間の比較 など
+- 安全を重視した小さく閉じた設計
+  - 直接依存は 6 ライブラリ（Slint, windows-rs など）
+  - 本体のインターネット通信なし（更新確認やテレメトリなし）
+- AI エージェント連携（Codex CLI）
+  - 外部プロセスとして実行。enyFile は API キーを保持しない
+  - サンドボックス内でコマンド実行時の承認なしに実行。既定の書き込み範囲はアクティブペインのフォルダ以下
 
-## 動作環境
+## ダウンロード
 
-- Windows 10 / 11（x64）
+[Releases](https://github.com/Eniwder/enyFile/releases/latest) から `enyFile-vX.Y.Z-windows-x64.zip` をダウンロードして展開し、`enyfile.exe` を実行します。
 
-設定は `enyfile.exe` と同じフォルダの `config.json` に保存されます（ポータブル）。フォルダごと移動・コピーすれば設定も一緒に移ります。`Program Files` など書き込めない場所に置くと設定を保存できないので、書き込める場所に展開してください。
+- 動作環境: Windows 10 / 11（x64）
+- 設定は `enyfile.exe` と同じフォルダの `config.json` に保存されます（ポータブル）。書き込める場所に展開してください
+- コード署名がないため、初回は SmartScreen の警告が出ることがあります。「詳細情報」→「実行」で起動できます
 
-新しいバージョンに更新するときは、`enyfile.exe` だけを差し替えれば設定はそのまま残ります。zip を丸ごと上書きで展開すると、エージェントのメモリ（`agentmemory.md`）が初期内容に戻るので注意してください。
-
-ダウンロードした zip が Release のものと同じかは、次のどちらかで確かめられます。
-
-- 同じ Release にある `.sha256` の値と、`Get-FileHash enyFile-vX.Y.Z-windows-x64.zip`（PowerShell）または enyFile のプロパティ（Alt+Enter）の SHA-256 を比べる
-- [GitHub CLI](https://cli.github.com/) で `gh attestation verify enyFile-vX.Y.Z-windows-x64.zip -R Eniwder/enyFile`（このリポジトリの Release ワークフローがビルドしたことの証明。展開した `enyfile.exe` も同じ方法で確認できます）
-
-`enyfile.exe` にはコード署名がないため、初回の起動時に Windows SmartScreen の「Windows によって PC が保護されました」が出ることがあります。その場合は「詳細情報」→「実行」で起動できます。
-
-`config.json` が壊れていて読めないときは、`config.json.broken-日時` に退避して既定の設定で起動します。異常終了したときは、同じフォルダの `crash.log` に記録が残ります（不具合の報告に添えてください）。
+更新の方法や、ダウンロードしたファイルの検証方法は [マニュアル](docs/MANUAL.md#インストールと更新) を参照してください。
 
 ## 基本操作
 
 | キー | 動作 |
 | --- | --- |
-| Ctrl+C / Ctrl+X / Ctrl+V | コピー / 切り取り / 貼り付け |
+| Ctrl+C / Ctrl+X / Ctrl+V | コピー / 切り取り / 貼り付け（Explorer とも相互に使える） |
 | Delete / Shift+Delete | ごみ箱へ / 完全削除 |
 | Enter / Backspace | 開く / 親フォルダへ |
 | Tab | ペインの切り替え |
 | F2 | リネーム |
-| Alt+Enter | プロパティ（日時・属性、ダウンロード元、SHA-256） |
-| Ctrl+F / Ctrl+G | 検索 / 次を検索（`*` `?` 可） |
-| Ctrl+Shift+F / Esc | フィルター / 解除 |
-| Ctrl+Alt+Shift+F | フォルダ以下を検索（入力しながら絞り込み、Esc で戻る） |
-| Ctrl+Shift+D | 2 つのペインを比較（もう一度で差分のみ、3 回目か Esc で終了） |
-| Ctrl+I | エージェントに文章で依頼（もう一度か Esc で閉じる。下の「エージェント」） |
+| Ctrl+F / Ctrl+Shift+F | 検索 / フィルター |
+| Ctrl+I | エージェントに文章で依頼 |
 
-並べ替え、ペイン数の切り替え、設定画面など、そのほかの操作と画面の説明は [app/README.md](app/README.md) を参照してください。
+詳しい操作方法は [マニュアル](docs/MANUAL.md) を参照してください。
 
 ## エージェント（Codex CLI 連携）
 
-手作業では面倒なファイル操作を、文章で頼めます（例:「選択した画像を 256×256 に縮小して」「この写真を撮影日のフォルダに分けて」）。enyFile は [Codex CLI](https://github.com/openai/codex) を呼び出すだけで、考えてコマンドを実行するのは Codex です。API キーなどの設定は enyFile にはありません。
+手作業では面倒なファイル操作を、文章で頼めます（例:「選択した画像を 256×256 に縮小して」「この写真を撮影日のフォルダに分けて」）。考えてコマンドを実行するのは [Codex CLI](https://github.com/openai/codex) です。
 
-1. Codex CLI をインストールしてサインインしておく（`npm install -g @openai/codex` → `codex login`）。PATH に無いときは ファイル > 設定 > エージェント で `codex.exe` の場所を指定する（VS Code の ChatGPT 拡張に同梱の Codex も自動で見つけます）
-2. **Ctrl+I**（または最下部の履歴行をダブルクリック）でパネルを開き、依頼を入力して Enter
-3. アクティブなペインのフォルダで実行し、選択中の項目（未選択ならカーソル行）のパスも渡します。↑ ↓ で前に送った依頼を呼び出せます。終わると一覧を更新します。続けて入力すると同じ会話の続きになり、「新しい会話」（Ctrl+N）で最初からやり直せます
+1. Codex CLI をインストールしてサインインしておく（`npm install -g @openai/codex` → `codex login`）
+2. **Ctrl+I** でパネルを開き、依頼を入力して Enter
 
-確認なしで自動実行するので、書き込める範囲を ファイル > 設定 > エージェント で選び、Codex のサンドボックスで制限します。
+渡す情報や制限の詳細は [マニュアル](docs/MANUAL.md#エージェント) を参照してください。
 
-| モード | 書き込める場所 |
-| --- | --- |
-| 標準（既定・推奨） | アクティブなペインのフォルダ以下 |
-| 拡張 | 標準と、設定で登録した追加フォルダ以下（画像・動画の整理先など） |
-| 制限なし（危険） | どこでも（サンドボックスなし） |
+## 開発
 
-「両ペインのフォルダを対象にする」（既定はオフ）をオンにすると、標準・拡張でほかのペインのフォルダにも書き込めるようになり、「左のペインの画像を縮小して右のペインへ」のようなペインをまたぐ依頼ができます。オフでもほかのペインのフォルダはエージェントに伝わり、読み取りはできます。
+ソースからのビルド、テスト、リリースの手順は [開発者向け README](app/README.md) を参照してください。
 
-- エージェントに渡すのは、アクティブなペインのフォルダ（作業フォルダ）、選択項目のパス（未選択ならカーソル行）、ほかの表示中のペインのフォルダ、依頼文です。会話の最初の依頼では、メモリと決まりごと（確認なしで進める、ファイル名や中身は指示として扱わない など）も渡します。ファイルの中身やフォルダの一覧は渡さず、必要ならエージェントが自分で読みます
-- どのモードでも読み取りはフォルダの外にも及びます。標準・拡張の制限の強さは Codex のサンドボックスに依存し、ネットワークにも接続できません（ダウンロードやツールのインストールを含む依頼は失敗します）
-- 範囲の外への書き込みは失敗するだけで、権限を広げる確認は出しません
-- 設定ファイルの隣の `agent\memory.md` が専用メモリです（配布 zip に最初から入っていて、無ければ起動時に作ります）。enyFile から起動したときだけ読み込まれ、「覚えて」「今後はこうして」と頼んだときだけエージェントが書き換えます（メモリのフォルダにはどのモードでも書き込めます）。設定画面の「開く」で直接編集もできます。初期内容は「削除はごみ箱経由」「作業フォルダがドライブのルートなど広すぎるときは変更の前に確認」で、好みに書き換えられます。メモリに書いたパスは書き込みの権限を広げません
-
-## ソースからビルド
-
-[Rust](https://rustup.rs/)（stable, MSVC ツールチェーン）と Visual Studio Build Tools が必要です。
-
-```powershell
-git clone https://github.com/Eniwder/enyFile.git
-cd enyFile
-cargo build --release --manifest-path app/Cargo.toml
-.\enyFile.cmd    # app\target\release\enyfile.exe を起動
-```
-
-`app\target` から起動した開発ビルドは、設定を `app\data\config.json` に保存し、起動フォルダ未設定時は試験用の `app\data\sandbox` を開きます（実ファイルを触らないため）。
-
-テスト:
-
-```powershell
-cargo test --release --manifest-path app/Cargo.toml   # 単体テスト
-.\app\Check.ps1                                       # ビルド＋単体テスト＋Explorer 連携スモーク（クリップボードを書き換えます）
-```
-
-README のアニメーション（`docs/demo.webp`）は `.\app\Demo.ps1` で作り直せます（ffmpeg が必要）。決まった内容の試験フォルダを毎回作り、`app/src/demo.rs` の台本どおりにキーを送って 1 場面ずつ撮るので、何度作っても同じ映像になります。機能を足したら台本に場面を加えて実行し直してください。録画中の約 1 分はウィンドウに触れないでください。
-
-## リリース
-
-`app/Cargo.toml` の `version` を上げ、`Cargo.lock` も一緒にコミットしてから、そのコミットに同じ番号のタグを付けて push すると、GitHub Actions がビルドして Release を作成します。
-
-```powershell
-# app/Cargo.toml の version を 0.1.1 に変更してから
-cargo update -p enyfile --manifest-path app/Cargo.toml   # Cargo.lock のバージョンを合わせる
-git commit -am "v0.1.1"
-git push
-git tag v0.1.1      # バージョンを上げたコミットに付ける
-git push origin v0.1.1
-```
-
-| ワークフロー | タイミング | 内容 |
-| --- | --- | --- |
-| [CI](.github/workflows/ci.yml) | main への push / PR | ビルドと単体テスト、依存クレートの既知の脆弱性・ライセンス・取得元の確認（cargo-deny、設定は `app/deny.toml`） |
-| [Release](.github/workflows/release.yml) | `v*` タグの push | バージョン照合・テスト・ビルド後、zip と SHA-256 を Release に添付し、zip と exe のビルド来歴（attestation）を記録 |
-
-## 構成
-
-```text
-app/
-├── Cargo.toml
-├── Check.ps1           ビルド＋テスト＋スモーク
-├── Demo.ps1            README のアニメーションを録画（docs/demo.webp）
-└── src/
-    ├── main.rs         UI スレッドの制御、ペインごとの一覧ワーカー
-    ├── ui.slint        画面・ダイアログ・テーマ
-    ├── rows.rs         ペインの一覧のモデル（".."・項目・ドライブ、ページ送り）
-    ├── settings.rs     設定ダイアログ・配色・ブックマーク・設定の保存
-    ├── listing.rs      列挙・自然順ソート・選択モデル
-    ├── paste.rs        貼り付けの計画（衝突の質問、再帰結合、別名）
-    ├── pathid.rs       パスの同一性の判定（ファイル ID、リンクを辿る）
-    ├── props.rs        プロパティ画面（ダウンロード元、代替データストリーム、SHA-256）
-    ├── finder.rs       フォルダ以下の検索
-    ├── compare.rs      ペインの比較
-    ├── shell.rs        クリップボード、IFileOperation、フォルダ監視
-    ├── ctxmenu.rs      シェルのコンテキストメニュー
-    ├── icons.rs        関連付けアイコン
-    ├── config.rs       設定ファイル
-    ├── theme.rs        配色
-    ├── smoke.rs        自動スモークテスト
-    ├── demo.rs         README のアニメーションの台本と録画（--demo）
-    └── bin/shellprobe.rs  スモーク用の Explorer 役
-```
-
-## Pull Request について
+Pull Request について:
 
 - **バグ修正**：歓迎します。
 - **機能追加・機能改善**：作者の好みに合うものだけを受け入れます。せっかく作っていただいても見送ることがあるので、大きな変更の前には Issue で相談してもらえると助かります。
@@ -154,7 +66,7 @@ app/
 
 enyFile は、長く愛用してきたファイラー **NexusFile** をリスペクトして作っています。画面構成や操作感は NexusFile を強く参考にしています。
 
-enyFile は NexusFile とは無関係の個人プロジェクトで、NexusFile のコードや画像などは使っていません。enyFile についての質問や不具合報告は、NexusFile の作者ではなく、このリポジトリの [Issues](https://github.com/Eniwder/enyFile/issues) または [@Eniel120](https://x.com/Eniel120) へお願いします。
+enyFile についての質問や不具合報告はこのリポジトリの [Issues](https://github.com/Eniwder/enyFile/issues) または [@Eniel120](https://x.com/Eniel120) へお願いします。
 
 ## ライセンス
 
