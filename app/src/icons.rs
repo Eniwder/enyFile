@@ -377,9 +377,11 @@ mod tests {
             unsafe {
                 let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
                 let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-                link.SetPath(PCWSTR(wide(target).as_ptr())).unwrap();
+                let target = wide(target);
+                link.SetPath(PCWSTR(target.as_ptr())).unwrap();
                 if !icon.is_empty() {
-                    link.SetIconLocation(PCWSTR(wide(icon).as_ptr()), 0).unwrap();
+                    let icon = wide(icon);
+                    link.SetIconLocation(PCWSTR(icon.as_ptr()), 0).unwrap();
                 }
                 let file = path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
                 link.cast::<IPersistFile>().unwrap().Save(PCWSTR(file.as_ptr()), true).unwrap();

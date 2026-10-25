@@ -68,7 +68,8 @@ fn main() -> windows::core::Result<()> {
     let code = unsafe {
         match mode.as_str() {
             "paste" => {
-                let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide(&args[1]).as_ptr()), None)?;
+                let path = wide(&args[1]);
+                let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None)?;
                 let menu: IContextMenu = folder.BindToHandler(None, &BHID_SFUIObject)?;
                 let popup = CreatePopupMenu()?;
                 menu.QueryContextMenu(popup, 0, 1, 0x7fff, CMF_NORMAL).ok()?;
@@ -86,7 +87,8 @@ fn main() -> windows::core::Result<()> {
                 0
             }
             "copy" | "cut" => {
-                let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide(&args[1]).as_ptr()), None)?;
+                let path = wide(&args[1]);
+                let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None)?;
                 let data: IDataObject = item.BindToHandler(None, &BHID_DataObject)?;
                 let effect: u32 = if mode == "cut" { 2 } else { 5 };
                 let h = GlobalAlloc(GMEM_MOVEABLE, 4)?;

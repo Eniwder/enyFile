@@ -139,8 +139,9 @@ unsafe fn items_menu(paths: &[PathBuf]) -> windows::core::Result<IContextMenu> {
     unsafe { array.BindToHandler(None, &BHID_SFUIObject) }
 }
 unsafe fn background_menu(dir: &std::path::Path, hwnd: HWND) -> windows::core::Result<IContextMenu> {
+    let dir = wide(dir);
     unsafe {
-        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide(dir).as_ptr()), None)?;
+        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(dir.as_ptr()), None)?;
         let folder: IShellFolder = item.BindToHandler(None, &BHID_SFObject)?;
         folder.CreateViewObject(hwnd)
     }
