@@ -1481,10 +1481,12 @@ export component App inherits Window {
         { text: "エージェントに依頼 (Ctrl+I)", command: 51 },
         { text: "ここでターミナルを開く (Ctrl+@)", command: 41 },
         { text: "ここでエクスプローラーを開く", command: 43 },
+        { text: "ごみ箱を開く", command: 45 },
     ] : [
         { text: "ペインの比較 (Ctrl+Shift+D)", command: 40 },
         { text: "ここでターミナルを開く (Ctrl+@)", command: 41 },
         { text: "ここでエクスプローラーを開く", command: 43 },
+        { text: "ごみ箱を開く", command: 45 },
     ];
     property <[MenuItem]> shown-items: root.open-menu == 0 ? root.file-items : root.open-menu == 1 ? root.edit-items : root.open-menu == 2 ? root.view-items : root.tool-items;
     // Next item up (-1) or down (1), wrapping; separators are never next to each other.

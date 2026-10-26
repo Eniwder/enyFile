@@ -3289,6 +3289,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 42 => c.properties(p),
                 43 => c.open_explorer(p),
                 44 => c.windows_properties(p),
+                // Virtual, so Explorer shows it.
+                45 => {
+                    std::thread::spawn(|| post(Reply::Opened(shell::explore(Path::new("shell:RecycleBinFolder")))));
+                }
                 _ => {}
             }
         });
