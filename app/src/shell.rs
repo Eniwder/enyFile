@@ -834,6 +834,26 @@ pub fn is_junction(path: &Path) -> bool {
 pub fn explore(dir: &Path) -> Result<(), String> {
     execute(w!("explore"), dir, None)
 }
+/// A `shell:` name typed in the path bar (shell:Desktop, shell:Downloads, ...). Some(path):
+/// a folder with a path, for the pane. None: a virtual folder (Recycle Bin, This PC) that only
+/// Explorer can show, opened there. Anything else is refused: `shell:AppsFolder\<app>` is an
+/// app, and opening it would start it.
+pub fn shell_folder(name: &str) -> Result<Option<PathBuf>, String> {
+    let _ole = Apartment::new()?;
+    let item = item(Path::new(name)).map_err(|_| format!("見つかりません: {name}"))?;
+    let not_folder = || format!("フォルダではありません: {name}");
+    if let Ok(path) = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) } {
+        let plain = unsafe { path.to_string() }.ok().map(PathBuf::from);
+        unsafe { CoTaskMemFree(Some(path.0 as *const _)) };
+        if let Some(path) = plain {
+            return if path.is_dir() { Ok(Some(path)) } else { Err(not_folder()) };
+        }
+    }
+    // No path: only a virtual folder binds as one.
+    unsafe { item.BindToHandler::<_, IShellFolder>(None, &BHID_SFObject) }.map_err(|_| not_folder())?;
+    explore(Path::new(name))?;
+    Ok(None)
+}
 fn execute(verb: PCWSTR, path: &Path, folder: Option<&Path>) -> Result<(), String> {
     let folder = folder.map(wide).transpose()?;
     let path = wide(path)?;
@@ -1042,6 +1062,17 @@ pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shell_names() {
+        let windows = system_dir().parent().unwrap().to_string_lossy().to_lowercase();
+        for name in ["shell:Windows", "SHELL:windows"] {
+            let path = shell_folder(name).unwrap().unwrap();
+            assert_eq!(path.to_string_lossy().to_lowercase(), windows, "{name}");
+        }
+        // An app is not a folder: refused, never started.
+        assert!(shell_folder(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App").is_err());
+        assert!(shell_folder("shell:NoSuchFolder").is_err());
+    }
     #[test]
     fn junction_names() {
         assert!(is_junction(Path::new(r"D:\ProgramFiles\GodMode.{ED7BA470-8E54-465E-825C-99712043E01C}")));

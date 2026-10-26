@@ -88,6 +88,8 @@ enum Reply {
     /// Whether `Deleting` came first.
     Deleted(Result<bool, String>, bool),
     Opened(Result<(), String>),
+    /// A `shell:` name typed in pane `usize`: its folder, or None when Explorer showed it.
+    ShellFolder(usize, Result<Option<PathBuf>, String>),
     /// Folder chosen in the settings dialog for place `usize`.
     Picked(usize, PathBuf),
     /// From the recursive search walk `u64` of a pane.
@@ -876,7 +878,15 @@ impl Controller {
     }
     fn typed_path(&mut self, p: usize, text: String) {
         self.active(p);
-        let path = PathBuf::from(text.trim().trim_matches('"'));
+        let text = text.trim().trim_matches('"');
+        // shell:Desktop and the like: the Shell resolves them, off the UI thread (a known
+        // folder can be redirected to the network).
+        if text.get(..6).is_some_and(|s| s.eq_ignore_ascii_case("shell:")) {
+            let name = text.to_string();
+            std::thread::spawn(move || post(Reply::ShellFolder(p, shell::shell_folder(&name))));
+            return;
+        }
+        let path = PathBuf::from(text);
         let path = if path.is_absolute() {
             path
         } else {
@@ -1713,6 +1723,11 @@ impl Controller {
                     self.message(format!("開けません: {e}"));
                 }
             }
+            Reply::ShellFolder(p, result) => match result {
+                Ok(Some(path)) => self.navigate(p, path, Mode::New(None)),
+                Ok(None) => {}
+                Err(e) => self.message(format!("開けません: {e}")),
+            },
             Reply::Props(id, info) => self.props_info(id, info),
             Reply::Hash(id, hashing) => self.props_hash(id, hashing),
             Reply::Usage(id, measuring) => self.props_usage(id, measuring),
