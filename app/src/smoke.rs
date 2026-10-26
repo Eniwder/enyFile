@@ -142,6 +142,8 @@ struct State {
     homed: bool,
     /// When the slow fake agent was cancelled.
     cancelled: Option<Instant>,
+    /// When step 64 filled the agent log.
+    filled: Option<Instant>,
 }
 /// A stand-in for `codex exec --json`: records its arguments and prompt, makes a file in its
 /// working folder and answers with Codex's events. `slow` waits in a grandchild first.
@@ -205,6 +207,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
         sort: (0, false),
         homed: false,
         cancelled: None,
+        filled: None,
     });
     let finish = move |state: &mut State, error: Option<String>| {
         if let Some(mut probe) = state.probe.take() {
@@ -1322,11 +1325,22 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(agent_texts(&c).iter().any(|l| l.contains("カーソル: size.txt")), "the log says the cursor item was passed")?;
                     expect(agent_texts(&c).iter().any(|l| l.ends_with("ほかのペイン1件にも書き込み可")), "the log says the other pane may be written")?;
                     s.pass("follow-up continues the conversation with the same sandbox; cursor item when nothing is selected; ↑ ↓ recall");
-                    // The wheel over the log goes back through the conversation (and stays).
                     for i in 0..80 {
                         c.borrow().agent_push(1, format!("filler {i}"));
                     }
+                    // A long reply in paragraphs wraps over many lines; its layout settles over
+                    // the next frames (step 65 checks that its last line shows).
+                    let paragraph = "長い返答の段落です。折り返して何行にもなります。".repeat(12);
+                    c.borrow().agent_push(2, format!("{paragraph}\n\n{paragraph}\n\n{paragraph}\n\nlast line"));                    s.filled = Some(Instant::now());
+                }
+                65 => {
+                    if s.filled.is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
+                        return Ok(false);
+                    }
                     expect(ui.get_agent_following(), "the log follows its end")?;
+                    expect(ui.get_agent_hidden() <= 1.0, &format!("the end of a long reply shows ({}px hidden)", ui.get_agent_hidden()))?;
+                    s.pass("the log keeps the end of a long reply in view");
+                    // The wheel over the log goes back through the conversation (and stays).
                     let size = ui.window().size().to_logical(ui.window().scale_factor());
                     let room = size.height - 86.0;
                     let panel = (room * ui.get_agent_split()).min(room - 120.0).max(100.0);
@@ -1340,7 +1354,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_agent_close();
                     expect(ui.get_agent_badge().contains("実行中"), &format!("closed panel: the history line shows the run ({})", ui.get_agent_badge()))?;
                 }
-                65 => {
+                66 => {
                     // Cancelled once the fake has started its grandchild (ping).
                     if !std::fs::read_to_string(root.join("agent-prompt.txt")).is_ok_and(|p| p.contains("slow")) {
                         return Ok(false);
@@ -1349,7 +1363,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_agent_cancel();
                     s.cancelled = Some(Instant::now());
                 }
-                66 => {
+                67 => {
                     if c.borrow().agent.run.is_some() {
                         return Ok(false);
                     }
@@ -1390,7 +1404,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("cancel stops the CLI and its children; 新しい会話 starts over; 使用しない turns Ctrl+I off");
                 }
                 // Opening a file starts it in its own folder (as Explorer does), not in ours.
-                67 => {
+                68 => {
                     let probe = root.join("cmpL").join("where.cmd");
                     if !probe.exists() {
                         std::fs::write(&probe, "@cd > \"%~dp0cwd.txt\"\r\n").map_err(|e| e.to_string())?;
@@ -1401,7 +1415,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let row = index(&c, 0, "where.cmd")?;
                     ui.invoke_pointer(0, row, false, false, 2);
                 }
-                68 => {
+                69 => {
                     // The file exists before `cd` has written into it.
                     let Some(cwd) = std::fs::read_to_string(root.join("cmpL").join("cwd.txt")).ok().filter(|t| t.ends_with('\n')) else { return Ok(false) };
                     let expected = display(&root.join("cmpL"));
@@ -1410,7 +1424,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                 }
                 // A downloaded file whose name hides its extension (U+202E): marked in the list;
                 // Alt+Enter shows where it came from and its SHA-256.
-                69 => {
+                70 => {
                     let name = "invoice\u{202E}fdp.exe";
                     let file = root.join("cmpL").join(name);
                     if !file.exists() {
@@ -1435,7 +1449,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_props_open(), "Alt+Enter on one file opens the properties")?;
                     expect(ui.get_props_name() == "invoice[RLO]fdp.exe", "the dialog shows the name with the mark")?;
                 }
-                70 => {
+                71 => {
                     if ui.get_props_hash() != 2 {
                         return Ok(false);
                     }
@@ -1457,7 +1471,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("hidden bidi characters are marked; properties show the download source, streams and SHA-256");
                 }
                 // Alt+Enter on a folder adds up its size on a worker, without entering a junction.
-                71 => {
+                72 => {
                     let folder = root.join("cmpL").join("sized");
                     if !folder.exists() {
                         std::fs::create_dir_all(folder.join("inner")).map_err(|e| e.to_string())?;
@@ -1481,7 +1495,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_key_event(0, event);
                     expect(ui.get_props_open(), "Alt+Enter on a folder opens the properties")?;
                 }
-                72 => {
+                73 => {
                     let rows: Vec<(String, String, bool)> = ui.get_props_rows().iter().map(|r| (r.label.to_string(), r.value.to_string(), r.dim)).collect();
                     let Some(skipped) = rows.iter().find(|(l, _, _)| l == "集計外") else { return Ok(false) };
                     expect(skipped.1.starts_with("リンク1件"), &format!("the junction is skipped: {rows:?}"))?;
@@ -1490,7 +1504,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_props_close();
                     s.pass("folder properties add up the size, skipping junctions");
                 }
-                73 => return Err("done".into()),
+                74 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)

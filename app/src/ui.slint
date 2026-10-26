@@ -645,6 +645,8 @@ component AgentPanel inherits Rectangle {
     callback recall(bool, string) -> string;
     // The log shows its end and follows new lines (false once scrolled back).
     out property <bool> following: true;
+    // How far the log's end is below the view (0 when the end shows; for the smoke).
+    out property <length> hidden: log.content-height + log.content-y - log.visible-height;
     callback close();
     public function focus-input() { input.focus(); }
     background: Theme.pane;
@@ -677,9 +679,13 @@ component AgentPanel inherits Rectangle {
                 VerticalLayout {
                     // As wide as the view: long lines wrap instead of scrolling sideways.
                     width: log.visible-width; alignment: start;
-                    for line in root.lines : HorizontalLayout {
-                        padding-left: 6px; padding-right: 10px; padding-top: 1px; padding-bottom: 1px;
-                        Text {
+                    // Each row's height is measured at the width it wraps to: the layout's own
+                    // measure (which the scroll height comes from) fell short for wrapped
+                    // lines, and a long reply's end hid under the input.
+                    for line in root.lines : Rectangle {
+                        height: text.preferred-height + 2px;
+                        text := Text {
+                            x: 6px; y: 1px; width: parent.width - 16px; height: self.preferred-height;
                             text: line.text; wrap: word-wrap;
                             color: line.kind == 0 ? Theme.accent : line.kind == 1 ? Theme.dim : line.kind == 3 ? Theme.error : line.kind == 4 ? Theme.key : Theme.text;
                             font-weight: line.kind == 0 ? 700 : 400;
@@ -1341,6 +1347,7 @@ export component App inherits Window {
     // On the history line while the panel is closed and a run goes on.
     in property <string> agent-badge;
     out property <bool> agent-following: agent-panel.following;
+    out property <length> agent-hidden: agent-panel.hidden;
     public function focus-agent() { agent-panel.focus-input(); }
     callback color-base(int, color);
     callback color-ext(int, string, color);
