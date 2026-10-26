@@ -1519,6 +1519,8 @@ export component App inherits Window {
                 y: parent.height; width: 380px;
                 Rectangle {
                     background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+                    // Only measured: the width of the key column.
+                    key-width := Text { text: root.bookmarks.length > 9 ? "Shift+F12" : "Shift+F9"; font-size: 11px; visible: false; }
                     VerticalLayout {
                         padding: 4px;
                         for b[i] in root.bookmarks : Rectangle {
@@ -1529,7 +1531,12 @@ export component App inherits Window {
                                 padding-left: 10px; spacing: 10px;
                                 Text { text: b.name; color: Theme.text; vertical-alignment: center; }
                                 Text { text: b.path; color: Theme.dim; font-size: 11px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
-                                IconButton { width: 28px; glyph: "\u{E70F}"; glyph-size: 13px; tint: Theme.dim; clicked => { root.bookmark-edit(i); } }
+                                // Shift+F1..F12 open the first twelve. As wide as the longest key,
+                                // so F1 and F10 line up.
+                                HorizontalLayout {
+                                    Text { width: key-width.preferred-width; text: i < 12 ? "Shift+F\{i + 1}" : ""; color: Theme.dim; font-size: 11px; vertical-alignment: center; }
+                                    IconButton { width: 24px; glyph: "\u{E70F}"; glyph-size: 13px; tint: Theme.dim; clicked => { root.bookmark-edit(i); } }
+                                }
                             }
                         }
                         if root.bookmarks.length == 0 : Text { height: 28px; x: 10px; text: "ブックマークはありません"; color: Theme.dim; vertical-alignment: center; }

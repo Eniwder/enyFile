@@ -138,11 +138,11 @@ struct State {
     session: u64,
     /// Sort order of pane 0 before a comparison.
     sort: (usize, bool),
-    /// Toolbar Home was pressed (step 41 waits for it).
+    /// Toolbar Home was pressed (step 43 waits for it).
     homed: bool,
     /// When the slow fake agent was cancelled.
     cancelled: Option<Instant>,
-    /// When step 64 filled the agent log.
+    /// When step 66 filled the agent log.
     filled: Option<Instant>,
 }
 /// A stand-in for `codex exec --json`: records its arguments and prompt, makes a file in its
@@ -530,6 +530,21 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     }
                     expect(c.borrow().saved(0).current.is_some_and(|p| p.ends_with("Folder A")), "parent opened with the folder focused")?;
                     s.pass(".. row takes the cursor; Enter on it opens the parent");
+                    // Shift+F1 opens the first bookmark; Shift+F2 has none (nothing happens).
+                    shift_key(&ui, 0, slint::platform::Key::F2);
+                    shift_key(&ui, 0, slint::platform::Key::F1);
+                }
+                26 => {
+                    if !idle(&c) || !c.borrow().data(0).dir.ends_with("Folder A") {
+                        return Ok(false);
+                    }
+                    s.pass("Shift+F1 opens the first bookmark");
+                    ui.invoke_command(0, 2);
+                }
+                27 => {
+                    if !idle(&c) || !c.borrow().data(0).dir.ends_with("left") {
+                        return Ok(false);
+                    }
                     ui.invoke_open_settings();
                     expect(ui.get_settings_open(), "settings dialog opens")?;
                     let row = ui.get_settings_places().row_data(0).unwrap();
@@ -549,7 +564,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(saved["split3_columns"][0] == 0.2 && saved["split4"][1] == 0.7, "3/4-pane splitter positions saved")?;
                     s.pass("settings dialog saves places; splitter position saved");
                 }
-                26 => {
+                28 => {
                     // Drives arrive from the drive thread and are listed after the entries.
                     let (rows, offset, entries) = {
                         let c = c.borrow();
@@ -567,7 +582,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_name_open() && ui.get_name_initial() == "新しいフォルダ", "F7 opens the new-folder dialog")?;
                     ui.invoke_name_done(true, "新規 A".into());
                 }
-                27 => {
+                29 => {
                     if !idle(&c) || !names(&c, 0).contains(&"新規 A".to_string()) {
                         return Ok(false);
                     }
@@ -576,7 +591,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_name_initial() == "新しいテキスト ドキュメント.txt", "Ctrl+N opens the new-file dialog")?;
                     ui.invoke_name_done(true, "memo.txt".into());
                 }
-                28 => {
+                30 => {
                     if !idle(&c) || !names(&c, 0).contains(&"memo.txt".to_string()) {
                         return Ok(false);
                     }
@@ -586,7 +601,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(!ui.invoke_name_validate("A.TXT".into()).is_empty(), "rename to an existing name rejected")?;
                     ui.invoke_name_done(true, "memo2.txt".into());
                 }
-                29 => {
+                31 => {
                     if !idle(&c) || !names(&c, 0).contains(&"memo2.txt".to_string()) {
                         return Ok(false);
                     }
@@ -596,7 +611,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     std::process::Command::new("attrib").arg("+h").arg(shell::shell_path(&hidden)).status().map_err(|e| e.to_string())?;
                     fkey(&ui, 0, slint::platform::Key::F5);
                 }
-                30 => {
+                32 => {
                     if !idle(&c) || names(&c, 0).contains(&"b.txt".to_string()) {
                         return Ok(false);
                     }
@@ -605,14 +620,14 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     e.modifiers.alt = true;
                     ui.invoke_key_event(0, e);
                 }
-                31 => {
+                33 => {
                     if !idle(&c) || !names(&c, 0).contains(&"b.txt".to_string()) {
                         return Ok(false);
                     }
                     s.pass("hidden files hidden by default, Alt+Z shows them");
                     ui.invoke_sort(0, 3);
                 }
-                32 => {
+                34 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -623,10 +638,10 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(exts == sorted, "files ordered by extension")?;
                     s.pass("sort by extension");
                 }
-                33 => {
+                35 => {
                     ui.invoke_navigate(0, display(&root.join("many")).into());
                 }
-                34 => {
+                36 => {
                     if !idle(&c) || !c.borrow().data(0).dir.ends_with("many") {
                         return Ok(false);
                     }
@@ -707,7 +722,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_open_settings();
                     ui.set_settings_tab(1);
                 }
-                35 => {
+                37 => {
                     if s.held.is_none() && !s.hold.is_zero() {
                         // Tells a screenshot script the settings dialog is on screen.
                         let _ = std::fs::write(root.join("holding-settings"), b"");
@@ -730,7 +745,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(saved["font"]["family"] == "Yu Gothic UI" && saved["font"]["size"] == 16.0, "font saved")?;
                     s.pass("settings: colors, extension rules and font applied and saved");
                 }
-                36 => {
+                38 => {
                     let config = || -> Result<serde_json::Value, String> {
                         serde_json::from_slice(&std::fs::read(root.join("config.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
                     };
@@ -779,7 +794,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     e.modifiers.shift = true;
                     ui.invoke_key_event(1, e);
                 }
-                37 => {
+                39 => {
                     if !idle(&c) || c.borrow().data(1).dir.parent().is_some() {
                         return Ok(false);
                     }
@@ -797,7 +812,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         shift_letter(&ui, 1, &drive[..1]);
                     }
                 }
-                38 => {
+                40 => {
                     let Some((drive, system)) = other_drive(&root) else { return Ok(true) };
                     let dir = c.borrow().data(1).dir.clone();
                     if !idle(&c) || crate::drive_of(&dir).as_deref() != Some(drive.as_str()) {
@@ -807,7 +822,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("Shift+letter opens the folder last shown on that drive");
                     ui.invoke_navigate(1, display(&root).into());
                 }
-                39 => {
+                41 => {
                     let Some((drive, _)) = other_drive(&root) else { return Ok(true) };
                     if !idle(&c) || !c.borrow().data(1).dir.ends_with(root.file_name().unwrap_or_default()) {
                         return Ok(false);
@@ -817,7 +832,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     c.borrow_mut().config.drive_dirs.insert(drive.clone(), gone);
                     shift_letter(&ui, 1, &drive[..1]);
                 }
-                40 => {
+                42 => {
                     let Some((drive, _)) = other_drive(&root) else { return Ok(true) };
                     let dir = c.borrow().data(1).dir.clone();
                     if !idle(&c) || crate::drive_of(&dir).as_deref() != Some(drive.as_str()) {
@@ -826,12 +841,12 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(dir.parent().is_none(), "a vanished folder falls back to the drive root")?;
                     s.pass("Shift+letter falls back to the root when the folder is gone");
                 }
-                41 => {
+                43 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
                     // Toolbar Home: the active pane's start folder; then back to the test data's
-                    // drive root, where step 37 left pane 1.
+                    // drive root, where step 39 left pane 1.
                     if !s.homed {
                         c.borrow_mut().config.start[1] = Some(root.join("right"));
                         c.borrow_mut().active(1);
@@ -844,7 +859,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let here = crate::drive_of(&root).unwrap_or_default();
                     ui.invoke_navigate(1, format!(r"{here}\").into());
                 }
-                42 => {
+                44 => {
                     // Edit menu, in the 150-file folder of pane 0.
                     ui.invoke_focus_pane(0);
                     c.borrow_mut().active(0);
@@ -905,7 +920,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(saved["panes"] == 2, "pane count saved")?;
                     s.pass("column switches; 3 and 4 pane layouts with Tab");
                 }
-                43 => {
+                45 => {
                     // Ctrl+F: incremental wildcard search in the 150-file folder; Ctrl+G next.
                     if !idle(&c) {
                         return Ok(false);
@@ -968,7 +983,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_find_mode() == 2, "Ctrl+Shift+F opens the filter bar")?;
                     ui.invoke_find_done(true, "*5.txt; file001".into());
                 }
-                44 => {
+                46 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -979,14 +994,14 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_sort(0, 0);
                     s.pass("Ctrl+Shift+F filters with wildcards and ';'");
                 }
-                45 => {
+                47 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
                     expect(names(&c, 0).len() == 16, "sort keeps the filter")?;
                     fkey(&ui, 0, slint::platform::Key::Escape);
                 }
-                46 => {
+                48 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -994,14 +1009,14 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("Esc clears the filter");
                     c.borrow_mut().set_filter(0, "file00*");
                 }
-                47 => {
+                49 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
                     expect(names(&c, 0).len() == 9, "filter set again")?;
                     ui.invoke_command(0, 2);
                 }
-                48 => {
+                50 => {
                     if !idle(&c) || c.borrow().data(0).dir.ends_with("many") {
                         return Ok(false);
                     }
@@ -1016,7 +1031,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_open_menu() == 0, "click opens the File menu")?;
                     s.sweep = 12.0;
                 }
-                49 => {
+                51 => {
                     use slint::platform::{PointerEventButton, WindowEvent};
                     let open = ui.get_open_menu();
                     if s.menus.last() != Some(&open) {
@@ -1098,7 +1113,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(made.status.success(), "junction created for the search test")?;
                     ui.invoke_navigate(0, display(&tree).into());
                 }
-                50 => {
+                52 => {
                     if !idle(&c) || !c.borrow().data(0).dir.ends_with("tree") {
                         return Ok(false);
                     }
@@ -1114,7 +1129,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_find_edited("hi".into());
                     ui.invoke_find_edited("hit*".into());
                 }
-                51 => {
+                53 => {
                     if !searched(&c, "hit*") {
                         return Ok(false);
                     }
@@ -1123,7 +1138,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("Ctrl+Alt+Shift+F searches below the folder while typing, junctions skipped");
                     ui.invoke_find_edited("a/*.rs".into());
                 }
-                52 => {
+                54 => {
                     if !searched(&c, "a/*.rs") {
                         return Ok(false);
                     }
@@ -1138,7 +1153,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     c.borrow_mut().config.search_links = true;
                     c.borrow_mut().search_tree(0, r"\A\B\deep");
                 }
-                53 => {
+                55 => {
                     if !searched(&c, r"\A\B\deep") {
                         return Ok(false);
                     }
@@ -1148,7 +1163,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("path patterns with / and \\; a junction cycle is not followed");
                     fkey(&ui, 0, slint::platform::Key::Escape);
                 }
-                54 => {
+                56 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -1174,7 +1189,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     c.borrow_mut().index_limit = 2;
                     c.borrow_mut().open_find(0, 3);
                 }
-                55 => {
+                57 => {
                     if !c.borrow().panes[0].finder.as_ref().is_some_and(|f| f.overflow) {
                         return Ok(false);
                     }
@@ -1182,7 +1197,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(!c.borrow().typing.running(), "past the index limit typing does not search")?;
                     ui.invoke_find_done(true, "hit*".into());
                 }
-                56 => {
+                58 => {
                     if !searched(&c, "hit*") {
                         return Ok(false);
                     }
@@ -1194,7 +1209,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_command(0, 2);
                     expect(stop.load(std::sync::atomic::Ordering::Relaxed), "\"..\" stops the walk")?;
                 }
-                57 => {
+                59 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -1215,7 +1230,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_navigate(0, display(&root.join("cmpL")).into());
                     ui.invoke_navigate(1, display(&root.join("cmpR")).into());
                 }
-                58 => {
+                60 => {
                     if !idle(&c) || !c.borrow().data(0).dir.ends_with("cmpL") || !c.borrow().data(1).dir.ends_with("cmpR") {
                         return Ok(false);
                     }
@@ -1223,7 +1238,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ctrl_shift_key(&ui, 0, "D");
                     expect(c.borrow().compare.as_ref().is_some_and(|k| k.panes == [0, 1]), "Ctrl+Shift+D compares the two panes")?;
                 }
-                59 => {
+                61 => {
                     if !idle(&c) || c.borrow().panes[0].model.compare.borrow().is_none() {
                         return Ok(false);
                     }
@@ -1249,7 +1264,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     std::fs::write(&made, "o").map_err(|e| e.to_string())?;
                     std::fs::File::options().write(true).open(&made).and_then(|f| f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000))).map_err(|e| e.to_string())?;
                 }
-                60 => {
+                62 => {
                     if !idle(&c) || c.borrow().compare.as_ref().is_none_or(|k| k.counts[0] != 0) {
                         return Ok(false);
                     }
@@ -1258,7 +1273,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ctrl_shift_key(&ui, 0, "D");
                     expect(c.borrow().compare.is_none(), "third Ctrl+Shift+D ends the comparison")?;
                 }
-                61 => {
+                63 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
@@ -1268,7 +1283,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("the comparison ends with the folders and sort order as before");
                 }
                 // Ctrl+I: the agent panel with a fake CLI, in pane 0's folder (cmpL).
-                62 => {
+                64 => {
                     let program = fake_agent(&root, false)?;
                     c.borrow_mut().config.agent_path = Some(program);
                     c.borrow_mut().active(0);
@@ -1281,7 +1296,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_agent_running(), "the panel shows the run")?;
                     expect(!ui.invoke_agent_send("second".into()), "nothing more is sent while it runs")?;
                 }
-                63 => {
+                65 => {
                     if c.borrow().agent.run.is_some() || !idle(&c) || !names(&c, 0).contains(&"agent-made.txt".to_string()) || c.borrow().agent.version.is_none() {
                         return Ok(false);
                     }
@@ -1311,7 +1326,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     c.borrow_mut().config.agent_panes = true;
                     expect(ui.invoke_agent_send("and again".into()), "a follow-up is sent")?;
                 }
-                64 => {
+                66 => {
                     if c.borrow().agent.run.is_some() || !idle(&c) || !names(&c, 0).contains(&"agent-made.txt".to_string()) {
                         return Ok(false);
                     }
@@ -1329,11 +1344,11 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         c.borrow().agent_push(1, format!("filler {i}"));
                     }
                     // A long reply in paragraphs wraps over many lines; its layout settles over
-                    // the next frames (step 65 checks that its last line shows).
+                    // the next frames (step 67 checks that its last line shows).
                     let paragraph = "長い返答の段落です。折り返して何行にもなります。".repeat(12);
                     c.borrow().agent_push(2, format!("{paragraph}\n\n{paragraph}\n\n{paragraph}\n\nlast line"));                    s.filled = Some(Instant::now());
                 }
-                65 => {
+                67 => {
                     if s.filled.is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
                         return Ok(false);
                     }
@@ -1354,7 +1369,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_agent_close();
                     expect(ui.get_agent_badge().contains("実行中"), &format!("closed panel: the history line shows the run ({})", ui.get_agent_badge()))?;
                 }
-                66 => {
+                68 => {
                     // Cancelled once the fake has started its grandchild (ping).
                     if !std::fs::read_to_string(root.join("agent-prompt.txt")).is_ok_and(|p| p.contains("slow")) {
                         return Ok(false);
@@ -1363,7 +1378,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_agent_cancel();
                     s.cancelled = Some(Instant::now());
                 }
-                67 => {
+                69 => {
                     if c.borrow().agent.run.is_some() {
                         return Ok(false);
                     }
@@ -1404,7 +1419,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("cancel stops the CLI and its children; 新しい会話 starts over; 使用しない turns Ctrl+I off");
                 }
                 // Opening a file starts it in its own folder (as Explorer does), not in ours.
-                68 => {
+                70 => {
                     let probe = root.join("cmpL").join("where.cmd");
                     if !probe.exists() {
                         std::fs::write(&probe, "@cd > \"%~dp0cwd.txt\"\r\n").map_err(|e| e.to_string())?;
@@ -1415,7 +1430,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let row = index(&c, 0, "where.cmd")?;
                     ui.invoke_pointer(0, row, false, false, 2);
                 }
-                69 => {
+                71 => {
                     // The file exists before `cd` has written into it.
                     let Some(cwd) = std::fs::read_to_string(root.join("cmpL").join("cwd.txt")).ok().filter(|t| t.ends_with('\n')) else { return Ok(false) };
                     let expected = display(&root.join("cmpL"));
@@ -1424,7 +1439,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                 }
                 // A downloaded file whose name hides its extension (U+202E): marked in the list;
                 // Alt+Enter shows where it came from and its SHA-256.
-                70 => {
+                72 => {
                     let name = "invoice\u{202E}fdp.exe";
                     let file = root.join("cmpL").join(name);
                     if !file.exists() {
@@ -1449,7 +1464,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_props_open(), "Alt+Enter on one file opens the properties")?;
                     expect(ui.get_props_name() == "invoice[RLO]fdp.exe", "the dialog shows the name with the mark")?;
                 }
-                71 => {
+                73 => {
                     if ui.get_props_hash() != 2 {
                         return Ok(false);
                     }
@@ -1471,7 +1486,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("hidden bidi characters are marked; properties show the download source, streams and SHA-256");
                 }
                 // Alt+Enter on a folder adds up its size on a worker, without entering a junction.
-                72 => {
+                74 => {
                     let folder = root.join("cmpL").join("sized");
                     if !folder.exists() {
                         std::fs::create_dir_all(folder.join("inner")).map_err(|e| e.to_string())?;
@@ -1495,7 +1510,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_key_event(0, event);
                     expect(ui.get_props_open(), "Alt+Enter on a folder opens the properties")?;
                 }
-                73 => {
+                75 => {
                     let rows: Vec<(String, String, bool)> = ui.get_props_rows().iter().map(|r| (r.label.to_string(), r.value.to_string(), r.dim)).collect();
                     let Some(skipped) = rows.iter().find(|(l, _, _)| l == "集計外") else { return Ok(false) };
                     expect(skipped.1.starts_with("リンク1件"), &format!("the junction is skipped: {rows:?}"))?;
@@ -1504,7 +1519,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_props_close();
                     s.pass("folder properties add up the size, skipping junctions");
                 }
-                74 => return Err("done".into()),
+                76 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)
