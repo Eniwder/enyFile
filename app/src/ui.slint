@@ -1944,6 +1944,13 @@ export component App inherits Window {
                 padding: 4px;
                 for item[i] in root.shown-items : Rectangle {
                     height: item.separator ? 9px : root.menu-row-h;
+                    // An item chosen with the arrow keys is scrolled into view (a hovered one already is).
+                    property <bool> current: root.menu-item == i;
+                    changed current => {
+                        if self.current {
+                            menu-view.content-y = min(menu-view.height - self.y - self.height - 4px, max(-self.y + 4px, menu-view.content-y));
+                        }
+                    }
                     if item.separator : Rectangle { y: 4px; height: 1px; background: Theme.border; }
                     if !item.separator : MenuEntry {
                         text: item.text;
