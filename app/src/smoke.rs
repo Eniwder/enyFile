@@ -981,14 +981,18 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("Ctrl+F wildcard search, Ctrl+G / Ctrl+Shift+G");
                     key("F", true);
                     expect(ui.get_find_mode() == 2, "Ctrl+Shift+F opens the filter bar")?;
-                    ui.invoke_find_done(true, "*5.txt; file001".into());
+                    ui.invoke_find_edited("*5.txt; file00".into());
+                    ui.invoke_find_edited("*5.txt; file001".into());
                 }
                 46 => {
                     if !idle(&c) {
                         return Ok(false);
                     }
                     let shown = names(&c, 0);
-                    expect(shown.len() == 16 && shown.iter().all(|n| n.ends_with("5.txt") || n == "file001.txt"), "filter shows matching entries only")?;
+                    expect(ui.get_find_mode() == 2, "the filter bar stays open while typing")?;
+                    expect(shown.len() == 16 && shown.iter().all(|n| n.ends_with("5.txt") || n == "file001.txt"), "filter narrows the rows while typing")?;
+                    ui.invoke_find_done(true, "*5.txt; file001".into());
+                    expect(ui.get_message().contains("フィルター: *5.txt; file001"), "Enter keeps the filter")?;
                     expect(ui.get_p0_info().filter == "*5.txt; file001" && ui.get_p0_info().files == "16", "filter shown in the info line")?;
                     // Sorting keeps the filter and works on the memory copy.
                     ui.invoke_sort(0, 0);
@@ -999,6 +1003,11 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         return Ok(false);
                     }
                     expect(names(&c, 0).len() == 16, "sort keeps the filter")?;
+                    c.borrow_mut().open_find(0, 2);
+                    ui.invoke_find_edited("file00*".into());
+                    expect(c.borrow().panes[0].filter.as_ref().is_some_and(|(text, _)| text == "file00*"), "typing changes the filter")?;
+                    ui.invoke_find_done(false, "".into());
+                    expect(c.borrow().panes[0].filter.as_ref().is_some_and(|(text, _)| text == "*5.txt; file001"), "Esc puts back the previous filter")?;
                     fkey(&ui, 0, slint::platform::Key::Escape);
                 }
                 48 => {

@@ -350,6 +350,8 @@ struct Finding {
     mode: i32,
     /// Entry the incremental search starts from.
     origin: usize,
+    /// The filter before the bar opened, put back when it is cancelled.
+    filter: Option<String>,
 }
 struct Controller {
     ui: slint::Weak<App>,
@@ -618,7 +620,8 @@ impl Controller {
             3 => self.panes[p].found.as_ref().map_or_else(|| self.tree_search.clone(), |f| f.text.clone()),
             _ => self.search.clone(),
         };
-        self.finding = Some(Finding { pane: p, mode, origin });
+        let filter = self.panes[p].filter.as_ref().map(|(text, _)| text.clone());
+        self.finding = Some(Finding { pane: p, mode, origin, filter });
         // The walk starts now, so the first keys find a good part of the tree read.
         if mode == 3 {
             self.session(p, false);
@@ -629,13 +632,18 @@ impl Controller {
             ui.invoke_focus_find();
         }
     }
-    /// Search moves the cursor while typing; the filter and the recursive search wait for Enter.
+    /// While typing, search moves the cursor, the filter narrows the pane and the recursive
+    /// search matches.
     fn find_edited(&mut self, text: &str) {
         if let Some(Finding { pane, mode: 3, .. }) = self.finding {
             self.query_typed(pane, text);
             return;
         }
-        let Some(Finding { pane, mode: 1, origin }) = self.finding else { return };
+        if let Some(Finding { pane, mode: 2, .. }) = self.finding {
+            self.apply_filter(pane, text);
+            return;
+        }
+        let Some(Finding { pane, mode: 1, origin, .. }) = self.finding else { return };
         let Some(pattern) = listing::Pattern::new(text) else { return };
         self.search = text.trim().to_string();
         let found = self.find(pane, &pattern, origin, true);
@@ -660,12 +668,20 @@ impl Controller {
             }
             return;
         }
+        if finding.mode == 2 {
+            // Esc (or erasing past the start) puts back the filter the bar opened with.
+            if ok {
+                self.apply_filter(finding.pane, text);
+                self.filter_message(finding.pane, finding.filter.is_some());
+            } else {
+                self.apply_filter(finding.pane, finding.filter.as_deref().unwrap_or(""));
+            }
+            return;
+        }
         if !ok {
             return;
         }
-        if finding.mode == 2 {
-            self.set_filter(finding.pane, text);
-        } else if listing::Pattern::new(text).is_some() {
+        if listing::Pattern::new(text).is_some() {
             self.search = text.trim().to_string();
             if self.ui.upgrade().is_some_and(|ui| ui.get_message().is_empty()) {
                 self.message(format!("検索: {}（Ctrl+G で次へ、Ctrl+Shift+G で前へ）", self.search));
@@ -983,16 +999,25 @@ impl Controller {
         });
         self.busy(p, true);
     }
-    /// Ctrl+Shift+F (empty text: Esc) sets or clears the filter of pane `p`.
+    /// Sets or clears (empty text) the filter of pane `p` and says so.
     fn set_filter(&mut self, p: usize, text: &str) {
+        let had = self.panes[p].filter.is_some();
+        self.apply_filter(p, text);
+        self.filter_message(p, had);
+    }
+    fn filter_message(&self, p: usize, had: bool) {
+        match &self.panes[p].filter {
+            Some((text, _)) => self.message(format!("フィルター: {text}（Esc で解除）")),
+            None if had => self.message("フィルターを解除しました"),
+            None => {}
+        }
+    }
+    /// Sets the filter of pane `p` without a message; the same text again keeps the rows.
+    fn apply_filter(&mut self, p: usize, text: &str) {
         let filter = listing::Pattern::new(text).map(|f| (text.trim().to_string(), f));
-        if filter.is_none() && self.panes[p].filter.is_none() {
+        if filter.as_ref().map(|(text, _)| text) == self.panes[p].filter.as_ref().map(|(text, _)| text) {
             return;
         }
-        self.message(match &filter {
-            Some((text, _)) => format!("フィルター: {text}（Esc で解除）"),
-            None => "フィルターを解除しました".to_string(),
-        });
         self.panes[p].filter = filter;
         match &self.panes[p].pending {
             // A folder is loading: re-read it with the new filter once it is in.

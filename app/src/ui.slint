@@ -1845,8 +1845,8 @@ export component App inherits Window {
                         color: Theme.text; selection-background-color: Theme.selected-bg; selection-foreground-color: Theme.selected-text;
                         edited => { find-keys.empty-backspaces = 0; root.find-edited(self.text); }
                         accepted => { root.find-done(true, self.text); }
-                        // Clicking a search result keeps the results; the filter is cancelled.
-                        changed has-focus => { if !self.has-focus && root.find-mode != 0 { root.find-done(root.find-mode != 2, self.text); } }
+                        // Clicking a search result or the filtered rows keeps what is shown.
+                        changed has-focus => { if !self.has-focus && root.find-mode != 0 { root.find-done(true, self.text); } }
                     }
                 }
             }
