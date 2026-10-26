@@ -156,6 +156,25 @@ component DialogButton inherits Rectangle {
     label := Text { text: root.text; color: root.enabled ? Theme.text : Theme.border; horizontal-alignment: center; vertical-alignment: center; }
     touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
 }
+// The panel of a dialog. Callers bound its height by the window and content-height: a large
+// font or a small window then scrolls the dialog instead of pushing its buttons out of view.
+component DialogFrame inherits Rectangle {
+    in property <length> spacing: 10px;
+    out property <length> content-height: body.preferred-height;
+    background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
+    clip: true;
+    view := Flickable {
+        // Only when it scrolls: a drag in a LineEdit selects text, not the page.
+        interactive: body.preferred-height > self.height;
+        content-height: body.preferred-height;
+        body := VerticalLayout {
+            width: view.width; height: self.preferred-height;
+            padding: 16px; spacing: root.spacing;
+            @children
+        }
+    }
+}
+
 // F2 rename, Ctrl+N new file, F7 new folder. The name part (without extension) is selected.
 component NameDialog inherits Rectangle {
     in property <string> title;
@@ -176,24 +195,20 @@ component NameDialog inherits Rectangle {
     }
     background: #00000066;
     TouchArea { }
-    Rectangle {
-        width: min(parent.width - 40px, 520px); height: content.preferred-height;
+    DialogFrame {
+        width: min(parent.width - 40px, 520px); height: min(parent.height - 40px, self.content-height);
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
-        content := VerticalLayout {
-            padding: 16px; spacing: 10px;
-            Text { text: root.title; font-weight: 700; font-size: 14px; color: Theme.text; }
-            edit := LineEdit {
-                edited(t) => { root.error = root.validate(t); }
-                accepted => { root.confirm(); }
-                key-pressed(e) => { if e.text == Key.Escape { root.done(false, ""); return accept; } return reject; }
-            }
-            Text { text: root.error != "" ? root.error : "Enter 決定  ·  Esc キャンセル"; color: root.error != "" ? Theme.error : Theme.dim; height: 18px; }
-            HorizontalLayout {
-                spacing: 6px; alignment: end;
-                DialogButton { text: "OK"; primary: true; clicked => { root.confirm(); } }
-                DialogButton { text: "キャンセル"; clicked => { root.done(false, ""); } }
-            }
+        Text { text: root.title; font-weight: 700; font-size: 14px; color: Theme.text; }
+        edit := LineEdit {
+            edited(t) => { root.error = root.validate(t); }
+            accepted => { root.confirm(); }
+            key-pressed(e) => { if e.text == Key.Escape { root.done(false, ""); return accept; } return reject; }
+        }
+        Text { text: root.error != "" ? root.error : "Enter 決定  ·  Esc キャンセル"; color: root.error != "" ? Theme.error : Theme.dim; min-height: 18px; }
+        HorizontalLayout {
+            spacing: 6px; alignment: end;
+            DialogButton { text: "OK"; primary: true; clicked => { root.confirm(); } }
+            DialogButton { text: "キャンセル"; clicked => { root.done(false, ""); } }
         }
     }
 }
@@ -210,6 +225,10 @@ component PropsDialog inherits Rectangle {
     callback hash-key();
     callback windows();
     public function open() { keys.focus(); }
+    // The label column, wide enough for the longest label at the chosen font size.
+    property <length> label-w: max(76px, label-probe.preferred-width, date-probe.preferred-width);
+    label-probe := Text { text: "バージョン"; visible: false; }
+    date-probe := Text { text: "更新日時"; visible: false; }
     background: #00000066;
     TouchArea { }
     keys := FocusScope {
@@ -252,10 +271,10 @@ component PropsDialog inherits Rectangle {
                         // fell short for wrapped lines, and the buttons slid out of the dialog.
                         if !row.heading : Rectangle {
                             height: max(label.preferred-height, value.preferred-height);
-                            label := Text { x: 0px; y: 0px; width: 76px; text: row.label; color: Theme.dim; }
+                            label := Text { x: 0px; y: 0px; width: root.label-w; text: row.label; color: Theme.dim; }
                             // URLs have no spaces to break at: wrap anywhere.
                             value := Text {
-                                x: 88px; y: 0px; width: parent.width - 88px; height: self.preferred-height;
+                                x: root.label-w + 12px; y: 0px; width: parent.width - self.x; height: self.preferred-height;
                                 text: row.value; wrap: char-wrap;
                                 color: row.dim ? Theme.dim : Theme.text;
                                 font-family: row.mono ? "Consolas" : "";
@@ -325,16 +344,18 @@ component AskDialog inherits Rectangle {
             return reject;
         }
     }
-    panel := Rectangle {
-        width: min(parent.width - 40px, 760px);
-        height: content.preferred-height;
+    DialogFrame {
+        width: min(parent.width - 40px, 760px); height: min(parent.height - 40px, self.content-height);
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
-        content := HorizontalLayout {
-            padding: 16px; spacing: 16px;
+        HorizontalLayout {
+            spacing: 16px;
             VerticalLayout {
                 spacing: 8px; horizontal-stretch: 1;
-                Text { text: "貼り付け先には、既に同じ名前のファイル/フォルダが存在します。"; color: Theme.text; wrap: word-wrap; }
+                // Measured at the width it wraps to: the layout's own measure falls short.
+                Rectangle {
+                    height: notice.preferred-height;
+                    notice := Text { width: parent.width; height: self.preferred-height; text: "貼り付け先には、既に同じ名前のファイル/フォルダが存在します。"; color: Theme.text; wrap: word-wrap; }
+                }
                 Text { text: root.info.name; font-weight: 700; font-size: 14px; color: Theme.text; overflow: elide; }
                 Rectangle {
                     border-width: 1px; border-color: Theme.border; border-radius: 3px; background: Theme.pane;
@@ -362,11 +383,12 @@ component AskDialog inherits Rectangle {
                         }
                     }
                 }
-                Text { text: root.renaming ? (root.error != "" ? root.error : "Enter 決定  ·  Esc 戻る（拡張子は選択範囲の外）") : ""; color: root.error != "" ? Theme.error : Theme.dim; height: 18px; }
+                Text { text: root.renaming ? (root.error != "" ? root.error : "Enter 決定  ·  Esc 戻る（拡張子は選択範囲の外）") : ""; color: root.error != "" ? Theme.error : Theme.dim; min-height: 18px; }
                 CheckBox { text: "すべて適用(A)"; checked <=> root.all; }
             }
             VerticalLayout {
-                spacing: 6px; width: 180px; alignment: start;
+                // Wider with a large font: the longest label sets it.
+                spacing: 6px; min-width: 180px; horizontal-stretch: 0; alignment: start;
                 // Only the choices that apply to this conflict are shown.
                 if root.info.kind == 0 : DialogButton { text: "上書き(O)"; clicked => { root.choose(0); } }
                 if root.info.kind == 0 : DialogButton { text: "新しければ上書き(N)"; clicked => { root.choose(1); } }
@@ -796,40 +818,39 @@ component BookmarkDialog inherits Rectangle {
         name-edit.focus();
         name-edit.select-all();
     }
+    // Both fields start at the same x at any font size.
+    property <length> label-w: max(40px, label-probe.preferred-width);
+    label-probe := Text { text: "名前"; visible: false; }
     background: #00000066;
     TouchArea { }
-    Rectangle {
-        width: min(parent.width - 40px, 560px); height: content.preferred-height;
+    DialogFrame {
+        width: min(parent.width - 40px, 560px); height: min(parent.height - 40px, self.content-height);
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
-        content := VerticalLayout {
-            padding: 16px; spacing: 10px;
-            Text { text: "ブックマークの編集"; font-weight: 700; font-size: 14px; color: Theme.text; }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "名前"; width: 40px; color: Theme.text; vertical-alignment: center; }
-                name-edit := LineEdit {
-                    accepted => { root.save(name-edit.text, path-edit.text); }
-                    key-pressed(e) => { if e.text == Key.Escape { root.cancel(); return accept; } return reject; }
-                }
+        Text { text: "ブックマークの編集"; font-weight: 700; font-size: 14px; color: Theme.text; }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "名前"; width: root.label-w; color: Theme.text; vertical-alignment: center; }
+            name-edit := LineEdit {
+                accepted => { root.save(name-edit.text, path-edit.text); }
+                key-pressed(e) => { if e.text == Key.Escape { root.cancel(); return accept; } return reject; }
             }
-            HorizontalLayout {
-                spacing: 8px;
-                Text { text: "パス"; width: 40px; color: Theme.text; vertical-alignment: center; }
-                path-edit := LineEdit {
-                    accepted => { root.save(name-edit.text, path-edit.text); }
-                    key-pressed(e) => { if e.text == Key.Escape { root.cancel(); return accept; } return reject; }
-                }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "パス"; width: root.label-w; color: Theme.text; vertical-alignment: center; }
+            path-edit := LineEdit {
+                accepted => { root.save(name-edit.text, path-edit.text); }
+                key-pressed(e) => { if e.text == Key.Escape { root.cancel(); return accept; } return reject; }
             }
-            HorizontalLayout {
-                spacing: 6px;
-                DialogButton { text: "▲ 上へ"; enabled: root.index > 0; clicked => { root.move(false); } }
-                DialogButton { text: "▼ 下へ"; enabled: root.index < root.count - 1; clicked => { root.move(true); } }
-                Rectangle { horizontal-stretch: 1; }
-                DialogButton { text: "削除"; clicked => { root.remove(); } }
-                DialogButton { text: "保存"; primary: true; clicked => { root.save(name-edit.text, path-edit.text); } }
-                DialogButton { text: "キャンセル"; clicked => { root.cancel(); } }
-            }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            DialogButton { text: "▲ 上へ"; enabled: root.index > 0; clicked => { root.move(false); } }
+            DialogButton { text: "▼ 下へ"; enabled: root.index < root.count - 1; clicked => { root.move(true); } }
+            Rectangle { horizontal-stretch: 1; }
+            DialogButton { text: "削除"; clicked => { root.remove(); } }
+            DialogButton { text: "保存"; primary: true; clicked => { root.save(name-edit.text, path-edit.text); } }
+            DialogButton { text: "キャンセル"; clicked => { root.cancel(); } }
         }
     }
 }
@@ -846,36 +867,37 @@ component ColorEditor inherits Rectangle {
     property <color> value: rgb(root.red, root.green, root.blue);
     property <[string]> digits: ["0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"];
     function hex2(v: int) -> string { return root.digits[floor(v / 16)] + root.digits[mod(v, 16)]; }
+    // Column widths at the chosen font size, the same on every row (the value never shifts the slider).
+    property <length> letter-w: max(14px, letter-probe.preferred-width);
+    property <length> value-w: max(28px, value-probe.preferred-width);
+    letter-probe := Text { text: "G"; visible: false; }
+    value-probe := Text { text: "255"; visible: false; }
     background: #00000066;
     TouchArea { }
-    Rectangle {
-        width: 420px; height: content.preferred-height;
+    DialogFrame {
+        width: min(parent.width - 40px, 420px); height: min(parent.height - 40px, self.content-height);
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
-        content := VerticalLayout {
-            padding: 16px; spacing: 10px;
-            Text { text: root.title; font-weight: 700; color: Theme.text; }
-            if root.with-extensions : HorizontalLayout {
-                spacing: 8px;
-                Text { text: "拡張子"; width: 50px; color: Theme.text; vertical-alignment: center; }
-                LineEdit { text <=> root.extensions; placeholder-text: "ZIP;RAR;7Z"; }
+        Text { text: root.title; font-weight: 700; color: Theme.text; }
+        if root.with-extensions : HorizontalLayout {
+            spacing: 8px;
+            Text { text: "拡張子"; min-width: 50px; horizontal-stretch: 0; color: Theme.text; vertical-alignment: center; }
+            LineEdit { text <=> root.extensions; placeholder-text: "ZIP;RAR;7Z"; }
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle { width: 64px; height: 64px; background: root.value; border-width: 1px; border-color: Theme.border; }
+            VerticalLayout {
+                spacing: 4px;
+                HorizontalLayout { spacing: 6px; Text { text: "R"; width: root.letter-w; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.red; changed(v) => { root.red = round(v); } } Text { text: root.red; width: root.value-w; color: Theme.dim; vertical-alignment: center; } }
+                HorizontalLayout { spacing: 6px; Text { text: "G"; width: root.letter-w; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.green; changed(v) => { root.green = round(v); } } Text { text: root.green; width: root.value-w; color: Theme.dim; vertical-alignment: center; } }
+                HorizontalLayout { spacing: 6px; Text { text: "B"; width: root.letter-w; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.blue; changed(v) => { root.blue = round(v); } } Text { text: root.blue; width: root.value-w; color: Theme.dim; vertical-alignment: center; } }
             }
-            HorizontalLayout {
-                spacing: 12px;
-                Rectangle { width: 64px; height: 64px; background: root.value; border-width: 1px; border-color: Theme.border; }
-                VerticalLayout {
-                    spacing: 4px;
-                    HorizontalLayout { spacing: 6px; Text { text: "R"; width: 14px; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.red; changed(v) => { root.red = round(v); } } Text { text: root.red; width: 28px; color: Theme.dim; vertical-alignment: center; } }
-                    HorizontalLayout { spacing: 6px; Text { text: "G"; width: 14px; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.green; changed(v) => { root.green = round(v); } } Text { text: root.green; width: 28px; color: Theme.dim; vertical-alignment: center; } }
-                    HorizontalLayout { spacing: 6px; Text { text: "B"; width: 14px; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.blue; changed(v) => { root.blue = round(v); } } Text { text: root.blue; width: 28px; color: Theme.dim; vertical-alignment: center; } }
-                }
-            }
-            Text { text: "#" + root.hex2(root.red) + root.hex2(root.green) + root.hex2(root.blue); color: root.value; font-size: 14px; }
-            HorizontalLayout {
-                spacing: 6px; alignment: end;
-                DialogButton { text: "OK"; primary: true; clicked => { root.done(true); } }
-                DialogButton { text: "キャンセル"; clicked => { root.done(false); } }
-            }
+        }
+        Text { text: "#" + root.hex2(root.red) + root.hex2(root.green) + root.hex2(root.blue); color: root.value; font-size: 14px; }
+        HorizontalLayout {
+            spacing: 6px; alignment: end;
+            DialogButton { text: "OK"; primary: true; clicked => { root.done(true); } }
+            DialogButton { text: "キャンセル"; clicked => { root.done(false); } }
         }
     }
 }
