@@ -223,7 +223,8 @@ component PropsDialog inherits Rectangle {
         }
     }
     Rectangle {
-        width: min(parent.width - 40px, 680px); height: min(parent.height - 40px, content.preferred-height);
+        // Grows with the window so a long download URL takes fewer lines.
+        width: min(parent.width - 40px, max(680px, parent.width * 0.6)); height: min(parent.height - 40px, content.preferred-height);
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
         background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
         clip: true;
@@ -232,18 +233,35 @@ component PropsDialog inherits Rectangle {
             Text { text: root.name; font-weight: 700; font-size: 14px; color: Theme.text; overflow: elide; }
             Text { text: root.folder; color: Theme.dim; font-size: 12px; overflow: elide; }
             Rectangle { height: 6px; }
-            for row in root.rows : HorizontalLayout {
-                padding-top: row.heading ? 10px : 0px;
-                padding-bottom: row.heading ? 2px : 0px;
-                spacing: 12px;
-                if row.heading : Text { text: row.label; color: Theme.key; font-weight: 700; vertical-alignment: center; }
-                if row.heading : Rectangle { horizontal-stretch: 1; Rectangle { height: 1px; background: Theme.border; } }
-                if !row.heading : Text { text: row.label; color: Theme.dim; width: 76px; }
-                // URLs have no spaces to break at: wrap anywhere.
-                if !row.heading : Text {
-                    text: row.value; horizontal-stretch: 1; wrap: char-wrap;
-                    color: row.dim ? Theme.dim : Theme.text;
-                    font-family: row.mono ? "Consolas" : "";
+            // Scrolls when the window is too short, so the buttons are never cut off.
+            rows-view := Flickable {
+                preferred-height: rows-box.preferred-height; min-height: 0px; vertical-stretch: 1;
+                content-height: rows-box.preferred-height;
+                rows-box := VerticalLayout {
+                    width: rows-view.width; height: self.preferred-height;
+                    spacing: 4px; alignment: start;
+                    for row in root.rows : VerticalLayout {
+                        padding-top: row.heading ? 10px : 0px;
+                        padding-bottom: row.heading ? 2px : 0px;
+                        if row.heading : HorizontalLayout {
+                            spacing: 12px;
+                            Text { text: row.label; color: Theme.key; font-weight: 700; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 1; Rectangle { height: 1px; background: Theme.border; } }
+                        }
+                        // The value is measured at the width it wraps to: the layout's own measure
+                        // fell short for wrapped lines, and the buttons slid out of the dialog.
+                        if !row.heading : Rectangle {
+                            height: max(label.preferred-height, value.preferred-height);
+                            label := Text { x: 0px; y: 0px; width: 76px; text: row.label; color: Theme.dim; }
+                            // URLs have no spaces to break at: wrap anywhere.
+                            value := Text {
+                                x: 88px; y: 0px; width: parent.width - 88px; height: self.preferred-height;
+                                text: row.value; wrap: char-wrap;
+                                color: row.dim ? Theme.dim : Theme.text;
+                                font-family: row.mono ? "Consolas" : "";
+                            }
+                        }
+                    }
                 }
             }
             Rectangle { height: 10px; }
