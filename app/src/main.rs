@@ -568,6 +568,19 @@ impl Controller {
             Err(e) => self.message(e),
         }
     }
+    /// Puts text on the clipboard and says so (or why not) on the history line.
+    fn clipboard_text(&self, text: &str, done: &str) {
+        let result = self
+            .ui
+            .upgrade()
+            .and_then(|ui| hwnd(&ui))
+            .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
+            .and_then(|h| shell::set_clipboard_text(h, text));
+        match result {
+            Ok(()) => self.message(done),
+            Err(e) => self.message(e),
+        }
+    }
     /// Edit > 同じ拡張子をすべて選択: the extension of the item under the cursor.
     fn select_same_extension(&mut self, p: usize) {
         let data = self.data(p);
@@ -1551,6 +1564,15 @@ impl Controller {
         self.agent.lines.clear();
         self.agent.status = String::new();
         self.sync_agent();
+    }
+    /// コピー: the whole log as shown, one line per row.
+    fn agent_copy(&self) {
+        let lines: Vec<String> = self.agent.lines.iter().map(|line| line.text.to_string()).collect();
+        if lines.is_empty() {
+            self.message("コピーする会話がありません");
+            return;
+        }
+        self.clipboard_text(&lines.join("\r\n"), "エージェントの会話をコピーしました");
     }
     fn agent_event(&mut self, id: u64, event: agent::Event) {
         if id != self.agent.id {
@@ -3212,6 +3234,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let c = controller.clone();
         ui.on_agent_new(move || c.borrow_mut().agent_new());
+    }
+    {
+        let c = controller.clone();
+        ui.on_agent_copy(move || c.borrow().agent_copy());
     }
     {
         let c = controller.clone();

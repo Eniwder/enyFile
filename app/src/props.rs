@@ -481,7 +481,7 @@ impl Controller {
             }
             HashState::Done(hex) => {
                 let hex = hex.clone();
-                self.props_clipboard(&hex, "SHA-256 をコピーしました");
+                self.clipboard_text(&hex, "SHA-256 をコピーしました");
             }
             _ => {}
         }
@@ -498,19 +498,7 @@ impl Controller {
                 lines.push(format!("{}\t{}", row.label, row.value));
             }
         }
-        self.props_clipboard(&lines.join("\r\n"), "プロパティをコピーしました");
-    }
-    fn props_clipboard(&self, text: &str, done: &str) {
-        let result = self
-            .ui
-            .upgrade()
-            .and_then(|ui| hwnd(&ui))
-            .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
-            .and_then(|h| shell::set_clipboard_text(h, text));
-        match result {
-            Ok(()) => self.message(done),
-            Err(e) => self.message(e),
-        }
+        self.clipboard_text(&lines.join("\r\n"), "プロパティをコピーしました");
     }
     /// W: Windows' own properties of the same item.
     pub(super) fn props_windows(&mut self) {

@@ -684,6 +684,7 @@ component AgentPanel inherits Rectangle {
     callback send(string) -> bool;
     callback cancel();
     callback fresh();
+    callback copy();
     callback recall(bool, string) -> string;
     // The log shows its end and follows new lines (false once scrolled back).
     out property <bool> following: true;
@@ -704,6 +705,7 @@ component AgentPanel inherits Rectangle {
             // Takes what the buttons leave: a long command is cut, never the buttons.
             Text { text: root.status; color: root.running ? Theme.accent : Theme.dim; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; preferred-width: 0px; min-width: 0px; }
             FlatButton { text: "中断"; min-width: self.preferred-width; horizontal-stretch: 0; enabled: root.running; clicked => { root.cancel(); } }
+            FlatButton { text: "会話をコピー"; min-width: self.preferred-width; horizontal-stretch: 0; enabled: root.lines.length > 0; clicked => { root.copy(); input.focus(); } }
             FlatButton { text: "新しい会話 (Ctrl+N)"; min-width: self.preferred-width; horizontal-stretch: 0; clicked => { root.fresh(); input.focus(); } }
             FlatButton { text: "✕"; width: 26px; clicked => { root.close(); } }
         }
@@ -1407,6 +1409,7 @@ export component App inherits Window {
     callback agent-send(string) -> bool;
     callback agent-cancel();
     callback agent-new();
+    callback agent-copy();
     callback agent-close();
     callback agent-recall(bool, string) -> string;
     // On the history line while the panel is closed and a run goes on.
@@ -1753,6 +1756,7 @@ export component App inherits Window {
         send(text) => { return root.agent-send(text); }
         cancel => { root.agent-cancel(); }
         fresh => { root.agent-new(); }
+        copy => { root.agent-copy(); }
         close => { root.agent-close(); }
         recall(older, current) => { return root.agent-recall(older, current); }
     }

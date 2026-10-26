@@ -1392,6 +1392,13 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_layout_committed();
                     let saved = config::Config::load(root.join("config.json")).agent_split;
                     expect((saved - 0.3).abs() < 1e-3, &format!("agent splitter saved: {saved}"))?;
+                    ui.invoke_agent_copy();
+                    let out = std::process::Command::new("powershell")
+                        .args(["-NoProfile", "-Command", "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-Clipboard -Raw"])
+                        .output()
+                        .map_err(|e| e.to_string())?;
+                    let copied = String::from_utf8_lossy(&out.stdout).into_owned();
+                    expect(copied.contains("fake done\r\n") && copied.trim_end().ends_with("中断しました"), &format!("会話をコピー puts the log on the clipboard: {copied:?}"))?;
                     ui.invoke_agent_new();
                     expect(c.borrow().agent.session.is_none() && agent_texts(&c).is_empty(), "新しい会話 forgets the conversation")?;
                     ctrl_key(&ui, 0, "i");
