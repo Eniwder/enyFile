@@ -104,10 +104,11 @@ component MenuEntry inherits Rectangle {
     in property <bool> track-hover: true;
     out property <bool> hovered: touch.has-hover;
     callback clicked;
-    height: 26px;
+    // Taller with a large font.
+    height: max(26px, label.preferred-height + 6px);
     background: (root.track-hover && touch.has-hover) || root.lit ? Theme.hover : transparent;
     if root.check >= 0 : Text { x: 8px; width: 16px; text: root.check == 1 ? "✓" : ""; color: Theme.accent; vertical-alignment: center; }
-    Text { x: root.check >= 0 ? 26px : 10px; text: root.text; color: Theme.text; vertical-alignment: center; }
+    label := Text { x: root.check >= 0 ? 26px : 10px; width: parent.width - self.x - 8px; text: root.text; color: Theme.text; vertical-alignment: center; overflow: elide; }
     touch := TouchArea { clicked => { root.clicked(); } }
 }
 
@@ -148,7 +149,8 @@ component DialogButton inherits Rectangle {
     in property <bool> enabled: true;
     preferred-width: label.preferred-width + 28px;
     callback clicked;
-    height: 28px;
+    // Taller with a large font.
+    height: max(28px, label.preferred-height + 10px);
     border-radius: 3px;
     border-width: 1px;
     border-color: root.primary ? Theme.accent : Theme.border;
@@ -1290,6 +1292,10 @@ export component App inherits Window {
     default-font-family: root.font-family;
     default-font-size: root.font-size * 1px;
     property <length> row-h: max(18px, round(root.font-size * 1.75) * 1px);
+    // Menus: widths scale with the font (from the default 13), row height as MenuEntry's.
+    property <float> ui-scale: max(1, root.font-size / 13);
+    property <length> menu-row-h: max(26px, menu-probe.preferred-height + 6px);
+    menu-probe := Text { text: "あ"; visible: false; }
     in property <[Row]> p0-rows;
     in-out property <string> p0-path;
     in property <[string]> p0-crumbs;
@@ -1558,7 +1564,7 @@ export component App inherits Window {
             glyph-size: 17px;
             clicked => { bookmark-menu.show(); }
             bookmark-menu := PopupWindow {
-                y: parent.height; width: 380px;
+                y: parent.height; width: 380px * root.ui-scale;
                 Rectangle {
                     background: Theme.dialog; border-width: 1px; border-color: Theme.border;
                     // Only measured: the width of the key column.
@@ -1566,7 +1572,7 @@ export component App inherits Window {
                     VerticalLayout {
                         padding: 4px;
                         for b[i] in root.bookmarks : Rectangle {
-                            height: 28px;
+                            height: root.menu-row-h + 2px;
                             background: hit.has-hover ? Theme.hover : transparent;
                             hit := TouchArea { clicked => { root.bookmark-open(i); } }
                             HorizontalLayout {
@@ -1581,7 +1587,7 @@ export component App inherits Window {
                                 }
                             }
                         }
-                        if root.bookmarks.length == 0 : Text { height: 28px; x: 10px; text: "ブックマークはありません"; color: Theme.dim; vertical-alignment: center; }
+                        if root.bookmarks.length == 0 : Text { height: root.menu-row-h + 2px; x: 10px; text: "ブックマークはありません"; color: Theme.dim; vertical-alignment: center; }
                         Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
                         MenuEntry { text: "＋ 現在のフォルダを追加"; clicked => { root.bookmark-add(); } }
                     }
@@ -1903,25 +1909,33 @@ export component App inherits Window {
             changed hovered => { if self.hovered && root.open-menu >= 0 && root.open-menu != 3 { root.show-menu(3); } }
         }
     }
+    // Menus grow with the font; one taller than the window scrolls.
     if root.open-menu >= 0 : Rectangle {
-        x: 4px + [file-button.x, edit-button.x, view-button.x, tool-button.x][root.open-menu];
-        y: 24px; width: [300px, 320px, 300px, 250px][root.open-menu]; height: menu-list.preferred-height;
+        x: min(4px + [file-button.x, edit-button.x, view-button.x, tool-button.x][root.open-menu], root.width - self.width);
+        y: 24px; width: min(root.width, [300px, 320px, 300px, 250px][root.open-menu] * root.ui-scale);
+        height: min(menu-list.preferred-height, root.height - 24px);
         background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+        clip: true;
         TouchArea { }
-        menu-list := VerticalLayout {
-            padding: 4px;
-            for item[i] in root.shown-items : Rectangle {
-                height: item.separator ? 9px : 26px;
-                if item.separator : Rectangle { y: 4px; height: 1px; background: Theme.border; }
-                if !item.separator : MenuEntry {
-                    text: item.text;
-                    check: item.checkable ? (item.checked ? 1 : 0) : -1;
-                    track-hover: false;
-                    lit: root.menu-item == i;
-                    changed hovered => {
-                        if self.hovered { root.menu-item = i; } else if root.menu-item == i { root.menu-item = -1; }
+        menu-view := Flickable {
+            interactive: menu-list.preferred-height > self.height;
+            content-height: menu-list.preferred-height;
+            menu-list := VerticalLayout {
+                width: menu-view.width; height: self.preferred-height;
+                padding: 4px;
+                for item[i] in root.shown-items : Rectangle {
+                    height: item.separator ? 9px : root.menu-row-h;
+                    if item.separator : Rectangle { y: 4px; height: 1px; background: Theme.border; }
+                    if !item.separator : MenuEntry {
+                        text: item.text;
+                        check: item.checkable ? (item.checked ? 1 : 0) : -1;
+                        track-hover: false;
+                        lit: root.menu-item == i;
+                        changed hovered => {
+                            if self.hovered { root.menu-item = i; } else if root.menu-item == i { root.menu-item = -1; }
+                        }
+                        clicked => { root.run-menu(item.command); }
                     }
-                    clicked => { root.run-menu(item.command); }
                 }
             }
         }
