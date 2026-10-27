@@ -2104,7 +2104,9 @@ export component App inherits Window {
     }
     settings-dialog := SettingsDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
-        visible: root.settings-open;
+        opacity: root.settings-open ? 1 : 0;
+        visible: root.settings-open || self.opacity > 0;
+        animate opacity { duration: 120ms; easing: ease-out; }
         places: root.settings-places;
         tab <=> root.settings-tab;
         ui-scale: root.ui-scale;
@@ -2138,14 +2140,18 @@ export component App inherits Window {
     }
     name-dialog := NameDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
-        visible: root.name-open;
+        opacity: root.name-open ? 1 : 0;
+        visible: root.name-open || self.opacity > 0;
+        animate opacity { duration: 120ms; easing: ease-out; }
         title: root.name-title; initial: root.name-initial; stem: root.name-stem;
         validate(n) => { return root.name-validate(n); }
         done(ok, n) => { root.name-done(ok, n); }
     }
     props-dialog := PropsDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
-        visible: root.props-open;
+        opacity: root.props-open ? 1 : 0;
+        visible: root.props-open || self.opacity > 0;
+        animate opacity { duration: 120ms; easing: ease-out; }
         name: root.props-name; folder: root.props-folder; rows: root.props-rows; hash: root.props-hash;
         close => { root.props-close(); }
         copy => { root.props-copy(); }
@@ -2155,7 +2161,7 @@ export component App inherits Window {
     bookmark-dialog := BookmarkDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
         opacity: root.bookmark-editing ? 1 : 0;
-        visible: self.opacity > 0;
+        visible: root.bookmark-editing || self.opacity > 0;
         animate opacity { duration: 120ms; easing: ease-out; }
         rows: root.bookmark-draft;
         focus-row: root.bookmark-focus-row; focus-path: root.bookmark-focus-path;
@@ -2168,13 +2174,17 @@ export component App inherits Window {
     }
     memory-dialog := MemoryDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
-        visible: root.memory-open;
+        opacity: root.memory-open ? 1 : 0;
+        visible: root.memory-open || self.opacity > 0;
+        animate opacity { duration: 120ms; easing: ease-out; }
         file: root.memory-file; lines: root.memory-lines;
         answer(code) => { root.memory-answer(code); }
     }
     asker := AskDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
-        visible: root.ask-open;
+        opacity: root.ask-open ? 1 : 0;
+        visible: root.ask-open || self.opacity > 0;
+        animate opacity { duration: 120ms; easing: ease-out; }
         info: root.ask;
         answer(code, name, all) => { root.ask-answer(code, name, all); }
         validate(name) => { return root.ask-validate(name); }
