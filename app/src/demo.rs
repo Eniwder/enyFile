@@ -264,6 +264,7 @@ fn script(root: &Path) -> Script {
     s.caption("↑ ↓", "カーソル移動");
     s.key("Down", 380);
     s.key("Down", 380);
+    s.key("Down", 380);
     s.key("Up", 600);
     s.caption("Enter", "フォルダを開く");
     s.key("Enter", 1500);
@@ -271,6 +272,7 @@ fn script(root: &Path) -> Script {
     s.key("Backspace", 1300);
     s.caption("Tab", "反対側のペインへ");
     s.key("Tab", 1000);
+    s.key("Down", 380);
     s.key("Down", 380);
     s.key("Down", 380);
     s.key("Tab", 900);
@@ -401,6 +403,7 @@ fn script(root: &Path) -> Script {
     s.act(|_, c| c.borrow_mut().settings_done(true));
     s.caption("", "ライト配色 + 游ゴシック");
     s.show(1500);
+    s.key("Down", 420);
     s.key("Down", 420);
     s.key("Down", 420);
     s.key("Ctrl+Shift+D", 3000);

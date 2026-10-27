@@ -1895,6 +1895,8 @@ impl Controller {
         }
         let mode = self.panes[p].pending.take().unwrap_or(Mode::Refresh);
         let focus_list = matches!(&mode, Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_));
+        // Opened with no item to show: the cursor starts on "..".
+        let entered = matches!(&mode, Mode::New(None));
         self.busy(p, false);
         let data = match result {
             Ok(data) => data,
@@ -2003,12 +2005,13 @@ impl Controller {
         } else {
             selection.exceptions.len()
         };
-        // Keep the cursor on ".." or a drive across refresh; an empty folder puts it on "..".
+        // Keep the cursor on ".." or a drive across refresh; an empty folder puts it on "..",
+        // and so does opening one, so a repeated Enter never starts the first program in it.
         let drives = self.drives.len();
         let special = if data.offset() == 1 && data.rows.is_empty() {
             Some(Special::Parent)
         } else if changed {
-            None
+            (entered && data.offset() == 1).then_some(Special::Parent)
         } else {
             self.panes[p].model.special.get().filter(|s| match s {
                 Special::Parent => data.offset() == 1,

@@ -516,6 +516,9 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     };
                     let on_parent = || c.borrow().panes[0].model.on_parent();
                     ui.invoke_focus_pane(0);
+                    // Opened from the toolbar: on "..", so Enter after Enter never starts an item.
+                    expect(on_parent(), "an opened folder starts with the cursor on ..")?;
+                    key(slint::platform::Key::DownArrow);
                     key(slint::platform::Key::Home);
                     expect(on_parent() && c.borrow().panes[0].model.row_data(0).unwrap().current, "Home puts the cursor on ..")?;
                     key(slint::platform::Key::DownArrow);
@@ -529,6 +532,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         return Ok(false);
                     }
                     expect(c.borrow().saved(0).current.is_some_and(|p| p.ends_with("Folder A")), "parent opened with the folder focused")?;
+                    expect(!c.borrow().panes[0].model.on_parent(), "going up puts the cursor on the folder, not ..")?;
                     s.pass(".. row takes the cursor; Enter on it opens the parent");
                     // Shift+F1 opens the first bookmark; Shift+F2 has none (nothing happens).
                     shift_key(&ui, 0, slint::platform::Key::F2);
@@ -538,6 +542,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     if !idle(&c) || !c.borrow().data(0).dir.ends_with("Folder A") {
                         return Ok(false);
                     }
+                    expect(c.borrow().panes[0].model.on_parent(), "a bookmark opens with the cursor on ..")?;
                     s.pass("Shift+F1 opens the first bookmark");
                     ui.invoke_command(0, 2);
                 }
