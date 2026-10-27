@@ -459,16 +459,21 @@ component AskDialog inherits Rectangle {
                 CheckBox { text: "すべて適用(A)"; checked <=> root.all; }
             }
             VerticalLayout {
-                // Wider with a large font: the longest label sets it.
-                spacing: 6px; min-width: 180px; horizontal-stretch: 0; alignment: start;
-                // Only the choices that apply to this conflict are shown.
-                if root.info.kind == 0 : DialogButton { text: "上書き(O)"; clicked => { root.choose(0); } }
-                if root.info.kind == 0 : DialogButton { text: "新しければ上書き(N)"; clicked => { root.choose(1); } }
-                if root.info.kind == 1 : DialogButton { text: "結合(G)"; clicked => { root.choose(4); } }
-                DialogButton { text: "スキップ(S)"; clicked => { root.choose(2); } }
-                if root.info.kind == 1 : DialogButton { text: "フォルダの置換(E)"; enabled: root.info.replaceable; clicked => { root.choose(5); } }
-                DialogButton { text: "リネーム(R)"; primary: root.renaming; clicked => { if root.renaming { root.confirm-rename(); } else { root.choose(3); } } }
-                Rectangle { height: 12px; }
+                // Wider with a large font: the longest label sets it. The choices are centered
+                // beside the details; Cancel sits apart, level with the apply-to-all box.
+                spacing: 8px; min-width: 180px; horizontal-stretch: 0;
+                Rectangle { vertical-stretch: 1; }
+                VerticalLayout {
+                    spacing: 8px; vertical-stretch: 0;
+                    // Only the choices that apply to this conflict are shown.
+                    if root.info.kind == 0 : DialogButton { text: "上書き(O)"; clicked => { root.choose(0); } }
+                    if root.info.kind == 0 : DialogButton { text: "新しければ上書き(N)"; clicked => { root.choose(1); } }
+                    if root.info.kind == 1 : DialogButton { text: "結合(G)"; clicked => { root.choose(4); } }
+                    DialogButton { text: "スキップ(S)"; clicked => { root.choose(2); } }
+                    if root.info.kind == 1 : DialogButton { text: "フォルダの置換(E)"; enabled: root.info.replaceable; clicked => { root.choose(5); } }
+                    DialogButton { text: "リネーム(R)"; primary: root.renaming; clicked => { if root.renaming { root.confirm-rename(); } else { root.choose(3); } } }
+                }
+                Rectangle { vertical-stretch: 1; }
                 DialogButton { text: "キャンセル(C)"; clicked => { root.choose(6); } }
             }
         }
