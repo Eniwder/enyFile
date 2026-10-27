@@ -1537,13 +1537,14 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     event.text = slint::platform::Key::Return.into();
                     event.modifiers.alt = true;
                     ui.invoke_key_event(0, event);
-                    expect(ui.get_props_open(), "Alt+Enter on one file opens the properties")?;
+                    expect(c.borrow().props.is_some(), "Alt+Enter on one file opens the properties")?;
                     expect(ui.get_props_name() == "invoice[RLO]fdp.exe", "the dialog shows the name with the mark")?;
                 }
                 75 => {
                     if ui.get_props_hash() != 2 {
                         return Ok(false);
                     }
+                    expect(ui.get_props_open(), "the dialog is shown once the file is read")?;
                     let rows: Vec<(String, String)> = ui.get_props_rows().iter().map(|r| (r.label.to_string(), r.value.to_string())).collect();
                     let value = |label: &str| rows.iter().find(|(l, _)| l == label).map(|(_, v)| v.clone()).unwrap_or_default();
                     expect(value("取得元") == "https://example.com/files/invoice.exe", &format!("download source: {rows:?}"))?;
@@ -1584,7 +1585,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     event.text = slint::platform::Key::Return.into();
                     event.modifiers.alt = true;
                     ui.invoke_key_event(0, event);
-                    expect(ui.get_props_open(), "Alt+Enter on a folder opens the properties")?;
+                    expect(c.borrow().props.is_some(), "Alt+Enter on a folder opens the properties")?;
                 }
                 77 => {
                     let rows: Vec<(String, String, bool)> = ui.get_props_rows().iter().map(|r| (r.label.to_string(), r.value.to_string(), r.dim)).collect();

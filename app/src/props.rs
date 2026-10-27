@@ -416,16 +416,30 @@ impl Controller {
                 hash_job(id, &path, total, &cancel);
             }
         });
+        // Shown once the item is read, at its full height (not growing as it fills in);
+        // a slow drive gets it after a moment anyway.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            post(Reply::PropsShow(id));
+        });
         if let Some(ui) = self.ui.upgrade() {
             let name = entry.path.file_name().map_or_else(|| shown(&entry.path), |n| listing::visible(&n.to_string_lossy()).into_owned());
             ui.set_props_name(name.into());
             ui.set_props_folder(entry.path.parent().map(shown).unwrap_or_default().into());
-            ui.set_props_open(true);
-            ui.invoke_focus_props();
         }
         self.props_rows();
-        self.apply_opacity();
         true
+    }
+    pub(super) fn props_show(&mut self, id: u64) {
+        if self.props.as_ref().is_none_or(|p| p.id != id) {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else { return };
+        if !ui.get_props_open() {
+            ui.set_props_open(true);
+            ui.invoke_focus_props();
+            self.apply_opacity();
+        }
     }
     pub(super) fn close_props(&mut self) {
         let Some(props) = self.props.take() else { return };
@@ -449,6 +463,7 @@ impl Controller {
         }
         props.info = Some(info);
         self.props_rows();
+        self.props_show(id);
     }
     pub(super) fn props_hash(&mut self, id: u64, hashing: Hashing) {
         let Some(props) = self.props.as_mut().filter(|p| p.id == id) else { return };

@@ -105,6 +105,8 @@ enum Reply {
     MemoryRestored(Result<(), String>),
     /// The properties dialog `u64` (Alt+Enter): the item read, then its SHA-256.
     Props(u64, Result<props::Info, String>),
+    /// The item is slow to read: show the dialog without its details.
+    PropsShow(u64),
     Hash(u64, props::Hashing),
     Usage(u64, props::Measuring),
 }
@@ -1890,6 +1892,7 @@ impl Controller {
                 Err(e) => self.message(format!("開けません: {e}")),
             },
             Reply::Props(id, info) => self.props_info(id, info),
+            Reply::PropsShow(id) => self.props_show(id),
             Reply::Hash(id, hashing) => self.props_hash(id, hashing),
             Reply::Usage(id, measuring) => self.props_usage(id, measuring),
         }
