@@ -288,6 +288,7 @@ struct Pane {
     /// A change notification arrived while a listing was in flight.
     stale: bool,
     watch: Option<shell::Watch>,
+    busy: slint::Timer,
     back: Vec<Saved>,
     forward: Vec<Saved>,
     column: usize,
@@ -343,6 +344,8 @@ struct Comparing {
 }
 /// Typing in the recursive search bar: the query runs once the keys pause this long.
 const TYPING: Duration = Duration::from_millis(120);
+/// "読み込み中…" waits this long: quick reloads (watch, after a delete) would only flicker.
+const BUSY_DELAY: Duration = Duration::from_millis(300);
 /// The find bar is open for `pane`.
 struct Finding {
     pane: usize,
@@ -470,13 +473,23 @@ impl Controller {
         }
     }
     fn busy(&self, p: usize, busy: bool) {
-        if let Some(ui) = self.ui.upgrade() {
-            match p {
-                0 => ui.set_p0_busy(busy),
-                1 => ui.set_p1_busy(busy),
-                2 => ui.set_p2_busy(busy),
-                _ => ui.set_p3_busy(busy),
+        let set = move |ui: slint::Weak<App>, busy| {
+            if let Some(ui) = ui.upgrade() {
+                match p {
+                    0 => ui.set_p0_busy(busy),
+                    1 => ui.set_p1_busy(busy),
+                    2 => ui.set_p2_busy(busy),
+                    _ => ui.set_p3_busy(busy),
+                }
             }
+        };
+        let timer = &self.panes[p].busy;
+        if !busy {
+            timer.stop();
+            set(self.ui.clone(), false);
+        } else if !timer.running() {
+            let ui = self.ui.clone();
+            timer.start(slint::TimerMode::SingleShot, BUSY_DELAY, move || set(ui.clone(), true));
         }
     }
     fn set_path(&self, p: usize, path: String) {
@@ -3090,6 +3103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending: None,
         stale: false,
         watch: None,
+        busy: slint::Timer::default(),
         back: Vec::new(),
         forward: Vec::new(),
         column: 0,
