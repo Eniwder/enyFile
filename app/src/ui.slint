@@ -1581,6 +1581,9 @@ export component App inherits Window {
     // A shown menu makes the window a little more opaque (Rust sets the window opacity).
     callback menu-shown();
     changed open-menu => { root.menu-shown(); }
+    out property <bool> bookmarks-open;
+    changed bookmarks-open => { root.menu-shown(); }
+    function close-bookmarks() { root.bookmarks-open = false; }
     // Bar entry highlighted after a lone Alt, no menu shown yet: -1 none.
     out property <int> bar-focus: -1;
     // Item highlighted in the shown menu (keyboard or hover): -1 none.
@@ -1683,41 +1686,10 @@ export component App inherits Window {
         IconButton { glyph: "\u{EB9F}"; tint: #9bc86a; glyph-size: 18px; nudge: 0px; clicked => { root.place(2); } }
         IconButton { glyph: "\u{E8B2}"; tint: #e0904a; nudge: 1px; clicked => { root.place(3); } }
         IconButton { glyph: "\u{E8D6}"; tint: #b48ae0; glyph-size: 18px; nudge: -0.5px; clicked => { root.place(4); } }
-        IconButton {
+        bookmark-button := IconButton {
             glyph: "\u{EB51}"; tint: #e86a8a;
             glyph-size: 17px;
-            clicked => { bookmark-menu.show(); }
-            bookmark-menu := PopupWindow {
-                y: parent.height; width: 380px * root.ui-scale;
-                Rectangle {
-                    background: Theme.dialog; border-width: 1px; border-color: Theme.border;
-                    // Only measured: the width of the key column.
-                    key-width := Text { text: root.bookmarks.length > 9 ? "Shift+F12" : "Shift+F9"; font-size: 11px; visible: false; }
-                    VerticalLayout {
-                        padding: 4px;
-                        for b[i] in root.bookmarks : Rectangle {
-                            height: root.menu-row-h + 2px;
-                            background: hit.has-hover ? Theme.hover : transparent;
-                            hit := TouchArea { clicked => { root.bookmark-open(i); } }
-                            HorizontalLayout {
-                                padding-left: 10px; spacing: 10px;
-                                Text { text: b.name; color: Theme.text; vertical-alignment: center; }
-                                Text { text: b.path; color: Theme.dim; font-size: 11px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
-                                // Shift+F1..F12 open the first twelve. As wide as the longest key,
-                                // so F1 and F10 line up.
-                                HorizontalLayout {
-                                    spacing: 4px;
-                                    Text { width: key-width.preferred-width; text: i < 12 ? "Shift+F\{i + 1}" : ""; color: Theme.dim; font-size: 11px; vertical-alignment: center; }
-                                    IconButton { width: 24px; glyph: "\u{E70F}"; glyph-size: 13px; tint: Theme.dim; clicked => { root.bookmark-edit(i); } }
-                                }
-                            }
-                        }
-                        if root.bookmarks.length == 0 : Text { height: root.menu-row-h + 2px; x: 10px; text: "ブックマークはありません"; color: Theme.dim; vertical-alignment: center; }
-                        Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
-                        MenuEntry { text: "＋ 現在のフォルダを追加"; clicked => { root.bookmark-add(); } }
-                    }
-                }
-            }
+            clicked => { root.bookmarks-open = true; bookmark-keys.focus(); }
         }
     }
     // Layouts: 2 panes side by side, 3 side by side or stacked, 4 in a 2x2 grid.
@@ -2073,6 +2045,63 @@ export component App inherits Window {
             }
         }
     }
+    // Bookmarks: drawn like the menus (not PopupWindow, which never says when it closed, so
+    // the window could not go back to its opacity). Always there, faded and slid in and out.
+    if root.bookmarks-open : TouchArea {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        pointer-event(e) => { if e.kind == PointerEventKind.down { root.close-bookmarks(); root.focus-pane(root.active-pane); } }
+    }
+    bookmark-keys := FocusScope {
+        x: 0; y: 0; width: 0; height: 0; focus-on-click: false;
+        key-pressed(e) => {
+            if e.text == Key.Escape { root.close-bookmarks(); root.focus-pane(root.active-pane); }
+            return accept;
+        }
+        changed has-focus => { if !self.has-focus { root.close-bookmarks(); } }
+    }
+    Rectangle {
+        property <length> top: bookmark-button.absolute-position.y + bookmark-button.height;
+        x: max(0px, min(bookmark-button.absolute-position.x, root.width - self.width));
+        y: self.top + (root.bookmarks-open ? 0px : -6px);
+        width: min(root.width, 380px * root.ui-scale);
+        height: min(bookmark-list.preferred-height, root.height - self.top);
+        opacity: root.bookmarks-open ? 1 : 0;
+        visible: self.opacity > 0;
+        animate y, opacity { duration: 120ms; easing: ease-out; }
+        background: Theme.dialog; border-width: 1px; border-color: Theme.border;
+        clip: true;
+        TouchArea { }
+        // Only measured: the width of the key column.
+        key-width := Text { text: root.bookmarks.length > 9 ? "Shift+F12" : "Shift+F9"; font-size: 11px; visible: false; }
+        bookmark-view := Flickable {
+            interactive: bookmark-list.preferred-height > self.height;
+            content-height: bookmark-list.preferred-height;
+            bookmark-list := VerticalLayout {
+                width: bookmark-view.width; height: self.preferred-height;
+                padding: 4px;
+                for b[i] in root.bookmarks : Rectangle {
+                    height: root.menu-row-h + 2px;
+                    background: hit.has-hover ? Theme.hover : transparent;
+                    hit := TouchArea { clicked => { root.close-bookmarks(); root.bookmark-open(i); root.focus-pane(root.active-pane); } }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 10px;
+                        Text { text: b.name; color: Theme.text; vertical-alignment: center; }
+                        Text { text: b.path; color: Theme.dim; font-size: 11px; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                        // Shift+F1..F12 open the first twelve. As wide as the longest key,
+                        // so F1 and F10 line up.
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text { width: key-width.preferred-width; text: i < 12 ? "Shift+F\{i + 1}" : ""; color: Theme.dim; font-size: 11px; vertical-alignment: center; }
+                            IconButton { width: 24px; glyph: "\u{E70F}"; glyph-size: 13px; tint: Theme.dim; clicked => { root.close-bookmarks(); root.bookmark-edit(i); } }
+                        }
+                    }
+                }
+                if root.bookmarks.length == 0 : Text { height: root.menu-row-h + 2px; x: 10px; text: "ブックマークはありません"; color: Theme.dim; vertical-alignment: center; }
+                Rectangle { height: 9px; Rectangle { y: 4px; height: 1px; background: Theme.border; } }
+                MenuEntry { text: "＋ 現在のフォルダを追加"; clicked => { root.close-bookmarks(); root.bookmark-add(); root.focus-pane(root.active-pane); } }
+            }
+        }
+    }
     settings-dialog := SettingsDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
         visible: root.settings-open;
@@ -2125,7 +2154,9 @@ export component App inherits Window {
     }
     bookmark-dialog := BookmarkDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
-        visible: root.bookmark-editing;
+        opacity: root.bookmark-editing ? 1 : 0;
+        visible: self.opacity > 0;
+        animate opacity { duration: 120ms; easing: ease-out; }
         rows: root.bookmark-draft;
         focus-row: root.bookmark-focus-row; focus-path: root.bookmark-focus-path;
         edited(i, path, t) => { root.bookmark-edited(i, path, t); }

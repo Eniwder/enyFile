@@ -2464,7 +2464,7 @@ impl Controller {
                 || ui.get_bookmark_editing()
             {
                 1.0
-            } else if ui.get_open_menu() >= 0 {
+            } else if ui.get_open_menu() >= 0 || ui.get_bookmarks_open() {
                 (self.config.opacity + 0.1).min(1.0)
             } else {
                 self.config.opacity
