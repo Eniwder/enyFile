@@ -58,6 +58,9 @@ pub struct Request {
     pub panes: Vec<PathBuf>,
     pub panes_writable: bool,
     pub memory: PathBuf,
+    /// The memory as the user last accepted it: what the agent gets. None (not known yet)
+    /// takes the file as it is.
+    pub approved: Option<String>,
     /// Continue this conversation; None starts a new one.
     pub session: Option<String>,
 }
@@ -74,6 +77,8 @@ pub enum Outcome {
     Done,
     Failed(String),
     Cancelled,
+    /// Not started: the memory file differs from the accepted text (`Event::Memory` came first).
+    MemoryPending,
 }
 #[derive(Debug, PartialEq)]
 pub enum Event {
@@ -82,6 +87,9 @@ pub enum Event {
     /// What runs right now (shown in the panel header, not kept).
     Status(String),
     Log(Kind, String),
+    /// The memory file differs from `Request::approved`: its contents now, for the user to
+    /// accept or put back. Comes before `Finished`, whatever the outcome.
+    Memory(String),
     Finished(Outcome),
 }
 
@@ -167,6 +175,13 @@ pub fn start(request: Request, sink: impl Fn(Event) -> bool + Send + 'static) ->
     let run = Run(shared.clone());
     std::thread::spawn(move || {
         let outcome = execute(&request, &shared, &sink);
+        // Checked on every end, cancelled or failed too: the agent may have written before.
+        if let Some(approved) = &request.approved {
+            let now = std::fs::read(&request.memory).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+            if now != *approved {
+                sink(Event::Memory(now));
+            }
+        }
         sink(Event::Finished(outcome));
     });
     run
@@ -206,6 +221,12 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
     let memory = match read_memory(&request.memory) {
         Ok(memory) => memory,
         Err(e) => return Outcome::Failed(format!("メモリファイルを用意できません: {e}")),
+    };
+    // A change not accepted yet (the filer closed during a run, an edit by hand) never
+    // reaches the agent: the user sees it first.
+    let memory = match &request.approved {
+        Some(approved) if *approved != memory => return Outcome::MemoryPending,
+        _ => cut_memory(memory),
     };
     let writable = writable(request, |dir| {
         sink(Event::Log(Kind::Info, format!("追加フォルダが見つからないため除きました: {}", dir.display())));
@@ -299,13 +320,62 @@ pub fn ensure_memory(file: &Path) -> std::io::Result<()> {
 const MEMORY_TEMPLATE: &str = include_str!("../agent/memory.md");
 /// Large memories are cut, so a runaway file cannot fill the prompt.
 const MEMORY_LIMIT: usize = 32 * 1024;
-fn read_memory(file: &Path) -> std::io::Result<String> {
+pub fn read_memory(file: &Path) -> std::io::Result<String> {
     ensure_memory(file)?;
-    let text = String::from_utf8_lossy(&std::fs::read(file)?).into_owned();
-    Ok(match text.char_indices().nth(MEMORY_LIMIT) {
+    Ok(String::from_utf8_lossy(&std::fs::read(file)?).into_owned())
+}
+fn cut_memory(text: String) -> String {
+    match text.char_indices().nth(MEMORY_LIMIT) {
         Some((cut, _)) => format!("{}\n…（以下省略）", &text[..cut]),
         None => text,
-    })
+    }
+}
+
+/// A change to the memory, line by line: (0 same, 1 added, 2 removed, 3 same lines left out,
+/// text). Only a line of context around each change is kept; empty when only line ends differ.
+pub fn memory_diff(old: &str, new: &str) -> Vec<(i32, String)> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let (n, m) = (a.len(), b.len());
+    let mut ops: Vec<(i32, &str)> = Vec::new();
+    if n * m > 4_000_000 {
+        // Too large to match up: all of it out, all of it in.
+        ops.extend(a.iter().map(|l| (2, *l)).chain(b.iter().map(|l| (1, *l))));
+    } else {
+        // Longest common subsequence from the end, walked from the start.
+        let w = m + 1;
+        let mut t = vec![0u32; (n + 1) * w];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                t[i * w + j] = if a[i] == b[j] { t[(i + 1) * w + j + 1] + 1 } else { t[(i + 1) * w + j].max(t[i * w + j + 1]) };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n || j < m {
+            if i < n && j < m && a[i] == b[j] {
+                ops.push((0, a[i]));
+                (i, j) = (i + 1, j + 1);
+            } else if i < n && (j == m || t[(i + 1) * w + j] >= t[i * w + j + 1]) {
+                ops.push((2, a[i]));
+                i += 1;
+            } else {
+                ops.push((1, b[j]));
+                j += 1;
+            }
+        }
+    }
+    if ops.iter().all(|(kind, _)| *kind == 0) {
+        return Vec::new();
+    }
+    let near = |k: usize| ops[k.saturating_sub(1)..(k + 2).min(ops.len())].iter().any(|(kind, _)| *kind != 0);
+    let mut lines: Vec<(i32, String)> = Vec::new();
+    for (k, (kind, text)) in ops.iter().enumerate() {
+        if *kind != 0 || near(k) {
+            lines.push((*kind, text.to_string()));
+        } else if lines.last().is_none_or(|(kind, _)| *kind != 3) {
+            lines.push((3, String::new()));
+        }
+    }
+    lines
 }
 
 /// One line for the log: commands can be long PowerShell scripts.
@@ -537,6 +607,7 @@ mod tests {
             panes: vec![PathBuf::from(r"H:\縮小")],
             panes_writable: false,
             memory: PathBuf::from(r"C:\enyFile\agent\memory.md"),
+            approved: None,
             session: session.map(Into::into),
         }
     }
@@ -595,6 +666,18 @@ mod tests {
         assert_eq!(missed, [gone]);
         let full = Request { panes_writable: true, ..request(None, Access::Full) };
         assert_eq!(writable(&full, none), [memory]);
+    }
+    #[test]
+    fn memory_changes() {
+        let old = "# メモ\n- a\n- b\n- c\n- d\n- e\n";
+        assert_eq!(
+            memory_diff(old, "# メモ\n- a\n- b\n- c\n- d2\n- e\n- 新しい指示\n"),
+            [(3, String::new()), (0, "- c".into()), (2, "- d".into()), (1, "- d2".into()), (0, "- e".into()), (1, "- 新しい指示".into())]
+        );
+        assert_eq!(memory_diff("", "x"), [(1, "x".to_string())]);
+        assert_eq!(memory_diff("x\n", ""), [(2, "x".to_string())]);
+        // Only line ends: nothing to show.
+        assert!(memory_diff("a\nb\n", "a\r\nb").is_empty());
     }
     #[test]
     fn events() {

@@ -99,6 +99,10 @@ enum Reply {
     /// The settings dialog's hint for an empty agent program field.
     AgentFound(String),
     AgentVersion(Result<String, String>),
+    /// The memory file at startup, accepted as it is when no accepted text is known yet.
+    MemoryBaseline(String),
+    /// 元に戻す wrote the accepted memory back.
+    MemoryRestored(Result<(), String>),
     /// The properties dialog `u64` (Alt+Enter): the item read, then its SHA-256.
     Props(u64, Result<props::Info, String>),
     Hash(u64, props::Hashing),
@@ -126,6 +130,8 @@ struct Agent {
     version_asked: bool,
     /// Ticks the elapsed seconds in the panel header while a run goes on.
     clock: slint::Timer,
+    /// The memory file's changed text the dialog asks about.
+    memory: Option<String>,
 }
 /// The panel keeps this many log lines, and ↑ goes back this many requests.
 const AGENT_LINES: usize = 1000;
@@ -1567,6 +1573,7 @@ impl Controller {
             panes,
             panes_writable,
             memory: self.config.agent_memory(),
+            approved: self.config.agent_memory_approved.clone(),
             session: self.agent.session.clone(),
         };
         self.agent.id += 1;
@@ -1613,10 +1620,12 @@ impl Controller {
         self.clipboard_text(&lines.join("\r\n"), "エージェントの会話をコピーしました");
     }
     fn agent_event(&mut self, id: u64, event: agent::Event) {
-        if id != self.agent.id {
+        // A run 新しい会話 left behind still has its memory change asked about.
+        if id != self.agent.id && !matches!(event, agent::Event::Memory(_)) {
             return;
         }
         match event {
+            agent::Event::Memory(text) => self.memory_changed(text),
             agent::Event::Session(session) => self.agent.session = Some(session),
             agent::Event::Status(status) => {
                 self.agent.status = status;
@@ -1637,6 +1646,10 @@ impl Controller {
                         self.agent.status = "中断しました".into();
                         self.message("エージェント: 中断しました");
                     }
+                    agent::Outcome::MemoryPending => {
+                        self.agent_push(4, "メモリの変更を確認してから送り直してください（↑ で依頼を呼び出せます）".into());
+                        self.agent.status = "メモリの確認待ち".into();
+                    }
                     agent::Outcome::Failed(error) => {
                         let first = error.lines().next().unwrap_or_default().to_string();
                         let lower = error.to_lowercase();
@@ -1654,6 +1667,66 @@ impl Controller {
                 self.refresh_shown(None);
             }
         }
+    }
+    /// The memory file no longer holds the accepted text: show what changed.
+    fn memory_changed(&mut self, text: String) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let approved = self.config.agent_memory_approved.clone().unwrap_or_default();
+        let diff = agent::memory_diff(&approved, &text);
+        if diff.is_empty() {
+            // Only line ends: nothing anyone could be told to do.
+            self.config.agent_memory_approved = Some(text);
+            if let Err(e) = self.config.save() {
+                self.message(format!("設定を保存できません: {e}"));
+            }
+            return;
+        }
+        let lines: Vec<AgentLine> = diff
+            .into_iter()
+            .map(|(kind, text)| {
+                let text = match kind {
+                    1 => format!("+ {text}"),
+                    2 => format!("- {text}"),
+                    3 => "⋯".to_string(),
+                    _ => format!("  {text}"),
+                };
+                AgentLine { kind, text: text.into() }
+            })
+            .collect();
+        self.agent.memory = Some(text);
+        ui.set_memory_file(display(&self.config.agent_memory()).into());
+        ui.set_memory_lines(ModelRc::from(Rc::new(slint::VecModel::from(lines))));
+        ui.set_memory_open(true);
+        ui.invoke_focus_memory();
+        self.apply_opacity();
+    }
+    /// 0 採用, 1 元に戻す, 2 あとで (the next request asks again).
+    fn memory_answer(&mut self, code: i32) {
+        let Some(text) = self.agent.memory.take() else { return };
+        match code {
+            0 => {
+                self.config.agent_memory_approved = Some(text);
+                match self.config.save() {
+                    Ok(()) => self.message("メモリの変更を採用しました"),
+                    Err(e) => self.message(format!("設定を保存できません: {e}")),
+                }
+            }
+            1 => {
+                let file = self.config.agent_memory();
+                let approved = self.config.agent_memory_approved.clone().unwrap_or_default();
+                std::thread::spawn(move || post(Reply::MemoryRestored(std::fs::write(&file, approved).map_err(|e| e.to_string()))));
+            }
+            _ => self.message("メモリの変更は保留中です。次の依頼の前にもう一度確認します"),
+        }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_memory_open(false);
+            if ui.get_agent_open() {
+                ui.invoke_focus_agent();
+            } else {
+                ui.invoke_focus_pane(self.active as i32);
+            }
+        }
+        self.apply_opacity();
     }
     /// Reloads the shown folders after our own operation: change notifications never arrive
     /// on some shares (WSL's \\wsl$), so the watch alone would leave deleted items listed.
@@ -1784,6 +1857,18 @@ impl Controller {
                 self.agent.version = Some(version);
                 self.sync_agent();
             }
+            Reply::MemoryBaseline(text) => {
+                if self.config.agent_memory_approved.is_none() {
+                    self.config.agent_memory_approved = Some(text);
+                    if let Err(e) = self.config.save() {
+                        self.message(format!("設定を保存できません: {e}"));
+                    }
+                }
+            }
+            Reply::MemoryRestored(result) => match result {
+                Ok(()) => self.message("メモリを元に戻しました"),
+                Err(e) => self.message(format!("メモリを元に戻せません: {e}")),
+            },
             Reply::AgentFound(hint) => {
                 if let Some(ui) = self.ui.upgrade() {
                     ui.set_settings_agent_detected(hint.into());
@@ -2367,6 +2452,7 @@ impl Controller {
                 || ui.get_name_open()
                 || ui.get_props_open()
                 || ui.get_ask_open()
+                || ui.get_memory_open()
             {
                 1.0
             } else if ui.get_open_menu() >= 0 {
@@ -3146,6 +3232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             version: None,
             version_asked: false,
             clock: slint::Timer::default(),
+            memory: None,
         },
         drives: Arc::new(Vec::new()),
         menus: ctxmenu::Menus::start(|outcome| {
@@ -3264,6 +3351,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let c = controller.clone();
         ui.on_agent_memory_open(move || c.borrow().agent_memory_open());
+    }
+    {
+        let c = controller.clone();
+        ui.on_memory_answer(move |code| c.borrow_mut().memory_answer(code));
     }
     {
         let c = controller.clone();
@@ -3530,7 +3621,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The memory is there from the start (the release zip ships it; this covers the
         // development build and folders from older versions). Off the UI thread.
         let memory = c.config.agent_memory();
-        std::thread::spawn(move || agent::ensure_memory(&memory));
+        let known = c.config.agent_memory_approved.is_some();
+        std::thread::spawn(move || {
+            // Before this check existed the file was trusted as it was: so it is, once.
+            if let (Ok(text), false) = (agent::read_memory(&memory), known) {
+                post(Reply::MemoryBaseline(text));
+            }
+        });
     }
     // The right pane starts active.
     ui.invoke_focus_pane(1);

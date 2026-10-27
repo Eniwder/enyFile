@@ -298,6 +298,73 @@ component PropsDialog inherits Rectangle {
     }
 }
 
+// The agent's memory file changed (by the agent, or by hand): the next conversation gets the
+// change only once it is accepted. Lines are AgentLine with kind 0 same, 1 added, 2 removed,
+// 3 lines left out. Answers: 0 accept, 1 put back, 2 decide later.
+component MemoryDialog inherits Rectangle {
+    in property <string> file;
+    in property <[AgentLine]> lines;
+    callback answer(int);
+    public function open() { keys.focus(); }
+    background: #00000066;
+    TouchArea { }
+    keys := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape { root.answer(2); return accept; }
+            if e.modifiers.control || e.modifiers.alt { return reject; }
+            if e.text.to-lowercase() == "a" { root.answer(0); return accept; }
+            if e.text.to-lowercase() == "r" { root.answer(1); return accept; }
+            return reject;
+        }
+    }
+    Rectangle {
+        width: min(parent.width - 40px, 760px); height: min(parent.height - 40px, content.preferred-height);
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        background: Theme.dialog; border-radius: 4px; border-width: 1px; border-color: Theme.border-active;
+        clip: true;
+        content := VerticalLayout {
+            padding: 16px; spacing: 6px;
+            Text { text: "エージェントのメモリが変更されました"; font-weight: 700; font-size: 14px; color: Theme.text; }
+            Text { text: root.file; color: Theme.dim; font-size: 12px; overflow: elide; }
+            Rectangle {
+                height: notice.preferred-height;
+                notice := Text {
+                    width: parent.width; height: self.preferred-height; wrap: word-wrap; color: Theme.text;
+                    text: "採用するまで、新しい会話には前の内容を渡します。頼んだ覚えのない変更は元に戻してください。";
+                }
+            }
+            Rectangle {
+                border-width: 1px; border-color: Theme.border; border-radius: 3px; background: Theme.pane;
+                preferred-height: lines-box.preferred-height + 2px; min-height: 0px; vertical-stretch: 1;
+                lines-view := Flickable {
+                    x: 1px; y: 1px; width: parent.width - 2px; height: parent.height - 2px;
+                    content-height: lines-box.preferred-height;
+                    lines-box := VerticalLayout {
+                        width: lines-view.width; height: self.preferred-height;
+                        padding: 4px; alignment: start;
+                        for line in root.lines : Rectangle {
+                            height: line-text.preferred-height + 2px;
+                            background: line.kind == 1 ? Theme.diff-add-bg : line.kind == 2 ? Theme.diff-del-bg : transparent;
+                            line-text := Text {
+                                x: 4px; y: 1px; width: parent.width - 8px; height: self.preferred-height;
+                                text: line.text; wrap: char-wrap;
+                                color: line.kind == 1 || line.kind == 2 ? Theme.text : Theme.dim;
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle { height: 4px; }
+            HorizontalLayout {
+                spacing: 6px; alignment: end;
+                Text { text: "Esc あとで決める（次の依頼の前にもう一度確認）"; color: Theme.dim; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                DialogButton { text: "元に戻す(R)"; clicked => { root.answer(1); } }
+                DialogButton { text: "採用(A)"; primary: true; clicked => { root.answer(0); } }
+            }
+        }
+    }
+}
+
 component AskDialog inherits Rectangle {
     in property <AskInfo> info;
     callback answer(int, string, bool);
@@ -1455,6 +1522,12 @@ export component App inherits Window {
     callback props-hash-key();
     callback props-windows();
     public function focus-props() { props-dialog.open(); }
+    // The agent's memory file changed: accept or put back.
+    in property <bool> memory-open;
+    in property <string> memory-file;
+    in property <[AgentLine]> memory-lines;
+    callback memory-answer(int);
+    public function focus-memory() { memory-dialog.open(); }
     in property <bool> name-open;
     in property <string> name-title;
     in property <string> name-initial;
@@ -2029,6 +2102,12 @@ export component App inherits Window {
         remove => { root.bookmark-delete(root.bookmark-index); }
         move(down) => { root.bookmark-move(root.bookmark-index, down); }
         cancel => { root.bookmark-cancel(); }
+    }
+    memory-dialog := MemoryDialog {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        visible: root.memory-open;
+        file: root.memory-file; lines: root.memory-lines;
+        answer(code) => { root.memory-answer(code); }
     }
     asker := AskDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;

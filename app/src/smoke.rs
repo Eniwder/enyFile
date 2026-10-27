@@ -1384,6 +1384,12 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         return Ok(false);
                     }
                     expect(!ui.get_agent_following(), "the wheel scrolled the log back from its end")?;
+                    // Written during the run, as an agent told by a planted file would.
+                    expect(c.borrow().config.agent_memory_approved.is_some(), "the memory at startup is the accepted one")?;
+                    let memory = c.borrow().config.agent_memory();
+                    let mut text = std::fs::read_to_string(&memory).map_err(|e| e.to_string())?;
+                    text.push_str("- injected by a run\n");
+                    std::fs::write(&memory, text).map_err(|e| e.to_string())?;
                     ui.invoke_agent_cancel();
                     s.cancelled = Some(Instant::now());
                 }
@@ -1395,6 +1401,11 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let took = s.cancelled.map_or(Duration::ZERO, |t| t.elapsed());
                     expect(took < Duration::from_secs(20), &format!("cancel ends the whole process tree ({took:?})"))?;
                     expect(agent_texts(&c).last().is_some_and(|l| l == "中断しました"), "the log says it was cancelled")?;
+                    // A cancelled run is checked too: the change waits for the user.
+                    let lines: Vec<String> = ui.get_memory_lines().iter().map(|l| l.text.to_string()).collect();
+                    expect(ui.get_memory_open() && lines.iter().any(|l| l == "+ - injected by a run"), &format!("the memory change is shown: {lines:?}"))?;
+                    ui.invoke_memory_answer(1);
+                    expect(!ui.get_memory_open(), "元に戻す closes the dialog")?;
                     expect(ui.get_agent_badge().is_empty(), "the badge goes when the run ends")?;
                     // The splitter above the panel: its share is saved like the pane splitters.
                     ui.set_agent_split(0.3);
@@ -1434,8 +1445,32 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     window_ctrl_key(&ui, "i");
                     s.pass("cancel stops the CLI and its children; 新しい会話 starts over; 使用しない turns Ctrl+I off");
                 }
-                // Opening a file starts it in its own folder (as Explorer does), not in ours.
                 70 => {
+                    let memory = c.borrow().config.agent_memory();
+                    let approved = c.borrow().config.agent_memory_approved.clone().unwrap_or_default();
+                    if std::fs::read_to_string(&memory).ok().as_ref() != Some(&approved) {
+                        return Ok(false);
+                    }
+                    s.pass("a memory change made during a cancelled run is shown and put back");
+                    // A change left from before (an edit by hand, a run the filer closed on)
+                    // stops the next request before the CLI starts.
+                    std::fs::write(&memory, format!("{approved}- by hand\n")).map_err(|e| e.to_string())?;
+                    expect(ui.invoke_agent_send("held".into()), "the request is sent")?;
+                }
+                71 => {
+                    if c.borrow().agent.run.is_some() {
+                        return Ok(false);
+                    }
+                    let prompt = std::fs::read_to_string(root.join("agent-prompt.txt")).map_err(|e| e.to_string())?;
+                    expect(!prompt.contains("held"), "the CLI is not started with an unaccepted memory")?;
+                    expect(ui.get_agent_status() == "メモリの確認待ち" && ui.get_memory_open(), &format!("the change is asked about first ({})", ui.get_agent_status()))?;
+                    ui.invoke_memory_answer(0);
+                    let saved = config::Config::load(root.join("config.json")).agent_memory_approved.unwrap_or_default();
+                    expect(!ui.get_memory_open() && saved.ends_with("- by hand\n"), &format!("採用 saves the new text: {saved:?}"))?;
+                    s.pass("a pending memory change holds the next request until accepted");
+                }
+                // Opening a file starts it in its own folder (as Explorer does), not in ours.
+                72 => {
                     let probe = root.join("cmpL").join("where.cmd");
                     if !probe.exists() {
                         std::fs::write(&probe, "@cd > \"%~dp0cwd.txt\"\r\n").map_err(|e| e.to_string())?;
@@ -1446,7 +1481,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let row = index(&c, 0, "where.cmd")?;
                     ui.invoke_pointer(0, row, false, false, 2);
                 }
-                71 => {
+                73 => {
                     // The file exists before `cd` has written into it.
                     let Some(cwd) = std::fs::read_to_string(root.join("cmpL").join("cwd.txt")).ok().filter(|t| t.ends_with('\n')) else { return Ok(false) };
                     let expected = display(&root.join("cmpL"));
@@ -1455,7 +1490,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                 }
                 // A downloaded file whose name hides its extension (U+202E): marked in the list;
                 // Alt+Enter shows where it came from and its SHA-256.
-                72 => {
+                74 => {
                     let name = "invoice\u{202E}fdp.exe";
                     let file = root.join("cmpL").join(name);
                     if !file.exists() {
@@ -1480,7 +1515,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_props_open(), "Alt+Enter on one file opens the properties")?;
                     expect(ui.get_props_name() == "invoice[RLO]fdp.exe", "the dialog shows the name with the mark")?;
                 }
-                73 => {
+                75 => {
                     if ui.get_props_hash() != 2 {
                         return Ok(false);
                     }
@@ -1502,7 +1537,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("hidden bidi characters are marked; properties show the download source, streams and SHA-256");
                 }
                 // Alt+Enter on a folder adds up its size on a worker, without entering a junction.
-                74 => {
+                76 => {
                     let folder = root.join("cmpL").join("sized");
                     if !folder.exists() {
                         std::fs::create_dir_all(folder.join("inner")).map_err(|e| e.to_string())?;
@@ -1526,7 +1561,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_key_event(0, event);
                     expect(ui.get_props_open(), "Alt+Enter on a folder opens the properties")?;
                 }
-                75 => {
+                77 => {
                     let rows: Vec<(String, String, bool)> = ui.get_props_rows().iter().map(|r| (r.label.to_string(), r.value.to_string(), r.dim)).collect();
                     let Some(skipped) = rows.iter().find(|(l, _, _)| l == "集計外") else { return Ok(false) };
                     expect(skipped.1.starts_with("リンク1件"), &format!("the junction is skipped: {rows:?}"))?;
@@ -1535,7 +1570,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_props_close();
                     s.pass("folder properties add up the size, skipping junctions");
                 }
-                76 => return Err("done".into()),
+                78 => return Err("done".into()),
                 _ => {}
             }
             Ok(true)

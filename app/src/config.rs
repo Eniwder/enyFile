@@ -84,6 +84,9 @@ pub struct Config {
     pub agent_folders: Vec<PathBuf>,
     /// With `Access::Folder` / `Extra`: the other shown panes' folders are writable too.
     pub agent_panes: bool,
+    /// The memory file's text as the user last accepted it. Kept here, where the sandboxed
+    /// agent cannot write; None until the first start that knows it.
+    pub agent_memory_approved: Option<String>,
 }
 fn default_extensions() -> Vec<(String, slint::Color)> {
     theme::EXTENSIONS
@@ -227,6 +230,7 @@ impl Config {
             .as_array()
             .map(|dirs| dirs.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
             .unwrap_or_default();
+        let agent_memory_approved = agent["memory"].as_str().map(str::to_string);
         Self {
             file,
             raw,
@@ -257,6 +261,7 @@ impl Config {
             agent_access,
             agent_folders,
             agent_panes,
+            agent_memory_approved,
         }
     }
     /// The agent's memory beside the settings, in a folder of its own: the agent may write
@@ -337,6 +342,9 @@ impl Config {
             "folders": self.agent_folders.iter().map(|d| d.to_string_lossy()).collect::<Vec<_>>(),
             "panes": self.agent_panes,
         });
+        if let Some(memory) = &self.agent_memory_approved {
+            self.raw["agent"]["memory"] = json!(memory);
+        }
         self.raw["bookmarks"] = Value::Array(
             self.bookmarks
                 .iter()
@@ -424,10 +432,13 @@ mod tests {
         config.agent_panes = true;
         config.agent_access = agent::Access::Extra;
         config.agent_folders = vec![r"H:\写真".into()];
+        assert_eq!(config.agent_memory_approved, None);
+        config.agent_memory_approved = Some("- 常に日本語で\r\n".into());
         config.save().unwrap();
         let again = Config::load(file.clone());
         assert_eq!((again.agent_access, again.agent_folders.clone(), again.agent_path.clone()), (agent::Access::Extra, vec![PathBuf::from(r"H:\写真")], None));
         assert!(again.agent_panes);
+        assert_eq!(again.agent_memory_approved.as_deref(), Some("- 常に日本語で\r\n"), "the accepted memory is kept as is");
         assert!(!again.agent_enabled, "turned off stays off");
         assert_eq!(again.agent_memory(), dir.join("agent").join("memory.md"));
         let _ = std::fs::remove_dir_all(&dir);
