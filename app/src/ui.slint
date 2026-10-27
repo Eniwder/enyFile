@@ -155,7 +155,10 @@ component DialogButton inherits Rectangle {
     border-width: 1px;
     border-color: root.primary ? Theme.accent : Theme.border;
     background: touch.pressed ? Theme.border : touch.has-hover && root.enabled ? Theme.hover : Theme.bar;
-    label := Text { text: root.text; color: root.enabled ? Theme.text : Theme.border; horizontal-alignment: center; vertical-alignment: center; }
+    // Only measured, left unpositioned: a positioned child would change how the button sizes.
+    label := Text { text: root.text; visible: false; }
+    // 1px above center: the glyphs sit low otherwise.
+    Text { y: -1px; width: parent.width; height: parent.height; text: root.text; color: root.enabled ? Theme.text : Theme.border; horizontal-alignment: center; vertical-alignment: center; }
     touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
 }
 // The panel of a dialog. Callers bound its height by the window and content-height: a large
