@@ -110,6 +110,8 @@ enum Reply {
 }
 /// `Reply::Picked` for 設定 > エージェント's folder list rather than a place.
 const AGENT_FOLDER: usize = 100;
+/// `Reply::Picked` for row `i - BOOKMARK_FOLDER` of the bookmark editor.
+const BOOKMARK_FOLDER: usize = 200;
 /// Ctrl+I: the conversation with the agent CLI.
 struct Agent {
     /// The next request continues it; 新しい会話 forgets it.
@@ -381,6 +383,8 @@ struct Controller {
     settings_ext: Vec<(String, slint::Color)>,
     settings_font: (String, f32),
     settings_agent_folders: Vec<PathBuf>,
+    /// The bookmark editor's copy as typed (name, path), saved by its 保存.
+    bookmark_draft: Vec<(String, String)>,
     agent: Agent,
     drives: Arc<Vec<Drive>>,
     menus: Option<ctxmenu::Menus>,
@@ -1837,6 +1841,7 @@ impl Controller {
                 }
                 Err(e) => self.message(format!("できませんでした: {e}")),
             },
+            Reply::Picked(i, path) if i >= BOOKMARK_FOLDER => self.bookmark_picked(i - BOOKMARK_FOLDER, &path),
             Reply::Picked(i, path) => {
                 if !self.ui.upgrade().is_some_and(|ui| ui.get_settings_open()) {
                     return;
@@ -2456,6 +2461,7 @@ impl Controller {
                 || ui.get_props_open()
                 || ui.get_ask_open()
                 || ui.get_memory_open()
+                || ui.get_bookmark_editing()
             {
                 1.0
             } else if ui.get_open_menu() >= 0 {
@@ -3222,6 +3228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         settings_ext: Vec::new(),
         settings_font: (String::new(), 0.0),
         settings_agent_folders: Vec::new(),
+        bookmark_draft: Vec::new(),
         agent: Agent {
             session: None,
             run: None,
@@ -3292,11 +3299,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
-        ui.on_bookmark_edit(move |i| c.borrow_mut().edit_bookmark(i as usize));
+        // After the menu popup has closed: closing it takes the focus back from the dialog.
+        ui.on_bookmark_edit(move |i| {
+            let c = c.clone();
+            slint::Timer::single_shot(Duration::ZERO, move || c.borrow_mut().edit_bookmark(i as usize));
+        });
     }
     {
         let c = controller.clone();
-        ui.on_bookmark_save(move |i, name, path| c.borrow_mut().save_bookmark(i as usize, &name, &path));
+        ui.on_bookmark_edited(move |i, path, text| c.borrow_mut().bookmark_edited(i as usize, path, &text));
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_browse(move |i| c.borrow().bookmark_browse(i as usize));
     }
     {
         let c = controller.clone();
@@ -3304,11 +3319,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
-        ui.on_bookmark_move(move |i, down| c.borrow_mut().move_bookmark(i as usize, down));
+        ui.on_bookmark_move(move |i, down, follow| c.borrow_mut().move_bookmark(i as usize, down, follow));
     }
     {
         let c = controller.clone();
-        ui.on_bookmark_cancel(move || c.borrow().close_bookmark_dialog());
+        ui.on_bookmark_add_current(move || c.borrow_mut().bookmark_add_current());
+    }
+    {
+        let c = controller.clone();
+        ui.on_bookmark_done(move |save| c.borrow_mut().bookmark_done(save));
     }
     {
         let c = controller.clone();

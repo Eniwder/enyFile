@@ -877,54 +877,79 @@ component IconButton inherits Rectangle {
     touch := TouchArea { clicked => { root.clicked(); } }
 }
 
+// All bookmarks at once, edited as a copy: nothing reaches the config until 保存.
+// The controller replaces `rows` after every move / delete / add / browse, so each row is
+// built again with fresh text, and the one at `focus-row` takes the focus as it is built.
+// -1: no field (after ▲▼✕); keys still reach Esc / Enter through `keys-scope`.
 component BookmarkDialog inherits Rectangle {
-    in property <string> name;
-    in property <string> path;
-    in property <int> index;
-    in property <int> count;
-    callback save(string, string);
-    callback remove();
-    callback move(bool);
-    callback cancel();
-    public function open() {
-        name-edit.text = root.name;
-        path-edit.text = root.path;
-        name-edit.focus();
-        name-edit.select-all();
+    in property <[BookmarkRow]> rows;
+    in property <int> focus-row;
+    in property <bool> focus-path;
+    callback edited(int, bool, string);
+    callback browse(int);
+    callback remove(int);
+    // Row, down, and whether the focus follows the row (Alt+↑↓, not ▲▼).
+    callback move(int, bool, bool);
+    callback add();
+    callback done(bool);
+    function keys(i: int, e: KeyEvent) -> EventResult {
+        if e.text == Key.Escape { root.done(false); return accept; }
+        if e.modifiers.alt && e.text == Key.UpArrow { if i > 0 { root.move(i, false, true); } return accept; }
+        if e.modifiers.alt && e.text == Key.DownArrow { if i < root.rows.length - 1 { root.move(i, true, true); } return accept; }
+        return reject;
     }
-    // Both fields start at the same x at any font size.
-    property <length> label-w: max(40px, label-probe.preferred-width);
-    label-probe := Text { text: "名前"; visible: false; }
+    changed rows => { if root.focus-row < 0 { keys-scope.focus(); } }
+    keys-scope := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape { root.done(false); return accept; }
+            if e.text == Key.Return { root.done(true); return accept; }
+            return reject;
+        }
+    }
+    // As wide as the longest key, so every row's fields start at the same x.
+    key-probe := Text { text: "Shift+F12"; font-size: 11px; visible: false; }
     background: #00000066;
     TouchArea { }
     DialogFrame {
-        width: min(parent.width - 40px, 560px); height: min(parent.height - 40px, self.content-height);
+        width: min(parent.width - 40px, 820px); height: min(parent.height - 40px, self.content-height);
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        spacing: 8px;
         Text { text: "ブックマークの編集"; font-weight: 700; font-size: 14px; color: Theme.text; }
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: "名前"; width: root.label-w; color: Theme.text; vertical-alignment: center; }
-            name-edit := LineEdit {
-                accepted => { root.save(name-edit.text, path-edit.text); }
-                key-pressed(e) => { if e.text == Key.Escape { root.cancel(); return accept; } return reject; }
+        Text { text: "Alt+↑↓ で並べ替え · Enter で保存 · Esc でキャンセル"; color: Theme.dim; font-size: 12px; }
+        for row[i] in root.rows : HorizontalLayout {
+            spacing: 6px;
+            Text { width: key-probe.preferred-width; text: i < 12 ? "Shift+F\{i + 1}" : ""; color: Theme.dim; font-size: 11px; vertical-alignment: center; }
+            LineEdit {
+                horizontal-stretch: 1;
+                text: row.name;
+                placeholder-text: "名前";
+                init => { if i == root.focus-row && !root.focus-path { self.focus(); self.select-all(); } }
+                edited(t) => { root.edited(i, false, t); }
+                accepted => { root.done(true); }
+                key-pressed(e) => { return root.keys(i, e); }
             }
-        }
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: "パス"; width: root.label-w; color: Theme.text; vertical-alignment: center; }
-            path-edit := LineEdit {
-                accepted => { root.save(name-edit.text, path-edit.text); }
-                key-pressed(e) => { if e.text == Key.Escape { root.cancel(); return accept; } return reject; }
+            LineEdit {
+                horizontal-stretch: 3;
+                text: row.path;
+                placeholder-text: "パス";
+                init => { if i == root.focus-row && root.focus-path { self.focus(); } }
+                edited(t) => { root.edited(i, true, t); }
+                accepted => { root.done(true); }
+                key-pressed(e) => { return root.keys(i, e); }
             }
+            DialogButton { text: "参照..."; clicked => { root.browse(i); } }
+            DialogButton { text: "▲"; enabled: i > 0; clicked => { root.move(i, false, false); } }
+            DialogButton { text: "▼"; enabled: i < root.rows.length - 1; clicked => { root.move(i, true, false); } }
+            // Outermost, so a slip off ▲▼ does not land on it.
+            DialogButton { text: "✕"; clicked => { root.remove(i); } }
         }
+        if root.rows.length == 0 : Text { text: "ブックマークはありません"; color: Theme.dim; }
         HorizontalLayout {
             spacing: 6px;
-            DialogButton { text: "▲ 上へ"; enabled: root.index > 0; clicked => { root.move(false); } }
-            DialogButton { text: "▼ 下へ"; enabled: root.index < root.count - 1; clicked => { root.move(true); } }
+            DialogButton { text: "＋ 現在のフォルダを追加"; clicked => { root.add(); } }
             Rectangle { horizontal-stretch: 1; }
-            DialogButton { text: "削除"; clicked => { root.remove(); } }
-            DialogButton { text: "保存"; primary: true; clicked => { root.save(name-edit.text, path-edit.text); } }
-            DialogButton { text: "キャンセル"; clicked => { root.cancel(); } }
+            DialogButton { text: "保存"; primary: true; clicked => { root.done(true); } }
+            DialogButton { text: "キャンセル"; clicked => { root.done(false); } }
         }
     }
 }
@@ -1420,9 +1445,9 @@ export component App inherits Window {
     in property <AskInfo> ask;
     in property <[BookmarkRow]> bookmarks;
     in property <bool> bookmark-editing;
-    in property <int> bookmark-index;
-    in property <string> bookmark-name;
-    in property <string> bookmark-path;
+    in property <[BookmarkRow]> bookmark-draft;
+    in property <int> bookmark-focus-row;
+    in property <bool> bookmark-focus-path;
     callback navigate(int, string);
     callback command(int, int);
     callback crumb(int, int);
@@ -1432,10 +1457,12 @@ export component App inherits Window {
     callback bookmark-open(int);
     callback bookmark-add();
     callback bookmark-edit(int);
-    callback bookmark-save(int, string, string);
+    callback bookmark-edited(int, bool, string);
+    callback bookmark-browse(int);
     callback bookmark-delete(int);
-    callback bookmark-move(int, bool);
-    callback bookmark-cancel();
+    callback bookmark-move(int, bool, bool);
+    callback bookmark-add-current();
+    callback bookmark-done(bool);
     callback open-settings();
     callback setting-edited(int, string);
     callback setting-browse(int);
@@ -1502,7 +1529,6 @@ export component App inherits Window {
     in-out property <float> quad-y: 0.5;
     // Agent panel height as a share of the room under the toolbar (its splitter).
     in-out property <float> agent-split: 0.42;
-    public function focus-bookmark() { bookmark-dialog.open(); }
     callback pointer(int, int, bool, bool, int);
     callback key-event(int, KeyEvent) -> bool;
     callback blank(int);
@@ -1680,6 +1706,7 @@ export component App inherits Window {
                                 // Shift+F1..F12 open the first twelve. As wide as the longest key,
                                 // so F1 and F10 line up.
                                 HorizontalLayout {
+                                    spacing: 4px;
                                     Text { width: key-width.preferred-width; text: i < 12 ? "Shift+F\{i + 1}" : ""; color: Theme.dim; font-size: 11px; vertical-alignment: center; }
                                     IconButton { width: 24px; glyph: "\u{E70F}"; glyph-size: 13px; tint: Theme.dim; clicked => { root.bookmark-edit(i); } }
                                 }
@@ -2099,12 +2126,14 @@ export component App inherits Window {
     bookmark-dialog := BookmarkDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;
         visible: root.bookmark-editing;
-        index: root.bookmark-index; count: root.bookmarks.length;
-        name: root.bookmark-name; path: root.bookmark-path;
-        save(name, path) => { root.bookmark-save(root.bookmark-index, name, path); }
-        remove => { root.bookmark-delete(root.bookmark-index); }
-        move(down) => { root.bookmark-move(root.bookmark-index, down); }
-        cancel => { root.bookmark-cancel(); }
+        rows: root.bookmark-draft;
+        focus-row: root.bookmark-focus-row; focus-path: root.bookmark-focus-path;
+        edited(i, path, t) => { root.bookmark-edited(i, path, t); }
+        browse(i) => { root.bookmark-browse(i); }
+        remove(i) => { root.bookmark-delete(i); }
+        move(i, down, follow) => { root.bookmark-move(i, down, follow); }
+        add => { root.bookmark-add-current(); }
+        done(save) => { root.bookmark-done(save); }
     }
     memory-dialog := MemoryDialog {
         x: 0; y: 0; width: parent.width; height: parent.height;

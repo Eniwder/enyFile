@@ -306,68 +306,127 @@ impl Controller {
             self.navigate(self.active, path, Mode::New(None));
         }
     }
-    /// Adds the active pane's folder; it can be renamed or reordered in the edit dialog.
-    pub(super) fn add_bookmark(&mut self) {
+    /// The active pane's folder, named after its last part.
+    fn current_bookmark(&mut self) -> Option<config::Bookmark> {
         // The saved path has no `\\?\`, so it must still name this folder without it.
         let dir = match shell::os_path(&self.data(self.active).dir) {
             Ok(dir) => dir,
-            Err(e) => return self.message(e),
+            Err(e) => {
+                self.message(e);
+                return None;
+            }
         };
         if dir.as_os_str().is_empty() {
-            return;
+            return None;
         }
         let name = dir
             .file_name()
             .map_or_else(|| display(&dir), |n| n.to_string_lossy().into_owned());
-        self.message(format!("ブックマークに追加: {name}"));
-        self.config.bookmarks.push(config::Bookmark { name, path: dir });
+        Some(config::Bookmark { name, path: dir })
+    }
+    /// Adds the active pane's folder; it can be renamed or reordered in the edit dialog.
+    pub(super) fn add_bookmark(&mut self) {
+        let Some(bookmark) = self.current_bookmark() else { return };
+        self.message(format!("ブックマークに追加: {}", bookmark.name));
+        self.config.bookmarks.push(bookmark);
         self.save_config();
     }
+    /// Opens the editor on a copy of every bookmark, with row `i` focused.
     pub(super) fn edit_bookmark(&mut self, i: usize) {
-        let Some(b) = self.config.bookmarks.get(i) else { return };
+        self.bookmark_draft = self
+            .config
+            .bookmarks
+            .iter()
+            .map(|b| (b.name.clone(), b.path.to_string_lossy().into_owned()))
+            .collect();
+        self.bookmark_rows(i, false);
         if let Some(ui) = self.ui.upgrade() {
-            ui.set_bookmark_index(i as i32);
-            ui.set_bookmark_name(b.name.clone().into());
-            ui.set_bookmark_path(b.path.to_string_lossy().into_owned().into());
             ui.set_bookmark_editing(true);
-            ui.invoke_focus_bookmark();
+        }
+        self.apply_opacity();
+    }
+    /// Rebuilds the editor's rows from the draft; row `focus` takes the focus (its path if
+    /// `path`), and no field does when it is out of range.
+    fn bookmark_rows(&self, focus: usize, path: bool) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let rows: Vec<BookmarkRow> = self
+            .bookmark_draft
+            .iter()
+            .map(|(name, path)| BookmarkRow { name: name.clone().into(), path: path.clone().into() })
+            .collect();
+        ui.set_bookmark_focus_row(if focus < rows.len() { focus as i32 } else { -1 });
+        ui.set_bookmark_focus_path(path);
+        ui.set_bookmark_draft(ModelRc::new(slint::VecModel::from(rows)));
+    }
+    pub(super) fn bookmark_edited(&mut self, i: usize, path: bool, text: &str) {
+        if let Some((n, p)) = self.bookmark_draft.get_mut(i) {
+            *if path { p } else { n } = text.to_string();
         }
     }
-    pub(super) fn close_bookmark_dialog(&self) {
+    pub(super) fn bookmark_browse(&self, i: usize) {
+        let start = self
+            .bookmark_draft
+            .get(i)
+            .map(|(_, p)| p.trim().trim_matches('"'))
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from);
+        std::thread::spawn(move || {
+            if let Some(path) = shell::pick_folder(start.as_deref()) {
+                post(Reply::Picked(BOOKMARK_FOLDER + i, path));
+            }
+        });
+    }
+    pub(super) fn bookmark_picked(&mut self, i: usize, path: &Path) {
+        if !self.ui.upgrade().is_some_and(|ui| ui.get_bookmark_editing()) {
+            return;
+        }
+        if let Some((_, p)) = self.bookmark_draft.get_mut(i) {
+            *p = display(path);
+            self.bookmark_rows(i, true);
+        }
+    }
+    pub(super) fn bookmark_add_current(&mut self) {
+        let Some(b) = self.current_bookmark() else { return };
+        self.bookmark_draft.push((b.name, display(&b.path)));
+        self.bookmark_rows(self.bookmark_draft.len() - 1, false);
+    }
+    pub(super) fn delete_bookmark(&mut self, i: usize) {
+        if i < self.bookmark_draft.len() {
+            self.bookmark_draft.remove(i);
+            self.bookmark_rows(usize::MAX, false);
+        }
+    }
+    /// `follow`: the moved row keeps the focus (Alt+↑↓); otherwise no field has it (▲▼).
+    pub(super) fn move_bookmark(&mut self, i: usize, down: bool, follow: bool) {
+        let j = if down { i + 1 } else { i.wrapping_sub(1) };
+        if i < self.bookmark_draft.len() && j < self.bookmark_draft.len() {
+            self.bookmark_draft.swap(i, j);
+            self.bookmark_rows(if follow { j } else { usize::MAX }, false);
+        }
+    }
+    pub(super) fn bookmark_done(&mut self, save: bool) {
+        if save {
+            let mut bookmarks = Vec::new();
+            for (i, (name, path)) in self.bookmark_draft.iter().enumerate() {
+                let (name, path) = (name.trim(), path.trim().trim_matches('"'));
+                if name.is_empty() || path.is_empty() {
+                    self.message("名前とパスを入力してください");
+                    let path = !name.is_empty();
+                    self.bookmark_rows(i, path);
+                    return;
+                }
+                bookmarks.push(config::Bookmark { name: name.into(), path: path.into() });
+            }
+            self.config.bookmarks = bookmarks;
+            self.save_config();
+            self.message("ブックマークを保存しました");
+        }
+        self.bookmark_draft.clear();
         if let Some(ui) = self.ui.upgrade() {
             ui.set_bookmark_editing(false);
             ui.invoke_focus_pane(self.active as i32);
         }
-    }
-    pub(super) fn save_bookmark(&mut self, i: usize, name: &str, path: &str) {
-        let (name, path) = (name.trim(), path.trim().trim_matches('"'));
-        if name.is_empty() || path.is_empty() {
-            self.message("名前とパスを入力してください");
-            return;
-        }
-        if let Some(b) = self.config.bookmarks.get_mut(i) {
-            *b = config::Bookmark { name: name.into(), path: path.into() };
-            self.save_config();
-        }
-        self.close_bookmark_dialog();
-    }
-    pub(super) fn delete_bookmark(&mut self, i: usize) {
-        if i < self.config.bookmarks.len() {
-            let removed = self.config.bookmarks.remove(i);
-            self.message(format!("ブックマークを削除: {}", removed.name));
-            self.save_config();
-        }
-        self.close_bookmark_dialog();
-    }
-    pub(super) fn move_bookmark(&mut self, i: usize, down: bool) {
-        let j = if down { i + 1 } else { i.wrapping_sub(1) };
-        if i < self.config.bookmarks.len() && j < self.config.bookmarks.len() {
-            self.config.bookmarks.swap(i, j);
-            self.save_config();
-            if let Some(ui) = self.ui.upgrade() {
-                ui.set_bookmark_index(j as i32);
-            }
-        }
+        self.apply_opacity();
     }
     pub(super) fn settings_agent_rows(&self) {
         if let Some(ui) = self.ui.upgrade() {

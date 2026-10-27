@@ -500,14 +500,34 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_bookmark_add();
                     let rows = ui.get_bookmarks();
                     expect(rows.row_count() == 1 && rows.row_data(0).unwrap().name == "Folder A", "current folder added as bookmark")?;
-                    ui.invoke_bookmark_edit(0);
+                    c.borrow_mut().edit_bookmark(0);
                     expect(ui.get_bookmark_editing(), "edit dialog opens")?;
-                    let path = ui.get_bookmark_path();
-                    ui.invoke_bookmark_save(0, "作業".into(), path);
+                    ui.invoke_bookmark_edited(0, false, "作業".into());
+                    ui.invoke_bookmark_done(false);
+                    expect(!ui.get_bookmark_editing() && ui.get_bookmarks().row_data(0).unwrap().name == "Folder A", "cancel keeps the bookmarks")?;
+                    c.borrow_mut().edit_bookmark(0);
+                    let draft = |i: usize| ui.get_bookmark_draft().row_data(i).map(|r| r.name.to_string()).unwrap_or_default();
+                    expect(draft(0) == "Folder A", "editor starts from the saved bookmarks")?;
+                    ui.invoke_bookmark_edited(0, false, "作業".into());
+                    ui.invoke_bookmark_add_current();
+                    expect(ui.get_bookmark_draft().row_count() == 2, "editor adds the current folder")?;
+                    ui.invoke_bookmark_edited(1, false, "二番目".into());
+                    ui.invoke_bookmark_move(1, false, false);
+                    expect(draft(0) == "二番目" && draft(1) == "作業", "▲ moves a row up, typed names kept")?;
+                    ui.invoke_bookmark_move(0, true, false);
+                    let path = ui.get_bookmark_draft().row_data(1).unwrap().path;
+                    ui.invoke_bookmark_edited(1, true, "".into());
+                    ui.invoke_bookmark_done(true);
+                    expect(ui.get_bookmark_editing() && ui.get_bookmarks().row_count() == 1, "an empty path is not saved")?;
+                    ui.invoke_bookmark_edited(1, true, path);
+                    ui.invoke_bookmark_delete(1);
+                    ui.invoke_bookmark_done(true);
                     expect(!ui.get_bookmark_editing(), "edit dialog closes on save")?;
+                    let rows = ui.get_bookmarks();
+                    expect(rows.row_count() == 1 && rows.row_data(0).unwrap().name == "作業", "saved list matches the editor")?;
                     let saved = std::fs::read_to_string(root.join("config.json")).map_err(|e| e.to_string())?;
                     expect(saved.contains("作業") && saved.contains("\"theme\""), "bookmark saved, other settings kept")?;
-                    s.pass("bookmark add / rename saved to config.json");
+                    s.pass("bookmark editor: rename / add / move / delete, saved only on 保存");
                     // ".." takes the cursor: Home, Down, Up, then Enter opens the parent.
                     let key = |k: slint::platform::Key| {
                         let mut e = slint::language::KeyEvent::default();
