@@ -363,8 +363,9 @@ mod codex {
     pub fn command(program: &Path, request: &Request, writable: &[PathBuf]) -> Command {
         let mut command = Command::new(program);
         // approval_policy=never: a command the sandbox refuses fails instead of asking, and
-        // the agent is never offered a way out of the sandbox.
-        command.args(["exec", "--json", "--color", "never", "--skip-git-repo-check", "-c", "approval_policy=never"]);
+        // the agent is never offered a way out of the sandbox. project_doc_max_bytes=0: no
+        // AGENTS.md is read, so one dropped into the folder (Downloads) gives no orders.
+        command.args(["exec", "--json", "--color", "never", "--skip-git-repo-check", "-c", "approval_policy=never", "-c", "project_doc_max_bytes=0"]);
         match request.access {
             Access::Full => {
                 command.args(["-s", "danger-full-access"]);
@@ -548,12 +549,12 @@ mod tests {
         let new = codex::command(Path::new("codex.exe"), &request(None, Access::Extra), &writable);
         assert_eq!(
             args(&new),
-            ["exec", "--json", "--color", "never", "--skip-git-repo-check", "-c", "approval_policy=never", "-s", "workspace-write", "--add-dir", r"H:\Pictures", "--add-dir", r"C:\enyFile\agent", "-C", r"D:\写真 2024", "-"]
+            ["exec", "--json", "--color", "never", "--skip-git-repo-check", "-c", "approval_policy=never", "-c", "project_doc_max_bytes=0", "-s", "workspace-write", "--add-dir", r"H:\Pictures", "--add-dir", r"C:\enyFile\agent", "-C", r"D:\写真 2024", "-"]
         );
         // Resuming keeps the sandbox options, before `resume`.
         let resumed = codex::command(Path::new("codex.exe"), &request(Some("01a1-ff"), Access::Folder), &writable[1..]);
         assert_eq!(
-            args(&resumed)[7..],
+            args(&resumed)[9..],
             ["-s", "workspace-write", "--add-dir", r"C:\enyFile\agent", "-C", r"D:\写真 2024", "resume", "01a1-ff", "-"]
         );
         let full = codex::command(Path::new("codex.exe"), &request(None, Access::Full), &writable);
