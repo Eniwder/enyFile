@@ -1638,17 +1638,22 @@ impl Controller {
                 self.sync_agent();
                 // Folders the watch does not cover (other panes' parents, moved-to places)
                 // show the agent's changes too.
-                for p in 0..self.visible() {
-                    let dir = self.data(p).dir.clone();
-                    if dir.as_os_str().is_empty() || self.panes[p].found.is_some() {
-                        continue;
-                    }
-                    if self.panes[p].pending.is_some() {
-                        self.panes[p].stale = true;
-                    } else {
-                        self.navigate(p, dir, Mode::Refresh);
-                    }
-                }
+                self.refresh_shown(None);
+            }
+        }
+    }
+    /// Reloads the shown folders after our own operation: change notifications never arrive
+    /// on some shares (WSL's \\wsl$), so the watch alone would leave deleted items listed.
+    fn refresh_shown(&mut self, except: Option<usize>) {
+        for p in 0..self.visible() {
+            let dir = self.data(p).dir.clone();
+            if Some(p) == except || dir.as_os_str().is_empty() || self.panes[p].found.is_some() {
+                continue;
+            }
+            if self.panes[p].pending.is_some() {
+                self.panes[p].stale = true;
+            } else {
+                self.navigate(p, dir, Mode::Refresh);
             }
         }
     }
@@ -1683,6 +1688,7 @@ impl Controller {
             Reply::Ask(p, question, reply) => self.ask(p, question, reply),
             Reply::Pasted(p, dir, before, targets, result) => {
                 self.operations -= 1;
+                let moved = result.as_ref().is_ok_and(|o| o.moved);
                 match result {
                     Ok(outcome) => {
                         let verb = if outcome.moved { "移動" } else { "コピー" };
@@ -1706,6 +1712,10 @@ impl Controller {
                 if self.data(p).dir == dir && self.panes[p].pending.is_none() && self.panes[p].found.is_none() {
                     self.navigate(p, dir, Mode::Pasted(before, Arc::new(targets)));
                 }
+                // The moved items' source folder.
+                if moved {
+                    self.refresh_shown(Some(p));
+                }
             }
             Reply::Deleting => self.confirming -= 1,
             Reply::Deleted(result, answered) => {
@@ -1718,6 +1728,7 @@ impl Controller {
                     Ok(true) => self.message("削除は中止またはスキップを含みます"),
                     Err(e) => self.message(format!("削除できません: {e}")),
                 }
+                self.refresh_shown(None);
             }
             Reply::Icons(p) => self.repaint(p),
             Reply::Drives(_) if self.demo => {}
@@ -1727,7 +1738,7 @@ impl Controller {
                 match outcome {
                     ctxmenu::Outcome::Paste(dir) => self.paste_into(p, Some(dir)),
                     ctxmenu::Outcome::Rename(path) => self.open_name(p, NameKind::Rename(path)),
-                    ctxmenu::Outcome::Done => {}
+                    ctxmenu::Outcome::Done => self.refresh_shown(None),
                     ctxmenu::Outcome::Failed(e) => self.message(format!("メニューを実行できません: {e}")),
                 }
             }
