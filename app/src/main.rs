@@ -442,8 +442,16 @@ fn hwnd(ui: &App) -> Option<HWND> {
 }
 impl Controller {
     fn message(&self, message: impl Into<slint::SharedString>) {
+        self.show_message(message.into(), false);
+    }
+    /// A failed operation (access denied and the like): the line flashes red for a moment.
+    fn fail(&self, message: impl Into<slint::SharedString>) {
+        self.show_message(message.into(), true);
+    }
+    fn show_message(&self, message: slint::SharedString, error: bool) {
         if let Some(ui) = self.ui.upgrade() {
-            ui.set_message(message.into());
+            ui.set_message(message);
+            ui.set_message_error(error);
         }
     }
     fn data(&self, p: usize) -> Arc<Snapshot> {
@@ -592,7 +600,7 @@ impl Controller {
             .and_then(|h| shell::set_clipboard_text(h, &text));
         match result {
             Ok(()) => self.message(format!("{}件の{}をコピーしました", lines.len(), if names { "ファイル名" } else { "パス" })),
-            Err(e) => self.message(e),
+            Err(e) => self.fail(e),
         }
     }
     /// Puts text on the clipboard and says so (or why not) on the history line.
@@ -605,7 +613,7 @@ impl Controller {
             .and_then(|h| shell::set_clipboard_text(h, text));
         match result {
             Ok(()) => self.message(done),
-            Err(e) => self.message(e),
+            Err(e) => self.fail(e),
         }
     }
     /// Edit > 同じ拡張子をすべて選択: the extension of the item under the cursor.
@@ -1398,7 +1406,7 @@ impl Controller {
         let start = self.config.start[side].clone().map_or_else(|| default_start(side).map_err(|e| e.to_string()), Ok);
         match start {
             Ok(path) => self.navigate(p, path, Mode::New(None)),
-            Err(e) => self.message(e),
+            Err(e) => self.fail(e),
         }
     }
     fn place(&mut self, i: usize) {
@@ -1534,7 +1542,7 @@ impl Controller {
         let cwd = match shell::os_path(&data.dir) {
             Ok(dir) => dir,
             Err(e) => {
-                self.message(e);
+                self.fail(e);
                 return false;
             }
         };
@@ -1664,7 +1672,7 @@ impl Controller {
                             self.agent_push(4, "サインインが必要かもしれません。ターミナルで codex login を実行してください".into());
                         }
                         self.agent.status = "エラー".into();
-                        self.message(format!("エージェント: {first}"));
+                        self.fail(format!("エージェント: {first}"));
                     }
                 }
                 self.sync_agent();
@@ -1683,7 +1691,7 @@ impl Controller {
             // Only line ends: nothing anyone could be told to do.
             self.config.agent_memory_approved = Some(text);
             if let Err(e) = self.config.save() {
-                self.message(format!("設定を保存できません: {e}"));
+                self.fail(format!("設定を保存できません: {e}"));
             }
             return;
         }
@@ -1714,7 +1722,7 @@ impl Controller {
                 self.config.agent_memory_approved = Some(text);
                 match self.config.save() {
                     Ok(()) => self.message("メモリの変更を採用しました"),
-                    Err(e) => self.message(format!("設定を保存できません: {e}")),
+                    Err(e) => self.fail(format!("設定を保存できません: {e}")),
                 }
             }
             1 => {
@@ -1784,6 +1792,7 @@ impl Controller {
                 match result {
                     Ok(outcome) => {
                         let verb = if outcome.moved { "移動" } else { "コピー" };
+                        let failed = outcome.missed || outcome.inside > 0;
                         let message = if outcome.cancelled {
                             "貼り付けを取り消しました".to_string()
                         } else if outcome.aborted {
@@ -1797,9 +1806,9 @@ impl Controller {
                         } else {
                             format!("{verb}しました → {}", shown(&dir))
                         };
-                        self.message(shell::with_kept(message, &outcome.kept));
+                        self.show_message(shell::with_kept(message, &outcome.kept).into(), failed);
                     }
-                    Err(e) => self.message(format!("貼り付けできません: {e}")),
+                    Err(e) => self.fail(format!("貼り付けできません: {e}")),
                 }
                 if self.data(p).dir == dir && self.panes[p].pending.is_none() && self.panes[p].found.is_none() {
                     self.navigate(p, dir, Mode::Pasted(before, Arc::new(targets)));
@@ -1818,7 +1827,7 @@ impl Controller {
                 match result {
                     Ok(false) => self.message("削除しました"),
                     Ok(true) => self.message("削除は中止またはスキップを含みます"),
-                    Err(e) => self.message(format!("削除できません: {e}")),
+                    Err(e) => self.fail(format!("削除できません: {e}")),
                 }
                 self.refresh_shown(None);
             }
@@ -1831,7 +1840,7 @@ impl Controller {
                     ctxmenu::Outcome::Paste(dir) => self.paste_into(p, Some(dir)),
                     ctxmenu::Outcome::Rename(path) => self.open_name(p, NameKind::Rename(path)),
                     ctxmenu::Outcome::Done => self.refresh_shown(None),
-                    ctxmenu::Outcome::Failed(e) => self.message(format!("メニューを実行できません: {e}")),
+                    ctxmenu::Outcome::Failed(e) => self.fail(format!("メニューを実行できません: {e}")),
                 }
             }
             Reply::Made(p, dir, before, result) => match result {
@@ -1841,7 +1850,7 @@ impl Controller {
                         self.navigate(p, dir, Mode::Pasted(before, Arc::new(vec![path])));
                     }
                 }
-                Err(e) => self.message(format!("できませんでした: {e}")),
+                Err(e) => self.fail(format!("できませんでした: {e}")),
             },
             Reply::Picked(i, path) if i >= BOOKMARK_FOLDER => self.bookmark_picked(i - BOOKMARK_FOLDER, &path),
             Reply::Picked(i, path) => {
@@ -1868,13 +1877,13 @@ impl Controller {
                 if self.config.agent_memory_approved.is_none() {
                     self.config.agent_memory_approved = Some(text);
                     if let Err(e) = self.config.save() {
-                        self.message(format!("設定を保存できません: {e}"));
+                        self.fail(format!("設定を保存できません: {e}"));
                     }
                 }
             }
             Reply::MemoryRestored(result) => match result {
                 Ok(()) => self.message("メモリを元に戻しました"),
-                Err(e) => self.message(format!("メモリを元に戻せません: {e}")),
+                Err(e) => self.fail(format!("メモリを元に戻せません: {e}")),
             },
             Reply::AgentFound(hint) => {
                 if let Some(ui) = self.ui.upgrade() {
@@ -1883,13 +1892,13 @@ impl Controller {
             }
             Reply::Opened(result) => {
                 if let Err(e) = result {
-                    self.message(format!("開けません: {e}"));
+                    self.fail(format!("開けません: {e}"));
                 }
             }
             Reply::ShellFolder(p, result) => match result {
                 Ok(Some(path)) => self.navigate(p, path, Mode::New(None)),
                 Ok(None) => {}
-                Err(e) => self.message(format!("開けません: {e}")),
+                Err(e) => self.fail(format!("開けません: {e}")),
             },
             Reply::Props(id, info) => self.props_info(id, info),
             Reply::PropsShow(id) => self.props_show(id),
@@ -1914,7 +1923,7 @@ impl Controller {
                     self.navigate(p, root, Mode::New(None));
                     return;
                 }
-                self.message(format!("フォルダを開けません: {e}"));
+                self.fail(format!("フォルダを開けません: {e}"));
                 return;
             }
         };
@@ -2191,6 +2200,7 @@ impl Controller {
             ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
             if let Err(e) = result {
                 ui.set_message(format!("ドラッグできません: {e}").into());
+                ui.set_message_error(true);
             }
         });
     }
@@ -2212,7 +2222,7 @@ impl Controller {
         self.menu_pane = p;
         match &self.menus {
             Some(menus) => menus.show(ctxmenu::Request { target, owner, extended, verb }),
-            None => self.message("コンテキストメニューを開けません"),
+            None => self.fail("コンテキストメニューを開けません"),
         }
     }
     /// Right click on the empty part of the list: the folder background menu.
@@ -2250,7 +2260,7 @@ impl Controller {
         }
         let dir = match shell::os_path(&dir) {
             Ok(dir) => dir,
-            Err(e) => return self.message(e),
+            Err(e) => return self.fail(e),
         };
         self.message(format!("ターミナルを開きます: {}", shown(&dir)));
         // Looking along PATH and starting a process can wait on slow drives.
@@ -2451,7 +2461,7 @@ impl Controller {
             .and_then(|h| shell::set_clipboard_text(h, &path));
         match result {
             Ok(()) => self.message(format!("パスをコピー: {path}")),
-            Err(e) => self.message(e),
+            Err(e) => self.fail(e),
         }
     }
     /// Dialogs (settings, name, properties, paste conflicts) are always shown opaque, and an
@@ -2511,7 +2521,7 @@ impl Controller {
                 paths.len(),
                 if cut { "切り取り" } else { "コピー" }
             )),
-            Err(e) => self.message(e),
+            Err(e) => self.fail(e),
         }
     }
     fn paste(&mut self, p: usize) {

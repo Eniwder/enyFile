@@ -1446,6 +1446,8 @@ export component App inherits Window {
     in property <Columns> columns: { size: true, date: true, time: true, attr: true, kind: true };
     in property <int> active-pane: 0;
     in property <string> message;
+    // The message reports a failure: the line flashes red for a moment so it is not missed.
+    in-out property <bool> message-error;
     in property <bool> ask-open;
     in property <AskInfo> ask;
     in property <[BookmarkRow]> bookmarks;
@@ -1852,7 +1854,17 @@ export component App inherits Window {
     Rectangle {
         x: 0; y: parent.height - 24px; width: parent.width; height: 24px;
         background: Theme.bar;
-        Rectangle { height: 1px; y: 0; background: Theme.border; }
+        Rectangle {
+            visible: root.find-mode == 0;
+            background: Theme.error.transparentize(root.message-error ? 70% : 100%);
+            animate background { duration: 120ms; easing: ease-out; }
+        }
+        // Long enough to catch the eye; the text itself stays as the record.
+        Timer {
+            interval: 3s; running: root.message-error;
+            triggered => { root.message-error = false; }
+        }
+        Rectangle { height: 1px; y: 0; background: root.message-error && root.find-mode == 0 ? Theme.error : Theme.border; }
         TouchArea { double-clicked => { root.agent-show(); } }
         Text {
             x: 10px; width: parent.width - 20px - (root.agent-badge != "" ? badge.preferred-width + 16px : 0px); height: parent.height;

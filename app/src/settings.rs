@@ -296,7 +296,7 @@ impl Controller {
     }
     pub(super) fn save_config(&mut self) {
         if let Err(e) = self.config.save() {
-            self.message(format!("設定を保存できません: {e}"));
+            self.fail(format!("設定を保存できません: {e}"));
         }
         self.sync_bookmarks();
     }
@@ -312,7 +312,7 @@ impl Controller {
         let dir = match shell::os_path(&self.data(self.active).dir) {
             Ok(dir) => dir,
             Err(e) => {
-                self.message(e);
+                self.fail(e);
                 return None;
             }
         };
