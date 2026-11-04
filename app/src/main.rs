@@ -2293,7 +2293,7 @@ impl Controller {
         let Some(ui) = self.ui.upgrade() else { return };
         let (Some(hwnd), false) = (hwnd(&ui), paths.is_empty()) else { return };
         let ui = ui.as_weak();
-        slint::Timer::single_shot(Duration::ZERO, move || {
+        let result = dnd::defer(hwnd, move || {
             let _origin = dnd::Origin::new(p);
             let result = shell::drag_out(&paths);
             let Some(ui) = ui.upgrade() else { return };
@@ -2308,6 +2308,7 @@ impl Controller {
                 ui.set_message_error(true);
             }
         });
+        if let Err(error) = result { self.fail(format!("ドラッグを開始できません: {error}")); }
     }
     /// Enter / double click on "..", or on a drive in the drive list.
     fn enter_special(&mut self, p: usize, special: Special) {
@@ -3771,6 +3772,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         shell::WindowNotice::DragWheel(wparam, lparam) => {
                             if let Some(ui) = weak.upgrade() { dnd::wheel(&ui, h, wparam, lparam); }
                         }
+                        shell::WindowNotice::DragTask => dnd::run_deferred(),
+                        shell::WindowNotice::DragRedraw => dnd::redraw(h),
                     }
                 }));
                 if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {

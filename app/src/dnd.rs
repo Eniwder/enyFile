@@ -6,7 +6,7 @@ use super::*;
 use windows::{
     core::{implement, Ref, Result as WinResult},
     Win32::{
-        Foundation::{POINT, POINTL, E_POINTER, HINSTANCE, LPARAM, LRESULT, WPARAM},
+        Foundation::{POINT, POINTL, E_POINTER, HINSTANCE, LPARAM, LRESULT, WPARAM, DRAGDROP_S_CANCEL, DRAGDROP_S_USEDEFAULTCURSORS},
         Graphics::Gdi::ScreenToClient,
         System::{Com::IDataObject, Ole::*, SystemServices::MODIFIERKEYS_FLAGS},
         UI::{Shell::{IShellItem, SHCreateItemFromParsingName, BHID_SFUIObject}, WindowsAndMessaging::*},
@@ -18,10 +18,52 @@ thread_local! { static ORIGIN: Cell<Option<usize>> = const { Cell::new(None) }; 
 // Wheel input can otherwise be consumed by the source application's OLE drag loop.
 // The low-level callback only posts a message; UI/COM work happens outside the hook.
 pub(super) const WHEEL_MESSAGE: u32 = WM_APP + 0x431;
+pub(super) const TASK_MESSAGE: u32 = WM_APP + 0x432;
+pub(super) const REDRAW_MESSAGE: u32 = WM_APP + 0x433;
 thread_local! {
     static WHEEL_ROUTE: Cell<Option<(HWND, usize)>> = const { Cell::new(None) };
     static WHEEL_SERIAL: Cell<usize> = const { Cell::new(0) };
     static WHEEL_REMAINDER: Cell<(i32, i32)> = const { Cell::new((-1, 0)) };
+    static TASKS: RefCell<VecDeque<Box<dyn FnOnce()>>> = RefCell::new(VecDeque::new());
+    static REDRAW_PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Run outside winit's application callback. Entering OLE from a Slint timer keeps
+/// that callback borrowed, so winit cannot deliver RedrawRequested until drag ends.
+pub(super) fn defer(hwnd: HWND, task: impl FnOnce() + 'static) -> WinResult<()> {
+    TASKS.with(|tasks| tasks.borrow_mut().push_back(Box::new(task)));
+    if let Err(error) = unsafe { PostMessageW(Some(hwnd), TASK_MESSAGE, WPARAM(0), LPARAM(0)) } {
+        TASKS.with(|tasks| tasks.borrow_mut().pop_back());
+        return Err(error);
+    }
+    Ok(())
+}
+pub(super) fn run_deferred() {
+    let task = TASKS.with(|tasks| tasks.borrow_mut().pop_front());
+    if let Some(task) = task { task(); }
+}
+
+fn request_frame(ui: &App) {
+    let Some(hwnd) = hwnd(ui) else { return };
+    if !REDRAW_PENDING.replace(true) {
+        if unsafe { PostMessageW(Some(hwnd), REDRAW_MESSAGE, WPARAM(0), LPARAM(0)) }.is_err() {
+            REDRAW_PENDING.set(false);
+        }
+    }
+}
+/// Bypass Slint's timer-based frame throttle during OLE's modal message loop.
+/// Called from our native window message, with no Controller/state borrow held.
+pub(super) fn redraw(hwnd: HWND) {
+    use windows::Win32::Graphics::Gdi::{RedrawWindow, RDW_INVALIDATE, RDW_UPDATENOW, RDW_NOERASE};
+    REDRAW_PENDING.set(false);
+    let _ = unsafe { RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE) };
+}
+fn feedback(ui: &App, pane: i32, row: i32) {
+    if ui.get_drop_pane() != pane || ui.get_drop_row() != row {
+        ui.set_drop_pane(pane);
+        ui.set_drop_row(row);
+        request_frame(ui);
+    }
 }
 struct WheelHook { hook: HHOOK, serial: usize }
 impl WheelHook {
@@ -81,10 +123,10 @@ pub(super) fn wheel(ui: &App, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         let Ok(mut c) = controller.try_borrow_mut() else { return };
         // Clear stale row feedback immediately. OLE's next DragOver (and Drop itself)
         // resolves the newly visible row before allowing any operation.
-        ui.set_drop_pane(-1);
-        ui.set_drop_row(-1);
+        feedback(ui, -1, -1);
         for _ in 0..(total / 120).unsigned_abs() { c.page_step(pane as usize, total < 0); }
     });
+    request_frame(ui);
 }
 pub struct Origin(Option<usize>);
 impl Origin {
@@ -107,12 +149,62 @@ pub fn register(hwnd: HWND, ui: slint::Weak<App>) -> WinResult<Registration> {
     Ok(Registration(hwnd))
 }
 
+// This test source always cancels on the first QueryContinueDrag. It cannot drop on
+// the user's desktop, but runs our checks inside a real OLE drag, outside winit's
+// application callback, using exactly the same native task entry as drag_out.
+#[implement(IDropSource)]
+struct ModalProbe {
+    ui: slint::Weak<App>,
+    controller: Rc<RefCell<Controller>>,
+    root: PathBuf,
+    result: Rc<RefCell<Option<Result<(), String>>>>,
+}
+impl IDropSource_Impl for ModalProbe_Impl {
+    fn QueryContinueDrag(&self, _: windows::core::BOOL, _: MODIFIERKEYS_FLAGS) -> windows::core::HRESULT {
+        let _ = std::fs::write(self.root.join("dnd-modal-stage"), "checking");
+        let checked = self.ui.upgrade().ok_or("window closed".to_string())
+            .and_then(|ui| smoke_check(&ui, &self.controller, &self.root));
+        *self.result.borrow_mut() = Some(checked);
+        DRAGDROP_S_CANCEL
+    }
+    fn GiveFeedback(&self, _: DROPEFFECT) -> windows::core::HRESULT { DRAGDROP_S_USEDEFAULTCURSORS }
+}
+pub(super) fn smoke_modal(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) -> Result<(), String> {
+    use windows::Win32::UI::Shell::BHID_DataObject;
+    let _ = std::fs::write(root.join("dnd-modal-stage"), "creating data");
+    let data: IDataObject = unsafe { shell::item_array(&[root.join("left")])?.BindToHandler(None, &BHID_DataObject) }.map_err(|e| e.to_string())?;
+    let result = Rc::new(RefCell::new(None));
+    let source: IDropSource = ModalProbe { ui: ui.as_weak(), controller: c.clone(), root: root.to_path_buf(), result: result.clone() }.into();
+    let mut effect = DROPEFFECT_NONE;
+    let _ = std::fs::write(root.join("dnd-modal-stage"), "entering OLE");
+    // Wake OLE's input pump without moving the pointer or injecting system input.
+    unsafe { PostThreadMessageW(windows::Win32::System::Threading::GetCurrentThreadId(), WM_MOUSEMOVE, WPARAM(0), LPARAM(0)) }.map_err(|e| e.to_string())?;
+    let status = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
+    let _ = std::fs::write(root.join("dnd-modal-stage"), "cancelled");
+    if status != DRAGDROP_S_CANCEL { return Err(format!("modal probe did not cancel: {status:?}")); }
+    let checked = result.borrow_mut().take().ok_or("modal probe did not run")?;
+    checked
+}
+
 /// Called only by --smoke, against its dedicated fixture. Exercise the actual OLE
 /// adapter and Slint hit testing without releasing a drop onto the user's desktop.
 pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) -> std::result::Result<(), String> {
     use windows::Win32::{Graphics::Gdi::ClientToScreen, UI::Shell::BHID_DataObject};
     let check = || -> std::result::Result<(), String> {
         let hwnd = hwnd(ui).ok_or("no HWND")?;
+        let frames = Rc::new(Cell::new(0usize));
+        let rendered = frames.clone();
+        ui.window().set_rendering_notifier(move |state, _| {
+            if matches!(state, slint::RenderingState::AfterRendering) { rendered.set(rendered.get() + 1); }
+        }).map_err(|e| e.to_string())?;
+        let present = || -> Result<(), String> {
+            let before = frames.get();
+            // Deliver the same native paint message the OLE loop dispatches. A
+            // snapshot alone would mask the missing on-screen rendering regression.
+            unsafe { SendMessageW(hwnd, REDRAW_MESSAGE, Some(WPARAM(0)), Some(LPARAM(0))) };
+            if frames.get() == before { return Err("OLE modal loop did not render the window".into()); }
+            Ok(())
+        };
         let source = root.join("dnd-probe");
         std::fs::create_dir_all(&source).map_err(|e| e.to_string())?;
         let file = source.join("probe.txt");
@@ -184,6 +276,7 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
                 effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
                 unsafe { target.DragOver(MODIFIERKEYS_FLAGS(9), point, &mut effect) }.map_err(|e| e.to_string())?;
                 if effect != DROPEFFECT_COPY { return Err("Ctrl during drag did not select copy".into()); }
+                present()?;
                 // Inspect rendered pixels as well as hit testing: an overlay without
                 // explicit x/y is centered by Slint even when the hit test is correct.
                 let shot = ui.window().take_snapshot().map_err(|e| e.to_string())?;
@@ -236,6 +329,7 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
             if c.borrow().panes[0].model.page_start.get() != start { return Err("partial wheel delta turned a page".into()); }
             send(-60, serial);
             if c.borrow().panes[0].model.page_start.get() <= start { return Err("drag wheel did not turn page down".into()); }
+            present()?;
             // Re-evaluate the row underneath the stationary pointer after paging.
             effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
             unsafe { target.DragOver(MODIFIERKEYS_FLAGS(9), left, &mut effect) }.map_err(|e| e.to_string())?;
@@ -307,8 +401,7 @@ fn folder_target(dir: &Path) -> WinResult<IDropTarget> {
 impl Target {
     fn highlight(&self, pane: i32, row: i32) {
         if let Some(ui) = self.ui.upgrade() {
-            ui.set_drop_pane(pane);
-            ui.set_drop_row(row);
+            feedback(&ui, pane, row);
         }
     }
     fn leave(&self) {

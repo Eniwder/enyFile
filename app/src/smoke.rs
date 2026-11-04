@@ -123,6 +123,7 @@ fn clip() -> Result<(Vec<String>, u32), String> {
 }
 
 struct State {
+    drop_check: Rc<RefCell<Option<Result<(), String>>>>,
     step: usize,
     probe: Option<Child>,
     log: Vec<String>,
@@ -193,6 +194,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
     let started = Instant::now();
     let state = RefCell::new(State {
         step: 0,
+        drop_check: Rc::new(RefCell::new(None)),
         probe: None,
         log: Vec::new(),
         root: std::fs::canonicalize(&root).unwrap_or(root),
@@ -774,12 +776,20 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     c.borrow_mut().drag_probe = None;
                     fkey(&ui, 0, Key::DownArrow);
                     s.pass("drag out: the selection, or the item pressed");
-                    dnd::smoke_check(&ui, &c, &root)?;
-                    s.pass("drop target: external enabled, internal setting, same pane refused, highlight and leave");
-                    ui.invoke_open_settings();
-                    ui.set_settings_tab(1);
+                    let result = s.drop_check.clone();
+                    let weak = ui.as_weak();
+                    let controller = c.clone();
+                    dnd::defer(hwnd(&ui).ok_or("no HWND")?, move || {
+                        let checked = weak.upgrade().ok_or("window closed".to_string())
+                            .and_then(|ui| dnd::smoke_modal(&ui, &controller, &root));
+                        *result.borrow_mut() = Some(checked);
+                        if let Some(ui) = weak.upgrade() { ui.invoke_open_settings(); ui.set_settings_tab(1); }
+                    }).map_err(|e| e.to_string())?;
                 }
                 37 => {
+                    let Some(checked) = s.drop_check.borrow().clone() else { return Ok(false) };
+                    checked?;
+                    if s.held.is_none() { s.pass("OLE modal drag: shared feedback, wheel paging and actual window rendering"); }
                     if s.held.is_none() && !s.hold.is_zero() {
                         // Tells a screenshot script the settings dialog is on screen.
                         let _ = std::fs::write(root.join("holding-settings"), b"");

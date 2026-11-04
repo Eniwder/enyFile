@@ -971,6 +971,8 @@ pub enum WindowNotice {
     FrameClick,
     Resumed,
     DragWheel(WPARAM, LPARAM),
+    DragTask,
+    DragRedraw,
 }
 /// Watches frame clicks, user resume from sleep, and lone Alt taps.
 /// Installed once for the main window, so `on_notice` lives for the process lifetime.
@@ -980,6 +982,14 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
     unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, data: usize) -> LRESULT {
         let repeat = lparam.0 & (1 << 30) != 0;
         match msg {
+            crate::dnd::TASK_MESSAGE => {
+                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::DragTask) };
+                return LRESULT(0);
+            }
+            crate::dnd::REDRAW_MESSAGE => {
+                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::DragRedraw) };
+                return LRESULT(0);
+            }
             crate::dnd::WHEEL_MESSAGE => {
                 unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::DragWheel(wparam, lparam)) };
                 return LRESULT(0);
