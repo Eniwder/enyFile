@@ -606,12 +606,16 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     fkey(&ui, 0, slint::platform::Key::F7);
                     expect(ui.get_name_open() && ui.get_name_initial() == "新しいフォルダ", "F7 opens the new-folder dialog")?;
                     ui.invoke_name_done(true, "新規 A".into());
+                    // A watch or activation refresh may already be running when creation finishes.
+                    let dir = c.borrow().data(0).dir.clone();
+                    c.borrow_mut().navigate(0, dir, Mode::Refresh);
                 }
                 29 => {
                     if !idle(&c) || !names(&c, 0).contains(&"新規 A".to_string()) {
                         return Ok(false);
                     }
                     expect(root.join("left/新規 A").is_dir() && selected(&c, 0) == ["新規 A"], "folder created and selected")?;
+                    expect(c.borrow().panes[0].model.special.get().is_none(), "created folder cursor leaves parent/drive row")?;
                     ctrl_key(&ui, 0, "n");
                     expect(ui.get_name_initial() == "新しいテキスト ドキュメント.txt", "Ctrl+N opens the new-file dialog")?;
                     ui.invoke_name_done(true, "memo.txt".into());
@@ -621,6 +625,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         return Ok(false);
                     }
                     expect(root.join("left/memo.txt").is_file(), "file created")?;
+                    expect(selected(&c, 0) == ["memo.txt"] && c.borrow().panes[0].model.special.get().is_none(), "created file selected with entry cursor")?;
                     fkey(&ui, 0, slint::platform::Key::F2);
                     expect(ui.get_name_initial() == "memo.txt" && ui.get_name_stem() == 4, "F2 opens rename with the stem selected")?;
                     expect(!ui.invoke_name_validate("A.TXT".into()).is_empty(), "rename to an existing name rejected")?;

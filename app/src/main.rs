@@ -43,6 +43,8 @@ enum Mode {
     Back,
     Forward,
     Refresh,
+    /// Refresh and move the cursor to exactly the created or renamed item.
+    Made(Arc<PathBuf>),
     Sort,
     /// Refresh after paste: select the pasted items (and anything new), like Explorer.
     Pasted(Positions, Arc<Vec<PathBuf>>),
@@ -1843,11 +1845,14 @@ impl Controller {
                     ctxmenu::Outcome::Failed(e) => self.fail(format!("メニューを実行できません: {e}")),
                 }
             }
-            Reply::Made(p, dir, before, result) => match result {
+            Reply::Made(p, dir, _before, result) => match result {
                 Ok(path) => {
                     self.message(format!("完了: {}", shown(&path)));
-                    if self.data(p).dir == dir && self.panes[p].pending.is_none() && self.panes[p].found.is_none() {
-                        self.navigate(p, dir, Mode::Pasted(before, Arc::new(vec![path])));
+                    if self.data(p).dir == dir
+                        && self.panes[p].pending.as_ref().is_none_or(|mode| matches!(mode, Mode::Refresh | Mode::Sort | Mode::Made(_)))
+                        && self.panes[p].found.is_none()
+                    {
+                        self.navigate(p, dir, Mode::Made(Arc::new(path)));
                     }
                 }
                 Err(e) => self.fail(format!("できませんでした: {e}")),
@@ -1914,6 +1919,7 @@ impl Controller {
         let focus_list = matches!(&mode, Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_));
         // Opened with no item to show: the cursor starts on "..".
         let entered = matches!(&mode, Mode::New(None));
+        let made = matches!(&mode, Mode::Made(_));
         self.busy(p, false);
         let data = match result {
             Ok(data) => data,
@@ -1960,6 +1966,12 @@ impl Controller {
                 saved
             }
             Mode::Refresh | Mode::Sort => Some(old.clone()),
+            Mode::Made(path) => Some(Saved {
+                path: data.dir.clone(),
+                selection: Selection::only([path.clone()]),
+                current: Some(path.clone()),
+                anchor: Some(path),
+            }),
             Mode::Return(saved) => Some(saved),
             Mode::Pasted(before, targets) => {
                 let added: Vec<_> = data
@@ -2027,6 +2039,8 @@ impl Controller {
         let drives = self.drives.len();
         let special = if data.offset() == 1 && data.rows.is_empty() {
             Some(Special::Parent)
+        } else if made {
+            None
         } else if changed {
             (entered && data.offset() == 1).then_some(Special::Parent)
         } else {
@@ -3453,6 +3467,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_font_set(move |family, size| c.borrow_mut().font_set(family.as_str(), size as f32));
     }
     controller.borrow().apply_appearance();
+    {
+        use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
+        let c = Rc::downgrade(&controller);
+        ui.window().on_winit_window_event(move |_, event| {
+            if matches!(event, winit::event::WindowEvent::Focused(true)) {
+                let c = c.clone();
+                slint::Timer::single_shot(Duration::ZERO, move || {
+                    if let Some(c) = c.upgrade() {
+                        c.borrow_mut().refresh_shown(None);
+                    }
+                });
+            }
+            EventResult::Propagate
+        });
+    }
     {
         let c = controller.clone();
         ui.on_name_validate(move |name| c.borrow().name_error(&name).into());
