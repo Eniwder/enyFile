@@ -6,15 +6,86 @@ use super::*;
 use windows::{
     core::{implement, Ref, Result as WinResult},
     Win32::{
-        Foundation::{POINT, POINTL, E_POINTER},
+        Foundation::{POINT, POINTL, E_POINTER, HINSTANCE, LPARAM, LRESULT, WPARAM},
         Graphics::Gdi::ScreenToClient,
         System::{Com::IDataObject, Ole::*, SystemServices::MODIFIERKEYS_FLAGS},
-        UI::Shell::{IShellItem, SHCreateItemFromParsingName, BHID_SFUIObject},
+        UI::{Shell::{IShellItem, SHCreateItemFromParsingName, BHID_SFUIObject}, WindowsAndMessaging::*},
     },
 };
 use std::os::windows::ffi::OsStrExt;
 
 thread_local! { static ORIGIN: Cell<Option<usize>> = const { Cell::new(None) }; }
+// Wheel input can otherwise be consumed by the source application's OLE drag loop.
+// The low-level callback only posts a message; UI/COM work happens outside the hook.
+pub(super) const WHEEL_MESSAGE: u32 = WM_APP + 0x431;
+thread_local! {
+    static WHEEL_ROUTE: Cell<Option<(HWND, usize)>> = const { Cell::new(None) };
+    static WHEEL_SERIAL: Cell<usize> = const { Cell::new(0) };
+    static WHEEL_REMAINDER: Cell<(i32, i32)> = const { Cell::new((-1, 0)) };
+}
+struct WheelHook { hook: HHOOK, serial: usize }
+impl WheelHook {
+    fn new(hwnd: HWND) -> WinResult<Self> {
+        unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            if code >= 0 && wparam.0 == WM_MOUSEWHEEL as usize && lparam.0 != 0 {
+                // Windows owns this structure for the duration of this callback.
+                let mouse = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+                if let Some((hwnd, serial)) = WHEEL_ROUTE.get() {
+                    if unsafe { GetAncestor(WindowFromPoint(mouse.pt), GA_ROOT) } == hwnd {
+                        let delta = (mouse.mouseData >> 16) as u16;
+                        let position = (mouse.pt.x as u16 as u32) | ((mouse.pt.y as u16 as u32) << 16);
+                        if unsafe { PostMessageW(Some(hwnd), WHEEL_MESSAGE, WPARAM((serial << 16) | delta as usize), LPARAM(position as isize)) }.is_ok() {
+                            return LRESULT(1); // Prevent duplicate Slint/source wheel handling.
+                        }
+                    }
+                }
+            }
+            unsafe { CallNextHookEx(None, code, wparam, lparam) }
+        }
+        let module = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None)? };
+        let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(hook), Some(HINSTANCE(module.0)), 0)? };
+        let serial = WHEEL_SERIAL.get().wrapping_add(1) & (usize::MAX >> 16);
+        WHEEL_SERIAL.set(serial);
+        WHEEL_ROUTE.set(Some((hwnd, serial)));
+        WHEEL_REMAINDER.set((-1, 0));
+        Ok(Self { hook, serial })
+    }
+}
+impl Drop for WheelHook {
+    fn drop(&mut self) {
+        if WHEEL_ROUTE.get().is_some_and(|(_, serial)| serial == self.serial) {
+            WHEEL_ROUTE.set(None);
+            WHEEL_REMAINDER.set((-1, 0));
+        }
+        let _ = unsafe { UnhookWindowsHookEx(self.hook) };
+    }
+}
+
+/// Window messages are session-tagged so queued input cannot affect a later drag.
+pub(super) fn wheel(ui: &App, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    if WHEEL_ROUTE.get() != Some((hwnd, wparam.0 >> 16)) { return; }
+    let mut point = POINT { x: lparam.0 as u16 as i16 as i32, y: ((lparam.0 as u32 >> 16) as u16 as i16) as i32 };
+    if !unsafe { ScreenToClient(hwnd, &mut point) }.as_bool() { return; }
+    if ui.get_settings_open() || ui.get_name_open() || ui.get_props_open() || ui.get_ask_open()
+        || ui.get_memory_open() || ui.get_open_menu() >= 0 || ui.get_bookmarks_open() { return; }
+    let scale = ui.window().scale_factor();
+    let pane = ui.invoke_hit_drop(point.x as f32 / scale, point.y as f32 / scale).pane;
+    if pane < 0 { WHEEL_REMAINDER.set((-1, 0)); return; }
+    let (previous, remainder) = WHEEL_REMAINDER.get();
+    let delta = wparam.0 as u16 as i16 as i32;
+    let total = if previous == pane { remainder + delta } else { delta };
+    WHEEL_REMAINDER.set((pane, total % 120));
+    if total / 120 == 0 { return; }
+    CONTROLLER.with(|cell| {
+        let Some(controller) = cell.borrow().clone() else { return };
+        let Ok(mut c) = controller.try_borrow_mut() else { return };
+        // Clear stale row feedback immediately. OLE's next DragOver (and Drop itself)
+        // resolves the newly visible row before allowing any operation.
+        ui.set_drop_pane(-1);
+        ui.set_drop_row(-1);
+        for _ in 0..(total / 120).unsigned_abs() { c.page_step(pane as usize, total < 0); }
+    });
+}
 pub struct Origin(Option<usize>);
 impl Origin {
     pub fn new(pane: usize) -> Self { Self(ORIGIN.replace(Some(pane))) }
@@ -91,6 +162,13 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
                 if destination != expected || row != if hit.in_name { hit.row } else { -1 } {
                     return Err("name and metadata drop destinations or highlights disagree".into());
                 }
+                if hit.pane == 1 {
+                    let enabled = c.borrow().config.pane_drag_drop;
+                    c.borrow_mut().config.pane_drag_drop = true;
+                    let internal = { let _origin = Origin::new(0); probe.destination(&POINTL { x: point.x, y: point.y }) };
+                    c.borrow_mut().config.pane_drag_drop = enabled;
+                    if internal != Some((expected, hit.pane, row)) { return Err("internal drop uses different column rules".into()); }
+                }
                 if covered.iter().all(|v| *v) { break 'rows; }
             }
         }
@@ -137,6 +215,45 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
             enter(right, DROPEFFECT_COPY)?;
             enter(left, DROPEFFECT_NONE)?;
         }
+        // The actual HWND message path used by the short-lived wheel hook. No system
+        // input is injected and no user's pointer or unrelated application is touched.
+        let saved = {
+            let c = c.borrow();
+            let selection = c.panes[0].model.selection.borrow().clone();
+            (selection, c.panes[0].model.special.get(), c.active)
+        };
+        for internal in [false, true] {
+            let _origin = internal.then(|| Origin::new(1));
+            let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
+            unsafe { target.DragEnter(&data, MODIFIERKEYS_FLAGS(9), left, &mut effect) }.map_err(|e| e.to_string())?;
+            let (_, serial) = WHEEL_ROUTE.get().ok_or("wheel capture not installed")?;
+            let position = (left.x as u16 as u32) | ((left.y as u16 as u32) << 16);
+            let send = |delta: i16, serial: usize| {
+                unsafe { SendMessageW(hwnd, WHEEL_MESSAGE, Some(WPARAM((serial << 16) | delta as u16 as usize)), Some(LPARAM(position as isize))) };
+            };
+            let start = c.borrow().panes[0].model.page_start.get();
+            send(-60, serial);
+            if c.borrow().panes[0].model.page_start.get() != start { return Err("partial wheel delta turned a page".into()); }
+            send(-60, serial);
+            if c.borrow().panes[0].model.page_start.get() <= start { return Err("drag wheel did not turn page down".into()); }
+            // Re-evaluate the row underneath the stationary pointer after paging.
+            effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
+            unsafe { target.DragOver(MODIFIERKEYS_FLAGS(9), left, &mut effect) }.map_err(|e| e.to_string())?;
+            if ui.get_drop_row() != -1 { return Err("paging retained a stale folder-row highlight".into()); }
+            send(120, serial);
+            if c.borrow().panes[0].model.page_start.get() != start { return Err("drag wheel did not turn page up".into()); }
+            unsafe { target.DragLeave() }.map_err(|e| e.to_string())?;
+            if WHEEL_ROUTE.get().is_some() { return Err("wheel capture survived DragLeave".into()); }
+            send(-120, serial);
+            if c.borrow().panes[0].model.page_start.get() != start { return Err("stale drag wheel message was accepted".into()); }
+        }
+        {
+            let mut c = c.borrow_mut();
+            *c.panes[0].model.selection.borrow_mut() = saved.0;
+            c.panes[0].model.special.set(saved.1);
+            c.repaint(0);
+            c.active(saved.2);
+        }
         if !file.exists() { return Err("DragLeave modified the source".into()); }
         Ok(())
     };
@@ -148,6 +265,7 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
 
 #[derive(Default)]
 struct State {
+    wheel: Option<WheelHook>,
     data: Option<IDataObject>,
     paths: Vec<PathBuf>,
     destination: Option<PathBuf>,
@@ -365,9 +483,11 @@ mod tests {
 impl IDropTarget_Impl for Target_Impl {
     fn DragEnter(&self, data: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> WinResult<()> {
         self.leave();
+        *self.state.borrow_mut() = State::default();
         let data = data.as_ref().cloned();
         let paths = data.as_ref().and_then(shell::hdrop_paths).unwrap_or_default();
-        *self.state.borrow_mut() = State { data, paths, ..Default::default() };
+        let wheel = WheelHook::new(self.hwnd).ok();
+        *self.state.borrow_mut() = State { data, paths, wheel, ..Default::default() };
         // Unsupported virtual objects fail closed; never promise an operation we cannot validate.
         self.over(keys, pt, effect, false)
     }
@@ -380,6 +500,8 @@ impl IDropTarget_Impl for Target_Impl {
         Ok(())
     }
     fn Drop(&self, data: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> WinResult<()> {
+        let wheel = self.state.borrow_mut().wheel.take();
+        drop(wheel); // No interception while Shell transfer/conflict dialogs are open.
         // Recheck position, setting, identities and existence on release.
         if let Err(error) = self.over(keys, pt, effect, true) {
             self.leave();

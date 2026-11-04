@@ -3768,6 +3768,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         shell::WindowNotice::Resumed => { post(Reply::Resumed); }
+                        shell::WindowNotice::DragWheel(wparam, lparam) => {
+                            if let Some(ui) = weak.upgrade() { dnd::wheel(&ui, h, wparam, lparam); }
+                        }
                     }
                 }));
                 if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
