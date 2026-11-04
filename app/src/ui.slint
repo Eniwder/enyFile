@@ -1232,8 +1232,8 @@ component SettingsDialog inherits Rectangle {
                             if root.tab == 3 : VerticalLayout {
                                 spacing: 12px; alignment: start;
                                 Text { text: "ドラッグ＆ドロップ"; font-weight: 700; color: Theme.text; }
+                                CheckBox { text: "同じペインのフォルダへのドラッグ移動を有効にする"; checked <=> root.intra-pane-move; }
                                 CheckBox { text: "ペイン間のドラッグ＆ドロップを有効にする"; checked <=> root.pane-drag-drop; }
-                                CheckBox { text: "ペイン内のフォルダへのドラッグ移動を有効にする"; checked <=> root.intra-pane-move; }
                                 Text { text: "外部アプリとのドラッグ＆ドロップは常に有効です。"; color: Theme.dim; wrap: word-wrap; }
                                 Text { text: "フォルダ以下の検索 (Ctrl+Alt+Shift+F)"; font-weight: 700; color: Theme.text; }
                                 CheckBox { text: "ジャンクションとシンボリックリンクの先も検索する"; checked <=> root.search-links; }
