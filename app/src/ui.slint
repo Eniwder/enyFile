@@ -46,6 +46,7 @@ export global Theme {
 // `diff` 0 same, 1 only here and new ("+"), 2 only here and old ("-"), 3 differs in the
 // cells flagged by size-diff / time-diff / attr-diff.
 // `spoof`: the name holds characters that reorder or hide text (shown as marks, in red).
+export struct DropHit { pane: int, row: int }
 export struct Row { compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, spoof: bool, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
 // Menu bar item: `checkable` shows a check column; a separator ignores the rest.
 export struct MenuItem { text: string, command: int, checkable: bool, checked: bool, separator: bool }
@@ -487,6 +488,8 @@ component Pane inherits Rectangle {
     in property <PaneInfo> info;
     in property <bool> active;
     in property <bool> busy;
+    in property <bool> drop-active;
+    in property <int> drop-row: -1;
     in property <length> row-h: 23px;
     // 3-pane layout: name (with extension), size and time only.
     in property <bool> compact;
@@ -531,7 +534,7 @@ component Pane inherits Rectangle {
     property <length> kind-w: min(max(130px, kind-probe.preferred-width + 2px), 130px + root.name-spare);
     background: Theme.pane;
     border-width: 1px;
-    border-color: root.active ? Theme.border-active : Theme.border;
+    border-color: root.drop-active ? Theme.accent : root.active ? Theme.border-active : Theme.border;
 
     // Path bar: breadcrumb (click a segment to open it), click the empty part or Ctrl+L to type.
     Rectangle {
@@ -628,6 +631,8 @@ component Pane inherits Rectangle {
         for row[index] in root.rows : item := Rectangle {
             x: 0; y: index * root.row-h; width: parent.width;
             height: root.row-h;
+            border-width: root.drop-active && root.drop-row == index ? 2px : 0px;
+            border-color: Theme.accent;
             property <bool> lit: row.current && root.active;
             property <color> fg: item.lit ? Theme.cursor-text : row.selected ? Theme.selected-text : row.hidden ? Theme.hidden-text : Theme.text;
             // Name and extension: extension color, else attribute / folder colors.
@@ -1017,6 +1022,7 @@ component SettingsDialog inherits Rectangle {
     in-out property <int> window-opacity;
     in property <string> app-version;
     in-out property <bool> search-links;
+    in-out property <bool> pane-drag-drop;
     // エージェント: the CLI (0 Codex, 1 none), program (empty = found automatically, shown dim),
     // write access 0 / 1 / 2, the folders access 1 adds, and the memory file.
     in-out property <int> agent-cli;
@@ -1217,6 +1223,9 @@ component SettingsDialog inherits Rectangle {
                             // その他
                             if root.tab == 3 : VerticalLayout {
                                 spacing: 12px; alignment: start;
+                                Text { text: "ドラッグ＆ドロップ"; font-weight: 700; color: Theme.text; }
+                                CheckBox { text: "enyFile内のペイン間ドラッグ＆ドロップを有効にする"; checked <=> root.pane-drag-drop; }
+                                Text { text: "外部アプリからのドロップは常に有効です。同じペインへのドロップは操作しません。"; color: Theme.dim; wrap: word-wrap; }
                                 Text { text: "フォルダ以下の検索 (Ctrl+Alt+Shift+F)"; font-weight: 700; color: Theme.text; }
                                 CheckBox { text: "ジャンクションとシンボリックリンクの先も検索する"; checked <=> root.search-links; }
                                 Text {
@@ -1490,6 +1499,9 @@ export component App inherits Window {
     // Shown in the font sample of the settings dialog.
     in property <string> app-version;
     in-out property <bool> settings-search-links;
+    in-out property <bool> settings-pane-drag-drop;
+    in-out property <int> drop-pane: -1;
+    in-out property <int> drop-row: -1;
     in-out property <int> settings-agent-cli;
     in-out property <string> settings-agent-path;
     in property <string> settings-agent-detected;
@@ -1727,6 +1739,7 @@ export component App inherits Window {
     property <length> q-h0: (root.area-h - 4px) * root.quad-y;
     property <length> q-h1: root.area-h - 4px - root.q-h0;
     p0 := Pane {
+        drop-active: root.drop-pane == 0; drop-row: root.drop-row;
         x: root.area-x; y: root.area-y;
         width: root.pane-count == 2 ? (root.area-w - 4px) * root.split : root.side-by-side ? root.c-w0 : root.stacked ? root.area-w : root.q-w0;
         height: root.pane-count == 2 || root.side-by-side ? root.area-h : root.stacked ? root.r-h0 : root.q-h0;
@@ -1739,6 +1752,7 @@ export component App inherits Window {
         page-resized(n) => { root.page-resized(0, n); } copy-path => { root.copy-path(0); } page-step(f) => { root.page-step(0, f); }
     }
     p1 := Pane {
+        drop-active: root.drop-pane == 1; drop-row: root.drop-row;
         x: root.pane-count == 2 ? root.area-x + p0.width + 4px : root.side-by-side ? root.area-x + root.c-w0 + 4px : root.stacked ? root.area-x : root.area-x + root.q-w0 + 4px;
         y: root.stacked ? root.area-y + root.r-h0 + 4px : root.area-y;
         width: root.pane-count == 2 ? root.area-x + root.area-w - self.x : root.side-by-side ? root.c-w1 : root.stacked ? root.area-w : root.q-w1;
@@ -1752,6 +1766,7 @@ export component App inherits Window {
         page-resized(n) => { root.page-resized(1, n); } copy-path => { root.copy-path(1); } page-step(f) => { root.page-step(1, f); }
     }
     p2 := Pane {
+        drop-active: root.drop-pane == 2; drop-row: root.drop-row;
         visible: root.pane-count >= 3;
         x: root.side-by-side ? root.area-x + root.c-w0 + 4px + root.c-w1 + 4px : root.area-x;
         y: root.stacked ? root.area-y + root.r-h0 + 4px + root.r-h1 + 4px : root.side-by-side ? root.area-y : root.area-y + root.q-h0 + 4px;
@@ -1766,6 +1781,7 @@ export component App inherits Window {
         page-resized(n) => { root.page-resized(2, n); } copy-path => { root.copy-path(2); } page-step(f) => { root.page-step(2, f); }
     }
     p3 := Pane {
+        drop-active: root.drop-pane == 3; drop-row: root.drop-row;
         visible: root.quad;
         x: root.area-x + root.q-w0 + 4px; y: root.area-y + root.q-h0 + 4px;
         width: root.q-w1; height: root.q-h1;
@@ -1776,6 +1792,13 @@ export component App inherits Window {
         pointer(i, c, s, k) => { root.pointer(3, i, c, s, k); } key-event(e) => { return root.key-event(3, e); }
         blank => { root.blank(3); } blank-menu(s) => { root.blank-menu(3, s); } alt-released => { root.alt-released(); }
         page-resized(n) => { root.page-resized(3, n); } copy-path => { root.copy-path(3); } page-step(f) => { root.page-step(3, f); }
+    }
+    public function hit-drop(x: length, y: length) -> DropHit {
+        if x >= p0.x + 1px && x < p0.x + p0.width - 1px && y >= p0.y + 50px && y < p0.y + p0.height - 1px { return { pane: 0, row: floor((y - p0.y - 50px) / root.row-h) }; }
+        if x >= p1.x + 1px && x < p1.x + p1.width - 1px && y >= p1.y + 50px && y < p1.y + p1.height - 1px { return { pane: 1, row: floor((y - p1.y - 50px) / root.row-h) }; }
+        if root.pane-count >= 3 && x >= p2.x + 1px && x < p2.x + p2.width - 1px && y >= p2.y + 50px && y < p2.y + p2.height - 1px { return { pane: 2, row: floor((y - p2.y - 50px) / root.row-h) }; }
+        if root.quad && x >= p3.x + 1px && x < p3.x + p3.width - 1px && y >= p3.y + 50px && y < p3.y + p3.height - 1px { return { pane: 3, row: floor((y - p3.y - 50px) / root.row-h) }; }
+        return { pane: -1, row: -1 };
     }
     // 2 panes.
     Splitter {
@@ -2135,6 +2158,7 @@ export component App inherits Window {
         font-size: root.settings-font-size;
         window-opacity <=> root.settings-opacity;
         search-links <=> root.settings-search-links;
+        pane-drag-drop <=> root.settings-pane-drag-drop;
         agent-cli <=> root.settings-agent-cli;
         agent-path <=> root.settings-agent-path;
         agent-detected: root.settings-agent-detected;

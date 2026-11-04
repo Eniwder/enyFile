@@ -774,6 +774,8 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     c.borrow_mut().drag_probe = None;
                     fkey(&ui, 0, Key::DownArrow);
                     s.pass("drag out: the selection, or the item pressed");
+                    dnd::smoke_check(&ui, &c, &root)?;
+                    s.pass("drop target: external enabled, internal setting, same pane refused, highlight and leave");
                     ui.invoke_open_settings();
                     ui.set_settings_tab(1);
                 }
@@ -823,10 +825,21 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_open_settings();
                     ui.invoke_setting_edited(5, display(&root.join("left")).into());
                     ui.set_settings_opacity(80);
+                    expect(!ui.get_settings_pane_drag_drop(), "pane drag and drop is off by default")?;
+                    ui.set_settings_pane_drag_drop(true);
                     expect(!ui.get_settings_search_links(), "following links is off by default")?;
                     ui.set_settings_search_links(true);
                     ui.invoke_settings_done(true);
                     let saved = config()?;
+                    expect(saved["pane_drag_drop"] == true && c.borrow().config.pane_drag_drop, "pane drag and drop saved")?;
+                    ui.invoke_open_settings();
+                    ui.set_settings_pane_drag_drop(false);
+                    ui.invoke_settings_done(false);
+                    expect(c.borrow().config.pane_drag_drop, "cancel settings preserves pane drag and drop")?;
+                    ui.invoke_open_settings();
+                    ui.set_settings_pane_drag_drop(false);
+                    ui.invoke_settings_done(true);
+                    expect(!c.borrow().config.pane_drag_drop, "pane drag and drop can be disabled")?;
                     expect(saved["opacity"] == 0.8, "opacity saved")?;
                     expect(saved["search_links"] == true && c.borrow().config.search_links, "その他: following links saved")?;
                     // Later steps search with links not followed.

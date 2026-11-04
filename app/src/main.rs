@@ -4,6 +4,7 @@ mod compare;
 mod config;
 mod ctxmenu;
 mod demo;
+mod dnd;
 mod finder;
 mod icons;
 mod listing;
@@ -30,7 +31,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::HWND;
-slint::slint! { export { App, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine, PropRow } from "src/ui.slint"; }
+slint::slint! { export { App, DropHit, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine, PropRow } from "src/ui.slint"; }
 
 #[derive(Clone)]
 struct Saved {
@@ -2293,6 +2294,7 @@ impl Controller {
         let (Some(hwnd), false) = (hwnd(&ui), paths.is_empty()) else { return };
         let ui = ui.as_weak();
         slint::Timer::single_shot(Duration::ZERO, move || {
+            let _origin = dnd::Origin::new(p);
             let result = shell::drag_out(&paths);
             let Some(ui) = ui.upgrade() else { return };
             // The drag loop took the button release: the row still counts as pressed.
@@ -3741,14 +3743,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.show()?;
     // winit creates the native window once the event loop runs; poll briefly for its HWND.
     let revoke = Rc::new(slint::Timer::default());
+    let drop_registration = Rc::new(RefCell::new(None));
     {
         let weak = ui.as_weak();
         let stop = Rc::downgrade(&revoke);
         let start = Instant::now();
+        let registration = drop_registration.clone();
         revoke.start(slint::TimerMode::Repeated, Duration::from_millis(16), move || {
             let handle = weak.upgrade().and_then(|ui| hwnd(&ui));
             if let Some(h) = handle {
                 shell::revoke_drop_target(h);
+                match dnd::register(h, weak.clone()) {
+                    Ok(target) => *registration.borrow_mut() = Some(target),
+                    Err(e) => { if let Some(ui) = weak.upgrade() { ui.set_message(format!("ドロップ受付を登録できません: {e}").into()); ui.set_message_error(true); } }
+                }
                 shell::dark_title_bar(h);
                 shell::window_icon(h);
                 let weak = weak.clone();

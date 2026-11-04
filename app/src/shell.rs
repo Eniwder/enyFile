@@ -334,7 +334,7 @@ fn hdrop_valid(bytes: &[u8]) -> bool {
         ends(&list.iter().map(|&b| u16::from(b)).collect::<Vec<_>>())
     }
 }
-fn hdrop_paths(data: &IDataObject) -> Option<Vec<PathBuf>> {
+pub(super) fn hdrop_paths(data: &IDataObject) -> Option<Vec<PathBuf>> {
     unsafe {
         let mut medium = data.GetData(&etc(CF_HDROP.0 as u32)).ok()?;
         let valid = medium.tymed == TYMED_HGLOBAL.0 as u32 && {

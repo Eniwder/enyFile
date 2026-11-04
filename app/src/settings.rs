@@ -20,6 +20,7 @@ impl Controller {
             ui.set_settings_font_family(self.settings_font.0.clone().into());
             ui.set_settings_font_size(self.settings_font.1.round() as i32);
             ui.set_settings_opacity((self.config.opacity * 100.0).round() as i32);
+            ui.set_settings_pane_drag_drop(self.config.pane_drag_drop);
             ui.set_settings_search_links(self.config.search_links);
             ui.set_settings_agent_cli(if self.config.agent_enabled { 0 } else { 1 });
             ui.set_settings_agent_path(self.config.agent_path.as_ref().map_or(String::new(), |p| display(p)).into());
@@ -198,6 +199,7 @@ impl Controller {
             self.config.places = [desktop, documents, pictures, videos, music];
             self.config.start = [left, right];
             if let Some(ui) = self.ui.upgrade() {
+                self.config.pane_drag_drop = ui.get_settings_pane_drag_drop();
                 self.config.opacity = ui.get_settings_opacity() as f32 / 100.0;
                 let follow = ui.get_settings_search_links();
                 if follow != self.config.search_links {
