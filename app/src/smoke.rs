@@ -791,7 +791,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                 37 => {
                     let Some(checked) = s.drop_check.borrow().clone() else { return Ok(false) };
                     checked?;
-                    if s.held.is_none() { s.pass("OLE modal drag: shared feedback, wheel paging and actual window rendering"); }
+                    if s.held.is_none() { s.pass("OLE modal drag: shared feedback, page-tail bounds, wheel paging and actual window rendering"); }
                     if s.held.is_none() && !s.hold.is_zero() {
                         // Tells a screenshot script the settings dialog is on screen.
                         let _ = std::fs::write(root.join("holding-settings"), b"");

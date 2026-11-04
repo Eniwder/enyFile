@@ -247,9 +247,12 @@ impl Target {
             if pane.found.is_some() || pane.model.compare.borrow().is_some() { return None; }
             let data = c.data(p);
             if data.dir.as_os_str().is_empty() { return None; }
-            let row = hit.row as usize + pane.model.page_start.get();
+            // A partial row at the bottom is blank space, not the next page's item.
+            let slot = usize::try_from(hit.row).ok()
+                .filter(|&row| row < pane.model.row_count())
+                .and_then(|row| pane.model.slot(pane.model.page_start.get() + row));
             let mut target_row = hit.row;
-            let dir = match pane.model.slot(row) {
+            let dir = match slot {
                 Some(Slot::Parent) if hit.in_name => data.dir.parent()?.to_path_buf(),
                 Some(Slot::Entry(i)) if hit.in_name && data.rows[i].directory => (*data.rows[i].path).clone(),
                 Some(Slot::Drive(_)) | Some(Slot::Gap) => return None,

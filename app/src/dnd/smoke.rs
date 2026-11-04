@@ -41,6 +41,83 @@ fn check_failed_hover(ui: &App, point: POINTL, data: &IDataObject) -> Result<(),
     Ok(())
 }
 
+/// The few pixels below a full page must not resolve to the next page's folder.
+/// Use a real pane and native coordinates, but never perform a file transfer.
+fn check_page_tail(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path, left: POINTL, data: &IDataObject) -> Result<(), String> {
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    let hwnd = hwnd(ui).ok_or("no HWND")?;
+    let font = ui.get_font_size();
+    let original = c.borrow().data(0);
+    let start = c.borrow().panes[0].model.page_start.get();
+    let options = { let c = c.borrow(); (c.config.pane_drag_drop, c.config.intra_pane_move) };
+    let result = (|| -> Result<(), String> {
+        let mut client = POINT { x: left.x, y: left.y };
+        if !unsafe { ScreenToClient(hwnd, &mut client) }.as_bool() { return Err("ScreenToClient failed".into()); }
+        let mut tail = None;
+        // Usually the default height already has a remainder. Try nearby row heights
+        // too, so an exactly divisible window cannot silently skip this regression.
+        for offset in 0..4 {
+            ui.set_font_size(font + offset as f32);
+            redraw(hwnd);
+            let count = c.borrow().panes[0].model.row_count();
+            let scale = ui.window().scale_factor();
+            for y in 0..ui.window().size().height as i32 {
+                let hit = ui.invoke_hit_drop(client.x as f32 / scale, y as f32 / scale);
+                if hit.pane == 0 && hit.in_name && hit.row as usize == count {
+                    tail = Some((POINT { x: client.x, y }, count));
+                    break;
+                }
+            }
+            if tail.is_some() { break; }
+        }
+        let (mut point, count) = tail.ok_or("no partial-row blank area in the real pane")?;
+        let next = match c.borrow().panes[0].model.slot(c.borrow().panes[0].model.page_start.get() + count) {
+            Some(Slot::Entry(i)) => i,
+            _ => return Err("tail regression needs an item on the next page".into()),
+        };
+        let hidden = root.join("dnd-probe/hidden-next-page");
+        std::fs::create_dir_all(&hidden).map_err(|e| e.to_string())?;
+        let mut snapshot = (*original).clone();
+        snapshot.rows[next].path = Arc::new(hidden);
+        snapshot.rows[next].directory = true;
+        *c.borrow().panes[0].model.data.borrow_mut() = Arc::new(snapshot);
+        c.borrow().panes[0].model.notify.reset();
+        redraw(hwnd);
+        if !unsafe { ClientToScreen(hwnd, &mut point) }.as_bool() { return Err("ClientToScreen failed".into()); }
+        let point = POINTL { x: point.x, y: point.y };
+        let probe = Target { hwnd, ui: ui.as_weak(), state: RefCell::new(State::default()) };
+        let target: IDropTarget = Target { hwnd, ui: ui.as_weak(), state: RefCell::new(State::default()) }.into();
+        for origin in [None, Some(1), Some(0)] {
+            c.borrow_mut().config.pane_drag_drop = true;
+            c.borrow_mut().config.intra_pane_move = true;
+            let _origin = origin.map(Origin::new);
+            let expected = (origin != Some(0)).then(|| (original.dir.clone(), 0, -1));
+            let actual = probe.destination(&point);
+            if actual != expected { return Err(format!("blank row {count} resolved outside the displayed page: {actual:?}")); }
+            let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
+            let keys = if origin == Some(0) { 1 } else { 9 };
+            unsafe {
+                target.DragEnter(data, MODIFIERKEYS_FLAGS(keys), point, &mut effect).map_err(|e| e.to_string())?;
+                target.DragLeave().map_err(|e| e.to_string())?;
+            }
+            let expected_effect = if origin == Some(0) { DROPEFFECT_NONE } else { DROPEFFECT_COPY };
+            if effect != expected_effect || ui.get_drop_row() != -1 { return Err("blank area advertised a hidden folder drop".into()); }
+        }
+        Ok(())
+    })();
+    {
+        let mut c = c.borrow_mut();
+        *c.panes[0].model.data.borrow_mut() = original;
+        c.panes[0].model.page_start.set(start);
+        c.panes[0].model.notify.reset();
+        (c.config.pane_drag_drop, c.config.intra_pane_move) = options;
+    }
+    ui.set_font_size(font);
+    redraw(hwnd);
+    c.borrow_mut().repaint(0);
+    result
+}
+
 /// A real drop while the other pane holds completed search results. The caller
 /// checks those results on the next smoke tick, after deferred refreshes can run.
 pub(crate) fn refresh(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) -> Result<(), String> {
@@ -156,6 +233,7 @@ fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) -> std::resul
         let left = point_for(0)?;
         let right = point_for(1)?;
         check_failed_hover(ui, right, &data)?;
+        check_page_tail(ui, c, root, left, &data)?;
         // Check real row geometry: names enter folders; metadata targets the pane.
         // Include both ordinary folders and the parent row, without transferring files.
         let probe = Target { hwnd, ui: ui.as_weak(), state: RefCell::new(State::default()) };
