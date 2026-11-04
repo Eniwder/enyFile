@@ -65,6 +65,9 @@ app/
     ├── compare.rs      ペインの比較
     ├── agent.rs        エージェント CLI の起動・中断（ジョブオブジェクト）・JSONL の読み取り。CLI ごとの違いは mod codex
     ├── shell.rs        クリップボード、IFileOperation、既定アプリ起動、フォルダ監視、DLL の検索先の制限
+    ├── dnd.rs          OLEのドロップ受付、宛先判定、ホイールと描画の連携
+    ├── dnd/smoke.rs    実UI・OLEの回帰テスト（releaseの --smoke でも使用）
+    ├── dnd/tests.rs    D&Dの単体テスト
     ├── ctxmenu.rs      シェルのコンテキストメニュー
     ├── icons.rs        関連付けアイコン
     ├── config.rs       設定ファイル

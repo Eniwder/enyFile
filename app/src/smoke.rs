@@ -124,6 +124,7 @@ fn clip() -> Result<(Vec<String>, u32), String> {
 
 struct State {
     drop_check: Rc<RefCell<Option<Result<(), String>>>>,
+    drop_refresh_checked: bool,
     step: usize,
     probe: Option<Child>,
     log: Vec<String>,
@@ -195,6 +196,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
     let state = RefCell::new(State {
         step: 0,
         drop_check: Rc::new(RefCell::new(None)),
+        drop_refresh_checked: false,
         probe: None,
         log: Vec::new(),
         root: std::fs::canonicalize(&root).unwrap_or(root),
@@ -1208,6 +1210,8 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         .output()
                         .map_err(|e| e.to_string())?;
                     expect(made.status.success(), "junction created for the search test")?;
+                    // Keep the subsequent real drop inside the dedicated fixture.
+                    c.borrow_mut().navigate(1, root.join("right"), Mode::New(None));
                     ui.invoke_navigate(0, display(&tree).into());
                 }
                 52 => {
@@ -1233,9 +1237,27 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(found(&c) == ["a\\hit.rs", "b\\hit.txt"], &format!("results with their folder, the junction not entered: {:?}", found(&c)))?;
                     expect(ui.get_p0_info().search == "hit*" && ui.get_find_mode() == 3, "results while typing, shown in the info line")?;
                     s.pass("Ctrl+Alt+Shift+F searches below the folder while typing, junctions skipped");
-                    ui.invoke_find_edited("a/*.rs".into());
+                    *s.drop_check.borrow_mut() = None;
+                    let checked = s.drop_check.clone();
+                    let weak = ui.as_weak();
+                    let controller = c.clone();
+                    dnd::defer(hwnd(&ui).ok_or("no HWND")?, move || {
+                        *checked.borrow_mut() = Some(weak.upgrade().ok_or("window closed".to_string())
+                            .and_then(|ui| dnd::smoke_refresh(&ui, &controller, &root)));
+                    }).map_err(|e| e.to_string())?;
                 }
                 54 => {
+                    if !s.drop_refresh_checked {
+                        let Some(checked) = s.drop_check.borrow().clone() else { return Ok(false) };
+                        checked?;
+                        if !idle(&c) { return Ok(false); }
+                        expect(c.borrow().panes[0].found.is_some() && found(&c) == ["a\\hit.rs", "b\\hit.txt"], "drop refresh preserves the other pane's search results")?;
+                        expect(c.borrow().panes[0].finder.as_ref().map(|f| f.id) == Some(s.session), "drop refresh preserves the search session")?;
+                        s.pass("rejected and completed drops preserve other-pane search results");
+                        s.drop_refresh_checked = true;
+                        ui.invoke_find_edited("a/*.rs".into());
+                        return Ok(false);
+                    }
                     if !searched(&c, "a/*.rs") {
                         return Ok(false);
                     }
