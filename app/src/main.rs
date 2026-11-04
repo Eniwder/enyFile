@@ -99,7 +99,7 @@ enum Reply {
     Deleted(Result<bool, String>, bool),
     Opened(Result<(), String>),
     /// A `shell:` name typed in pane `usize`: its folder, or None when Explorer showed it.
-    ShellFolder(usize, Result<Option<PathBuf>, String>),
+    ShellFolder(usize, u64, Result<Option<PathBuf>, String>),
     /// Folder chosen in the settings dialog for place `usize`.
     Picked(usize, PathBuf),
     /// From the recursive search walk `u64` of a pane.
@@ -149,6 +149,8 @@ struct Agent {
 }
 /// The panel keeps this many log lines, and ↑ goes back this many requests.
 const AGENT_LINES: usize = 1000;
+// Keep long individual replies, but do not retain 1000 maximum-sized JSON records.
+const AGENT_LOG_BYTES: usize = 16 * 1024 * 1024;
 const AGENT_HISTORY: usize = 100;
 
 thread_local! {
@@ -324,6 +326,8 @@ struct Pane {
     model: Rc<RowsModel>,
     worker: Worker,
     generation: u64,
+    /// Navigation intent only; refreshes and sorts must not invalidate a Shell lookup.
+    navigation: u64,
     pending: Option<Mode>,
     /// A change notification arrived while a listing was in flight.
     stale: bool,
@@ -366,8 +370,8 @@ struct Found {
     /// because that job's snapshot would replace them.
     backlog: Vec<Entry>,
     running: bool,
-    /// The query is answered: sort once the backlog is in. Some(hit the limit).
-    finished: Option<bool>,
+    /// The query is answered: sort once the backlog is in, retaining incomplete status.
+    finished: Option<finder::Completion>,
     /// The list still shows the previous query (or the folder) until the first results
     /// come in, so typing does not blank it on every key.
     replace: bool,
@@ -970,6 +974,9 @@ impl Controller {
         let automatic = matches!(mode, Mode::Automatic);
         let show_hidden = self.config.show_hidden[p];
         let pane = &mut self.panes[p];
+        if matches!(mode, Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_)) {
+            pane.navigation += 1;
+        }
         pane.fallback = None;
         // Any listing ends the search: its results are not a folder that can be re-read.
         // Back to the searched folder keeps the walk for the search bar still open.
@@ -1003,8 +1010,11 @@ impl Controller {
         // shell:Desktop and the like: the Shell resolves them, off the UI thread (a known
         // folder can be redirected to the network).
         if text.get(..6).is_some_and(|s| s.eq_ignore_ascii_case("shell:")) {
+            self.panes[p].fallback = None;
+            self.panes[p].navigation += 1;
+            let navigation = self.panes[p].navigation;
             let name = text.to_string();
-            std::thread::spawn(move || post(Reply::ShellFolder(p, shell::shell_folder(&name))));
+            std::thread::spawn(move || post(Reply::ShellFolder(p, navigation, shell::shell_folder(&name))));
             return;
         }
         let path = PathBuf::from(text);
@@ -1241,7 +1251,7 @@ impl Controller {
         }
         self.navigate(p, found.root, Mode::Return(found.saved));
     }
-    fn found(&mut self, p: usize, id: u64, batch: Vec<Entry>, done: Option<bool>) {
+    fn found(&mut self, p: usize, id: u64, batch: Vec<Entry>, done: Option<finder::Completion>) {
         let pane = &mut self.panes[p];
         let Some(found) = pane.found.as_mut().filter(|f| f.id == id) else { return };
         found.backlog.extend(batch);
@@ -1311,13 +1321,18 @@ impl Controller {
             }
         }
         match finished {
-            Some(limited) => {
+            Some(completion) => {
                 let count = self.data(p).rows.len();
-                self.message(if limited {
+                let message = if completion.limited {
                     format!("検索: {text} … {}件で打ち切りました（Esc で戻る）", finder::RESULT_LIMIT)
                 } else {
                     format!("検索: {text} … {count}件（Esc で戻る）")
-                });
+                };
+                if completion.unreadable > 0 {
+                    self.fail(format!("{message}（{}フォルダを取得できないため結果は不完全です）", completion.unreadable));
+                } else {
+                    self.message(message);
+                }
                 // The final sort; its reply ends the busy state.
                 self.rearrange(p);
             }
@@ -1517,7 +1532,9 @@ impl Controller {
     }
     fn agent_push(&self, kind: i32, text: String) {
         let lines = &self.agent.lines;
-        if lines.row_count() >= AGENT_LINES {
+        let mut bytes = lines.iter().map(|line| line.text.len()).sum::<usize>();
+        while lines.row_count() > 0 && (lines.row_count() >= AGENT_LINES || bytes.saturating_add(text.len()) > AGENT_LOG_BYTES) {
+            bytes -= lines.row_data(0).unwrap().text.len();
             lines.remove(0);
         }
         lines.push(AgentLine { kind, text: text.trim_end().into() });
@@ -1653,7 +1670,21 @@ impl Controller {
         };
         self.agent.id += 1;
         let id = self.agent.id;
-        self.agent.run = Some(agent::start(request, move |event| post(Reply::Agent(id, event))));
+        self.agent.run = Some(agent::start(request, move |event| {
+            // One outstanding UI event: even a stream of small records must not
+            // build an unbounded event-loop queue while the UI is busy.
+            let (tx, rx) = mpsc::channel();
+            slint::invoke_from_event_loop(move || {
+                let accepted = CONTROLLER.with(|cell| {
+                    let controller = cell.borrow().clone();
+                    if let Some(c) = controller {
+                        c.borrow_mut().handle(Reply::Agent(id, event));
+                        true
+                    } else { false }
+                });
+                let _ = tx.send(accepted);
+            }).is_ok() && rx.recv().unwrap_or(false)
+        }));
         self.agent.started = Instant::now();
         self.agent.status = "起動中…".into();
         self.agent.clock.start(slint::TimerMode::Repeated, Duration::from_secs(1), || {
@@ -1983,7 +2014,8 @@ impl Controller {
                     self.fail(format!("開けません: {e}"));
                 }
             }
-            Reply::ShellFolder(p, result) => match result {
+            Reply::ShellFolder(p, navigation, _) if self.panes[p].navigation != navigation => {},
+            Reply::ShellFolder(p, _, result) => match result {
                 Ok(Some(path)) => self.navigate(p, path, Mode::New(None)),
                 Ok(None) => {}
                 Err(e) => self.fail(format!("開けません: {e}")),
@@ -3325,6 +3357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         worker: Worker::new(p),
         generation: 0,
+        navigation: 0,
         pending: None,
         stale: false,
         watch: None,

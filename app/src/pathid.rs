@@ -74,7 +74,7 @@ fn text(path: &Path) -> String {
 #[derive(Default)]
 pub struct Idents(HashMap<PathBuf, Option<Ident>>);
 impl Idents {
-    fn get(&mut self, path: &Path) -> Option<Ident> {
+    pub fn get(&mut self, path: &Path) -> Option<Ident> {
         *self.0.entry(path.to_path_buf()).or_insert_with(|| ident(path))
     }
     /// `a` and `b` are the same object (hard links included).

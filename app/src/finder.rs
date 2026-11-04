@@ -21,9 +21,14 @@ pub const INDEX_LIMIT: usize = 1_000_000;
 /// Results go to the UI a few times a second, the first ones at once.
 const BATCH: Duration = Duration::from_millis(150);
 
+#[derive(Clone, Copy, Debug)]
+pub struct Completion {
+    pub limited: bool,
+    pub unreadable: usize,
+}
 pub enum Event {
     /// Matches of query `id`; Some(hit the result limit) once the query is complete.
-    Found(u64, Vec<Entry>, Option<bool>),
+    Found(u64, Vec<Entry>, Option<Completion>),
     /// The tree is bigger than the index limit: queries now walk the disk.
     Overflow,
     /// Per-file icons (exe, lnk, ...) of the results are ready.
@@ -55,6 +60,7 @@ impl Finder {
             dirs: Vec::new(),
             items: Vec::new(),
             overflow: false,
+            unreadable: 0,
             query: None,
         };
         std::thread::spawn(move || walk.run());
@@ -128,6 +134,8 @@ struct Walk {
     items: Vec<Item>,
     /// The tree outgrew `limit`: nothing is kept and each query walks again.
     overflow: bool,
+    /// Folders omitted from this walk, reported on every query using its index.
+    unreadable: usize,
     query: Option<Query>,
 }
 impl Walk {
@@ -147,6 +155,7 @@ impl Walk {
             if let Some((id, pattern)) = self.control.0.lock().unwrap().take() {
                 self.query = Some(Query { id, pattern, pos: 0, count: 0, batch: Vec::new(), sent: None, done: false, icons: Vec::new() });
                 if self.overflow {
+                    self.unreadable = 0;
                     self.queue = VecDeque::from([self.root.clone()]);
                     self.walked = vec![self.canonical_root()];
                 }
@@ -197,7 +206,13 @@ impl Walk {
     /// Reads one folder: kept for later queries, or matched right away past the limit.
     fn read(&mut self, dir: PathBuf) -> bool {
         // Unreadable folders (access denied, vanished) are skipped, as Explorer's search does.
-        let Ok(rows) = listing::scan(&dir, self.show_hidden) else { return true };
+        let rows = match listing::scan(&dir, self.show_hidden) {
+            Ok(rows) => rows,
+            Err(_) => {
+                self.unreadable += 1;
+                return true;
+            }
+        };
         for raw in &rows {
             if raw.attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
                 continue;
@@ -274,7 +289,7 @@ impl Walk {
         q.done = true;
         let batch = std::mem::take(&mut q.batch);
         let icons = std::mem::take(&mut q.icons);
-        if !(self.send)(Event::Found(q.id, batch, Some(limited))) {
+        if !(self.send)(Event::Found(q.id, batch, Some(Completion { limited, unreadable: self.unreadable }))) {
             return false;
         }
         // Files with their own icon after the list is complete; a new query goes first.
@@ -324,6 +339,23 @@ mod tests {
     fn start(root: &Path, limit: usize) -> (Finder, mpsc::Receiver<Event>) {
         let (tx, rx) = mpsc::channel();
         (Finder::start(root.to_path_buf(), false, false, limit, move |event| tx.send(event).is_ok()), rx)
+    }
+    #[test]
+    fn unreadable_walk_is_reported_on_later_cached_queries_too() {
+        let tree = Tree::new("unreadable");
+        let (finder, rx) = start(&tree.0.join("missing"), INDEX_LIMIT);
+        for id in [1, 2] {
+            finder.query(id, Pattern::new("*").unwrap());
+            loop {
+                if let Event::Found(i, batch, Some(done)) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                    assert_eq!(i, id);
+                    assert!(batch.is_empty());
+                    assert!(!done.limited);
+                    assert_eq!(done.unreadable, 1);
+                    break;
+                }
+            }
+        }
     }
     /// The located names of query `id`, in the order they came, and whether the walk overflowed.
     fn answer(finder: &Finder, rx: &mpsc::Receiver<Event>, id: u64, text: &str) -> (Vec<String>, bool) {

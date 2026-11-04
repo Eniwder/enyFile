@@ -606,25 +606,26 @@ const SHELL_MAX: usize = 259;
 const FOLDER_ROOM: usize = 12;
 /// How far the deepest item below folder `dir` reaches past its path, counting
 /// [`FOLDER_ROOM`] for folders. Links are not followed. Stops once past `limit`.
-fn reach(dir: &Path, limit: usize) -> usize {
+fn reach(dir: &Path, limit: usize) -> Result<usize, String> {
     use std::os::windows::fs::MetadataExt;
     let mut deepest = FOLDER_ROOM;
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        if deepest > limit {
-            break;
-        }
-        let attributes = entry.metadata().map_or(0, |m| m.file_attributes());
+    let error = |e| format!("パス長を確認できません: {}: {e}", dir.display());
+    let mut entries = std::fs::read_dir(dir).map_err(error)?;
+    while deepest <= limit {
+        let Some(entry) = entries.next() else { break };
+        let entry = entry.map_err(error)?;
+        let attributes = entry.metadata().map_err(error)?.file_attributes();
         let here = 1 + entry.file_name().encode_wide().count();
         let below = if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
             0
         } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
             FOLDER_ROOM
         } else {
-            reach(&entry.path(), limit.saturating_sub(here))
+            reach(&entry.path(), limit.saturating_sub(here))?
         };
         deepest = deepest.max(here + below);
     }
-    deepest
+    Ok(deepest)
 }
 /// For each op, whether it goes past [`SHELL_MAX`] and is moved here instead of by the copy
 /// engine. Checked before anything changes: a long copy, or a long move to another volume,
@@ -637,13 +638,14 @@ fn beyond_shell(plan: &crate::paste::Plan, inside: &[Option<(usize, PathBuf)>]) 
         // A source inside a replaced folder is reached through its set-aside name.
         let aside = if inside.is_some() { "~enyfile-old-99".len() } else { 0 };
         let base = (len(&op.source) + aside).max(len(&op.target()));
-        let attributes = std::fs::symlink_metadata(&op.source).map_or(0, |m| m.file_attributes());
+        let attributes = std::fs::symlink_metadata(&op.source)
+            .map_err(|e| format!("{}: {e}", op.source.display()))?.file_attributes();
         let extent = if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
             0
         } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
             FOLDER_ROOM
         } else {
-            reach(&op.source, SHELL_MAX.saturating_sub(base))
+            reach(&op.source, SHELL_MAX.saturating_sub(base))?
         };
         let long = base + extent > SHELL_MAX;
         if long {
@@ -1149,6 +1151,16 @@ pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn path_extent_failure_is_not_a_short_tree() {
+        let root = std::env::temp_dir().join(format!("enyfile-reach-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("missing");
+        assert!(super::reach(&missing, super::SHELL_MAX).is_err());
+        std::fs::write(root.join("file"), b"x").unwrap();
+        assert!(super::reach(&root.join("file"), super::SHELL_MAX).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
     #[test]
     fn wsl_paths_and_running_names() {

@@ -57,10 +57,13 @@ pub struct Raw {
 }
 /// The entries of `dir` without type names or icons (cheap enough to keep a whole tree).
 pub fn scan(dir: &Path, show_hidden: bool) -> Result<Vec<Raw>, String> {
+    scan_entries(fs::read_dir(dir).map_err(|e| e.to_string())?, show_hidden)
+}
+fn scan_entries(entries: impl Iterator<Item = std::io::Result<fs::DirEntry>>, show_hidden: bool) -> Result<Vec<Raw>, String> {
     let mut rows = Vec::new();
-    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+    for entry in entries {
         // An entry can vanish between enumeration and stat; skip it rather than fail the folder.
-        let Ok(entry) = entry else { continue };
+        let entry = entry.map_err(|e| e.to_string())?;
         let Ok(meta) = entry.metadata() else { continue };
         if !show_hidden && meta.file_attributes() & 0x2 != 0 {
             continue;
@@ -509,6 +512,16 @@ impl Selection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enumeration_failure_is_not_skipped_or_retried() {
+        let mut calls = 0;
+        let entries = std::iter::from_fn(|| {
+            calls += 1;
+            Some(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "enumeration disconnected")))
+        });
+        assert!(super::scan_entries(entries, false).is_err());
+        assert_eq!(calls, 1);
+    }
     use super::*;
     fn rows() -> Vec<Entry> {
         (0..8)

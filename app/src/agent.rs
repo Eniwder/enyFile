@@ -18,6 +18,59 @@ use windows::Win32::{
     System::JobObjects::*,
 };
 
+// JSONL includes complete messages and aggregated tool output, so allow much more
+// than the short status lines shown in the UI. These limits bound input allocation.
+const JSON_LINE_BYTES: usize = 16 * 1024 * 1024;
+const STDERR_BYTES: usize = 64 * 1024;
+const MEMORY_BYTES: usize = 256 * 1024;
+
+fn read_limited(mut input: impl Read, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    (&mut input).take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("入力が上限の {limit} バイトを超えています")));
+    }
+    Ok(bytes)
+}
+
+/// Read one whole JSON record, refusing it before allocating beyond the limit.
+fn json_line(input: &mut impl BufRead, bytes: &mut Vec<u8>) -> std::io::Result<bool> {
+    bytes.clear();
+    loop {
+        let chunk = input.fill_buf()?;
+        if chunk.is_empty() { return Ok(!bytes.is_empty()); }
+        let end = chunk.iter().position(|&b| b == b'\n');
+        let n = end.map_or(chunk.len(), |n| n + 1);
+        if bytes.len() + n > JSON_LINE_BYTES {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "エージェントのJSONLが1行16 MiBの上限を超えました"));
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        input.consume(n);
+        if end.is_some() { return Ok(true); }
+    }
+}
+
+/// Keep a bounded byte tail while draining the pipe, including newline-free output.
+fn stderr_tail(mut input: impl Read) -> std::io::Result<String> {
+    let mut tail = std::collections::VecDeque::with_capacity(STDERR_BYTES);
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = match input.read(&mut chunk) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if n == 0 { break; }
+        let discard = (tail.len() + n).saturating_sub(STDERR_BYTES);
+        tail.drain(..discard);
+        tail.extend(&chunk[..n]);
+    }
+    let bytes: Vec<u8> = tail.into_iter().collect();
+    // A retained tail can start midway through UTF-8; lossy decoding is intentional.
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<_> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    Ok(lines[lines.len().saturating_sub(6)..].join("\n"))
+}
+
 /// Where the agent may write (設定 > エージェント). Reads are not limited by any of them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Access {
@@ -154,13 +207,19 @@ pub fn locate(configured: Option<&Path>) -> Result<PathBuf, String> {
 pub fn version(configured: Option<&Path>) -> Result<String, String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let program = locate(configured)?;
-    let output = Command::new(&program)
+    let mut child = Command::new(&program)
         .arg("--version")
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
+        .spawn()
         .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&output.stdout);
+    let output = read_limited(child.stdout.take().unwrap(), STDERR_BYTES);
+    if output.is_err() { let _ = child.kill(); }
+    let _ = child.wait();
+    let output = output.map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&output);
     text.lines()
         .next()
         .and_then(|line| line.split_whitespace().last())
@@ -174,12 +233,13 @@ pub fn start(request: Request, sink: impl Fn(Event) -> bool + Send + 'static) ->
     let shared = Arc::new(Shared::default());
     let run = Run(shared.clone());
     std::thread::spawn(move || {
-        let outcome = execute(&request, &shared, &sink);
+        let mut outcome = execute(&request, &shared, &sink);
         // Checked on every end, cancelled or failed too: the agent may have written before.
         if let Some(approved) = &request.approved {
-            let now = std::fs::read(&request.memory).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            if now != *approved {
-                sink(Event::Memory(now));
+            match read_memory_file(&request.memory) {
+                Ok(now) if now != *approved => { sink(Event::Memory(now)); }
+                Ok(_) => {}
+                Err(e) => outcome = Outcome::Failed(format!("メモリファイルを確認できません: {e}")),
             }
         }
         sink(Event::Finished(outcome));
@@ -268,20 +328,29 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
         });
     }
     // Only the end of stderr is kept: it explains a failure that has no JSON error event.
-    let stderr = child.stderr.take().map(|mut err| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = err.read_to_end(&mut bytes);
-            let text = String::from_utf8_lossy(&bytes).into_owned();
-            let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-            tail[tail.len().saturating_sub(6)..].join("\n")
-        })
+    let stderr = child.stderr.take().map(|err| {
+        std::thread::spawn(move || stderr_tail(err))
     });
     let mut parser = codex::Parser::default();
+    let mut read_error = None;
     if let Some(out) = child.stdout.take() {
-        'read: for line in BufReader::new(out).lines() {
-            let Ok(line) = line else { break };
-            for event in parser.parse(&line) {
+        let mut out = BufReader::new(out);
+        let mut bytes = Vec::new();
+        'read: loop {
+            let line = match json_line(&mut out, &mut bytes).and_then(|more| {
+                if !more { return Ok(None); }
+                std::str::from_utf8(&bytes).map(Some).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            }) {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(e) => {
+                    read_error = Some(format!("エージェントの出力を読めません: {e}"));
+                    // Kill the job to unblock both pipes; report an error, not cancellation.
+                    shared.stop();
+                    break;
+                }
+            };
+            for event in parser.parse(line) {
                 if !sink(event) {
                     shared.stop();
                     break 'read;
@@ -290,13 +359,18 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
         }
     }
     let status = child.wait();
-    let stderr = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
+    let stderr = stderr.and_then(|t| t.join().ok()).unwrap_or_else(|| Ok(String::new()));
+    if let Some(error) = read_error { return Outcome::Failed(error); }
     if shared.cancelled.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
     }
     if let Some(error) = parser.failure {
         return Outcome::Failed(error);
     }
+    let stderr = match stderr {
+        Ok(stderr) => stderr,
+        Err(e) => return Outcome::Failed(format!("エージェントの標準エラーを読めません: {e}")),
+    };
     match status {
         Ok(status) if status.success() => Outcome::Done,
         Ok(status) if stderr.is_empty() => Outcome::Failed(format!("終了コード {}", status.code().unwrap_or(-1))),
@@ -322,7 +396,11 @@ const MEMORY_TEMPLATE: &str = include_str!("../agent/memory.md");
 const MEMORY_LIMIT: usize = 32 * 1024;
 pub fn read_memory(file: &Path) -> std::io::Result<String> {
     ensure_memory(file)?;
-    Ok(String::from_utf8_lossy(&std::fs::read(file)?).into_owned())
+    read_memory_file(file)
+}
+fn read_memory_file(file: &Path) -> std::io::Result<String> {
+    let bytes = read_limited(std::fs::File::open(file)?, MEMORY_BYTES)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 fn cut_memory(text: String) -> String {
     match text.char_indices().nth(MEMORY_LIMIT) {
@@ -595,6 +673,83 @@ mod codex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stderr_is_drained_but_only_a_byte_and_line_tail_is_kept() {
+        let mut input = std::io::Cursor::new(vec![b'x'; STDERR_BYTES * 20]);
+        let tail = stderr_tail(&mut input).unwrap();
+        assert_eq!(input.position(), (STDERR_BYTES * 20) as u64);
+        assert_eq!(tail.len(), STDERR_BYTES);
+        let text = (0..20).map(|i| format!("line {i}\n")).collect::<String>();
+        assert_eq!(stderr_tail(text.as_bytes()).unwrap(), "line 14\nline 15\nline 16\nline 17\nline 18\nline 19");
+        // Start the byte tail inside a multibyte character, and include invalid UTF-8.
+        let mut bytes = "あ".repeat(STDERR_BYTES).into_bytes();
+        bytes.push(0xff);
+        let tail = stderr_tail(bytes.as_slice()).unwrap();
+        assert!(tail.ends_with('\u{fffd}'));
+        assert!(tail.len() <= STDERR_BYTES * 3);
+    }
+    #[test]
+    fn json_records_are_bounded_without_parsing_a_truncated_prefix() {
+        let mut bytes = Vec::new();
+        let mut input = BufReader::with_capacity(7, std::io::Cursor::new(b"{\"type\":\"turn.started\"}\r\n{}"));
+        assert!(json_line(&mut input, &mut bytes).unwrap());
+        assert!(!codex::Parser::default().parse(std::str::from_utf8(&bytes).unwrap()).is_empty());
+        assert!(json_line(&mut input, &mut bytes).unwrap());
+        assert_eq!(bytes, b"{}");
+        assert!(!json_line(&mut input, &mut bytes).unwrap());
+        let mut exact = BufReader::new(std::io::repeat(b'x').take(JSON_LINE_BYTES as u64));
+        assert!(json_line(&mut exact, &mut bytes).unwrap());
+        assert_eq!(bytes.len(), JSON_LINE_BYTES);
+        let mut huge = BufReader::new(std::io::repeat(b'x').take(JSON_LINE_BYTES as u64 + 1));
+        assert!(json_line(&mut huge, &mut bytes).is_err());
+        assert!(bytes.len() <= JSON_LINE_BYTES);
+        // A large but reasonable Unicode reply is still passed in full.
+        let message = "長い応答".repeat(100_000);
+        let record = serde_json::json!({"type":"item.completed", "item":{"type":"agent_message", "text":message}}).to_string();
+        let mut input = BufReader::new(record.as_bytes());
+        assert!(json_line(&mut input, &mut bytes).unwrap());
+        assert_eq!(codex::Parser::default().parse(std::str::from_utf8(&bytes).unwrap()), [Event::Log(Kind::Message, message)]);
+    }
+    #[test]
+    fn memory_is_limited_before_it_reaches_the_ui() {
+        let file = std::env::temp_dir().join(format!("enyfile-memory-limit-{}.md", std::process::id()));
+        {
+            let f = std::fs::File::create(&file).unwrap();
+            f.set_len(MEMORY_BYTES as u64 + 1).unwrap();
+        }
+        assert_eq!(read_memory(&file).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), MEMORY_BYTES as u64 + 1);
+        std::fs::write(&file, "- 日本語のメモ\n").unwrap();
+        assert_eq!(read_memory(&file).unwrap(), "- 日本語のメモ\n");
+        assert_eq!(read_limited(&b"abcd"[..], 4).unwrap(), b"abcd");
+        assert!(read_limited(&b"abcde"[..], 4).is_err());
+        std::fs::remove_file(file).unwrap();
+    }
+    #[test]
+    fn oversized_cli_record_stops_the_job_and_reports_failure() {
+        let root = std::env::temp_dir().join(format!("enyfile-cli-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let program = root.join("fake.cmd");
+        let powershell = crate::shell::system_dir().join(r"WindowsPowerShell\v1.0\powershell.exe");
+        std::fs::write(&program, format!(
+            "@echo off\r\nfindstr \"^\" >nul\r\n\"{}\" -NoProfile -Command \"[Console]::Out.Write(('x' * {})); Start-Sleep -Seconds 60\"\r\n",
+            powershell.display(), JSON_LINE_BYTES + 1,
+        )).unwrap();
+        let shared = Shared::default();
+        let request = Request {
+            program: Some(program),
+            cwd: root.clone(),
+            memory: root.join("memory.md"),
+            ..request(None, Access::Folder)
+        };
+        let started = std::time::Instant::now();
+        let outcome = execute(&request, &shared, &|_| true);
+        assert!(matches!(outcome, Outcome::Failed(ref message) if message.contains("16 MiB")), "{outcome:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "the sleeping CLI descendant was not stopped promptly");
+        // Closing the job and every pipe precedes fixture cleanup.
+        drop(shared);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn request(session: Option<&str>, access: Access) -> Request {
         Request {
             program: None,

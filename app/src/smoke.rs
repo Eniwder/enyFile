@@ -634,6 +634,30 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         let mut c = c.borrow_mut();
                         let snapshot = c.data(0);
                         let history = c.panes[0].back.len();
+                        // Inject completions in reverse order, independent of Shell timing.
+                        c.panes[0].navigation += 1;
+                        let old = c.panes[0].navigation;
+                        c.panes[0].navigation += 1;
+                        let latest = c.panes[0].navigation;
+                        let generation_before = c.panes[0].generation;
+                        c.handle(Reply::ShellFolder(0, old, Ok(Some(root.join("right")))));
+                        expect(c.panes[0].generation == generation_before, "older shell request cannot navigate")?;
+                        let other = c.data(1).dir.clone();
+                        c.navigate(1, other, Mode::New(None));
+                        c.navigate(0, snapshot.dir.clone(), Mode::Automatic);
+                        c.rearrange(0);
+                        expect(c.panes[0].navigation == latest, "refresh and sort preserve shell navigation intent")?;
+                        c.handle(Reply::ShellFolder(0, latest, Ok(Some(snapshot.dir.clone()))));
+                        expect(c.panes[0].navigation == latest + 1, "latest shell result survives refresh, sort and other pane activity")?;
+                        let accepted = c.panes[0].generation;
+                        c.handle(Reply::ShellFolder(0, old, Ok(Some(root.join("right")))));
+                        expect(c.panes[0].generation == accepted, "late shell success cannot overwrite accepted navigation")?;
+                        let superseded = c.panes[0].navigation;
+                        c.navigate(0, snapshot.dir.clone(), Mode::New(None));
+                        let newer = c.panes[0].generation;
+                        c.handle(Reply::ShellFolder(0, superseded, Err("stale shell error".into())));
+                        c.handle(Reply::ShellFolder(0, superseded, Ok(Some(root.join("right")))));
+                        expect(c.panes[0].generation == newer && !ui.get_message().contains("stale shell"), "later user navigation rejects stale shell success and failure")?;
                         // Simulate a request that never replied, then a late failure from it.
                         c.panes[0].generation += 1;
                         let generation = c.panes[0].generation;
@@ -649,6 +673,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         expect(c.panes[0].generation == retry && c.panes[0].pending.is_some(), "old timeout cannot cancel retry")?;
                     }
                     s.pass("listing timeout releases waiting state, keeps entries and history, ignores late replies and stale timeouts");
+                    s.pass("shell navigation ignores superseded results, preserving refresh, sort and other pane independence");
                     fkey(&ui, 0, slint::platform::Key::F2);
                     expect(ui.get_name_initial() == "memo.txt" && ui.get_name_stem() == 4, "F2 opens rename with the stem selected")?;
                     expect(!ui.invoke_name_validate("A.TXT".into()).is_empty(), "rename to an existing name rejected")?;

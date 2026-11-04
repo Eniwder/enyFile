@@ -14,6 +14,11 @@ pub struct Meta {
     pub size: u64,
     pub modified: SystemTime,
 }
+/// Only confirmed overwrites need an extra identity lookup, not every listed item.
+pub struct Overwrite {
+    meta: Meta,
+    id: Option<crate::pathid::Ident>,
+}
 fn meta(path: &Path) -> Option<Meta> {
     let m = std::fs::metadata(path).ok()?;
     Some(Meta {
@@ -67,7 +72,7 @@ pub struct Op {
     pub fresh: bool,
     /// The existing file as it was when the user chose to overwrite it; executing must not
     /// overwrite anything else (another app may have changed it while the dialog was open).
-    pub overwrites: Option<Meta>,
+    pub overwrites: Option<Overwrite>,
 }
 impl Op {
     pub fn target(&self) -> PathBuf {
@@ -149,9 +154,9 @@ impl Planner<'_> {
         if !self.names.contains_key(dir) {
             let set = std::fs::read_dir(dir)
                 .map_err(|e| format!("{}: {e}", dir.display()))?
-                .filter_map(|e| e.ok())
-                .map(|e| fold(&e.file_name().to_string_lossy()))
-                .collect();
+                .map(|entry| entry.map(|e| fold(&e.file_name().to_string_lossy())))
+                .collect::<Result<HashSet<_>, _>>()
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
             self.names.insert(dir.to_path_buf(), set);
         }
         Ok(self.names.get_mut(dir).unwrap())
@@ -213,7 +218,9 @@ impl Planner<'_> {
         let names = self.names(dir)?;
         let taken = names.clone();
         let auto = auto_name(&name, from.directory, &taken);
-        let target_id = if kind == Kind::Folder { crate::pathid::ident(&target) } else { None };
+        // Capture before asking: looking up after the answer would accept a swap
+        // made while the confirmation was open. The planner already cached this ID.
+        let target_id = if kind == Kind::Folder { crate::pathid::ident(&target) } else { self.ids.get(&target) };
         // "Replace, apply to all" reaching a folder that cannot be replaced: asked about.
         let rule = self.rules.get(&kind).filter(|rule| **rule != Answer::Replace || target_id.is_some());
         let answer = match rule {
@@ -243,7 +250,7 @@ impl Planner<'_> {
             Answer::Newer if from.modified <= to.modified => self.plan.skipped = true,
             Answer::Overwrite | Answer::Newer if kind == Kind::File => {
                 self.push(source, dir, None, false, top);
-                self.plan.ops.last_mut().unwrap().overwrites = Some(to);
+                self.plan.ops.last_mut().unwrap().overwrites = Some(Overwrite { meta: to, id: target_id });
             }
             Answer::Rename(new) => {
                 self.names(dir)?.insert(fold(&new));
@@ -252,8 +259,9 @@ impl Planner<'_> {
             Answer::Merge if kind == Kind::Folder => {
                 let mut children: Vec<PathBuf> = std::fs::read_dir(source)
                     .map_err(|e| format!("{}: {e}", source.display()))?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .collect();
+                    .map(|e| e.map(|e| e.path()))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| format!("{}: {e}", source.display()))?;
                 children.sort();
                 for child in children {
                     if let Err(c) = self.place(&child, &target, false)? {
@@ -316,8 +324,10 @@ impl Plan {
     /// no longer the one the user saw: executing would overwrite what nobody chose to.
     pub fn changed(&self) -> bool {
         self.ops.iter().any(|op| match &op.overwrites {
-            Some(seen) => meta(&op.target()).as_ref() != Some(seen),
-            None => op.fresh && op.target().exists(),
+            Some(seen) => meta(&op.target()).as_ref() != Some(&seen.meta)
+                || seen.id.is_some_and(|id| crate::pathid::ident(&op.target()) != Some(id)),
+            // Errors other than absence are not evidence that creating here is safe.
+            None => op.fresh && !matches!(std::fs::symlink_metadata(op.target()), Err(e) if e.kind() == std::io::ErrorKind::NotFound),
         })
     }
     /// Checked right before anything is renamed or written, with the disk as it is now
@@ -576,6 +586,40 @@ mod tests {
         let plan = plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| (Answer::Overwrite, false)).unwrap().unwrap();
         std::fs::remove_file(&existing).unwrap();
         assert!(plan.changed());
+    }
+    #[test]
+    fn overwrite_rejects_same_metadata_different_identity() {
+        let f = fixture("identity");
+        let existing = f.0.join("dst/a.txt");
+        let seen = meta(&existing).unwrap();
+        let planned = plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| {
+            // Keep the old object alive, so its ID cannot be reused.
+            std::fs::rename(&existing, f.0.join("dst/old.txt")).unwrap();
+            std::fs::write(&existing, b"other").unwrap();
+            std::fs::File::options().write(true).open(&existing).unwrap().set_modified(seen.modified).unwrap();
+            (Answer::Overwrite, false)
+        }).unwrap().unwrap();
+        assert_eq!(meta(&existing), Some(seen));
+        assert!(planned.changed());
+        assert!(planned.verify().is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"other");
+        // A filesystem without IDs retains the previous metadata-only behavior.
+        let mut no_id = planned;
+        no_id.ops[0].overwrites.as_mut().unwrap().id = None;
+        assert!(!no_id.changed());
+        assert!(no_id.verify().is_ok());
+    }
+    #[test]
+    fn merge_unreadable_source_fails_before_any_transfer() {
+        let f = fixture("merge-error");
+        let source = f.0.join("src/Folder");
+        let result = plan(std::slice::from_ref(&source), &f.0.join("dst"), true, &mut |_| {
+            std::fs::rename(&source, f.0.join("src/aside")).unwrap();
+            (Answer::Merge, false)
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(f.0.join("dst/Folder/inner.txt")).unwrap(), b"old");
+        assert!(f.0.join("src/aside/sub/deep.txt").exists());
     }
     /// Audit #10: a merged source folder that is a junction keeps its link after a move.
     #[test]
