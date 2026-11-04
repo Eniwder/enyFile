@@ -106,6 +106,22 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
                 effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
                 unsafe { target.DragOver(MODIFIERKEYS_FLAGS(9), point, &mut effect) }.map_err(|e| e.to_string())?;
                 if effect != DROPEFFECT_COPY { return Err("Ctrl during drag did not select copy".into()); }
+                // Inspect rendered pixels as well as hit testing: an overlay without
+                // explicit x/y is centered by Slint even when the hit test is correct.
+                let shot = ui.window().take_snapshot().map_err(|e| e.to_string())?;
+                let mut client = POINT { x: point.x, y: point.y };
+                if !unsafe { ScreenToClient(hwnd, &mut client) }.as_bool() { return Err("ScreenToClient failed".into()); }
+                let x = client.x as usize + (4.0 * scale).ceil() as usize;
+                let y = client.y as usize;
+                let accent = ui.global::<Theme>().get_accent();
+                let pixel = shot.as_slice().get(y * shot.width() as usize + x).ok_or("highlight outside snapshot")?;
+                let rgb: Vec<u8> = shot.as_slice().iter().flat_map(|p| [p.r, p.g, p.b]).collect();
+                let mut ppm = format!("P6\n{} {}\n255\n", shot.width(), shot.height()).into_bytes();
+                ppm.extend(rgb);
+                std::fs::write(root.join("dnd-highlight.ppm"), ppm).map_err(|e| e.to_string())?;
+                if [pixel.r, pixel.g, pixel.b] != [accent.red(), accent.green(), accent.blue()] {
+                    return Err("drop highlight is not anchored to the row's left edge".into());
+                }
             }
             unsafe { target.DragLeave() }.map_err(|e| e.to_string())?;
             if effect != expected { return Err(format!("drop effect {effect:?}, expected {expected:?}")); }

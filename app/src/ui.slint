@@ -726,6 +726,7 @@ component Pane inherits Rectangle {
                 Text { text: row.kind; color: item.fg; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
             }
             if root.drop-active && root.drop-row == index : Rectangle {
+                x: 0px; y: 0px;
                 width: max(0px, root.drop-name-end - 1px); height: parent.height;
                 border-width: 2px; border-color: Theme.accent;
             }
