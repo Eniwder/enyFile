@@ -626,6 +626,25 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     }
                     expect(root.join("left/memo.txt").is_file(), "file created")?;
                     expect(selected(&c, 0) == ["memo.txt"] && c.borrow().panes[0].model.special.get().is_none(), "created file selected with entry cursor")?;
+                    {
+                        let mut c = c.borrow_mut();
+                        let snapshot = c.data(0);
+                        let history = c.panes[0].back.len();
+                        // Simulate a request that never replied, then a late failure from it.
+                        c.panes[0].generation += 1;
+                        let generation = c.panes[0].generation;
+                        c.panes[0].pending = Some(Mode::Refresh);
+                        c.panes[0].stale = true;
+                        c.listing_timed_out(0, generation);
+                        expect(c.panes[0].pending.is_none() && !c.panes[0].stale && !ui.get_p0_busy(), "timeout clears pane waiting state")?;
+                        c.complete(0, generation, Err("late failure".into()));
+                        expect(Arc::ptr_eq(&snapshot, &c.data(0)) && c.panes[0].back.len() == history, "timeout retains listing and history; late reply ignored")?;
+                        c.navigate(0, snapshot.dir.clone(), Mode::Refresh);
+                        let retry = c.panes[0].generation;
+                        c.listing_timed_out(0, generation);
+                        expect(c.panes[0].generation == retry && c.panes[0].pending.is_some(), "old timeout cannot cancel retry")?;
+                    }
+                    s.pass("listing timeout releases waiting state, keeps entries and history, ignores late replies and stale timeouts");
                     fkey(&ui, 0, slint::platform::Key::F2);
                     expect(ui.get_name_initial() == "memo.txt" && ui.get_name_stem() == 4, "F2 opens rename with the stem selected")?;
                     expect(!ui.invoke_name_validate("A.TXT".into()).is_empty(), "rename to an existing name rejected")?;
@@ -637,6 +656,12 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     }
                     expect(!root.join("left/memo.txt").exists() && selected(&c, 0) == ["memo2.txt"], "renamed and selected")?;
                     s.pass("F7 new folder, Ctrl+N new file, F2 rename");
+                    {
+                        let mut c = c.borrow_mut();
+                        c.handle(Reply::Resumed);
+                        expect(c.panes.iter().take(c.visible()).all(|pane| pane.watch.is_none() && (pane.pending.is_some() || pane.stale)), "resume drops remote watch handles and reloads visible panes")?;
+                    }
+                    s.pass("resume notification rearms watches and refreshes visible panes");
                     let hidden = root.join("left/b.txt");
                     std::process::Command::new("attrib").arg("+h").arg(shell::shell_path(&hidden)).status().map_err(|e| e.to_string())?;
                     fkey(&ui, 0, slint::platform::Key::F5);

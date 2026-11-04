@@ -917,10 +917,13 @@ thread_local! {
 pub fn take_alt_tap() -> bool {
     ALT_TAP.with(|t| t.replace(false))
 }
-/// Watches the main window's messages: calls `on_click` when a mouse button goes down on the
-/// window frame (title bar, borders), which Slint never sees, and notes lone Alt taps.
-/// Installed once for the main window, so `on_click` is never freed.
-pub fn hook_window(hwnd: HWND, on_click: Box<dyn Fn()>) {
+pub enum WindowNotice {
+    FrameClick,
+    Resumed,
+}
+/// Watches frame clicks, user resume from sleep, and lone Alt taps.
+/// Installed once for the main window, so `on_notice` lives for the process lifetime.
+pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
     use windows::Win32::UI::WindowsAndMessaging::*;
     const VK_MENU: usize = 0x12;
     unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, data: usize) -> LRESULT {
@@ -939,13 +942,16 @@ pub fn hook_window(hwnd: HWND, on_click: Box<dyn Fn()>) {
             // Before the default handling: a title bar press enters the modal move loop there.
             WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN | WM_NCMBUTTONDOWN => {
                 ALT_ALONE.set(false);
-                unsafe { (*(data as *const Box<dyn Fn()>))() };
+                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::FrameClick) };
+            }
+            WM_POWERBROADCAST if wparam.0 == PBT_APMRESUMESUSPEND as usize => {
+                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::Resumed) };
             }
             _ => {}
         }
         unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
     }
-    let data = Box::into_raw(Box::new(on_click)) as usize;
+    let data = Box::into_raw(Box::new(on_notice)) as usize;
     let _ = unsafe { SetWindowSubclass(hwnd, Some(proc), 1, data) };
 }
 /// Dark title bar to match the dark theme (ignored on Windows versions without it).

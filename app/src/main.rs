@@ -10,6 +10,7 @@ mod listing;
 mod paste;
 mod pathid;
 mod props;
+mod recovery;
 mod rows;
 mod settings;
 mod shell;
@@ -83,6 +84,7 @@ enum Reply {
     Made(usize, PathBuf, Positions, Result<PathBuf, String>),
     Listing(usize, u64, Result<Arc<Snapshot>, String>),
     Changed(usize, PathBuf),
+    Resumed,
     Pasted(usize, PathBuf, Positions, Vec<PathBuf>, Result<PasteOutcome, String>),
     Ask(usize, paste::Question, AnswerTx),
     /// A delete's confirmation was answered yes (or there was none).
@@ -163,6 +165,7 @@ struct Mail {
 /// One listing/sort worker per pane. A newer request replaces an unstarted older one.
 struct Worker {
     mail: Arc<(Mutex<Mail>, Condvar)>,
+    thread: std::thread::JoinHandle<()>,
 }
 impl Worker {
     fn new(pane: usize) -> Self {
@@ -174,7 +177,7 @@ impl Worker {
             Condvar::new(),
         ));
         let worker = mail.clone();
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             // File type names come from the Shell, which needs COM on this thread.
             let _com = shell::Apartment::new();
             loop {
@@ -277,7 +280,15 @@ impl Worker {
                 }
             }
         });
-        Self { mail }
+        Self { mail, thread }
+    }
+    /// Best effort: some remote filesystem drivers cannot cancel a blocked request.
+    /// Never join this thread from the UI, even when cancellation is unsupported.
+    fn cancel(&self) {
+        use std::os::windows::io::AsRawHandle;
+        self.mail.0.lock().unwrap().pending = None;
+        let handle = windows::Win32::Foundation::HANDLE(self.thread.as_raw_handle());
+        let _ = unsafe { windows::Win32::System::IO::CancelSynchronousIo(handle) };
     }
     fn submit(&self, job: Job) {
         let (lock, cv) = &*self.mail;
@@ -301,6 +312,7 @@ struct Pane {
     stale: bool,
     watch: Option<shell::Watch>,
     busy: slint::Timer,
+    deadline: slint::Timer,
     back: Vec<Saved>,
     forward: Vec<Saved>,
     column: usize,
@@ -358,6 +370,7 @@ struct Comparing {
 const TYPING: Duration = Duration::from_millis(120);
 /// "読み込み中…" waits this long: quick reloads (watch, after a delete) would only flicker.
 const BUSY_DELAY: Duration = Duration::from_millis(300);
+const LISTING_TIMEOUT: Duration = Duration::from_secs(20);
 /// The find bar is open for `pane`.
 struct Finding {
     pane: usize,
@@ -524,6 +537,29 @@ impl Controller {
                 _ => ui.set_p3_path(path),
             }
         }
+    }
+    fn arm_listing_timeout(&self, p: usize) {
+        let generation = self.panes[p].generation;
+        self.panes[p].deadline.start(slint::TimerMode::SingleShot, LISTING_TIMEOUT, move || {
+            if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+                c.borrow_mut().listing_timed_out(p, generation);
+            }
+        });
+    }
+    fn listing_timed_out(&mut self, p: usize, generation: u64) {
+        let pane = &mut self.panes[p];
+        if pane.generation != generation || pane.pending.is_none() {
+            return;
+        }
+        // Invalidate late replies; keep the last successful listing and its history.
+        pane.generation += 1;
+        pane.pending = None;
+        pane.stale = false;
+        pane.deadline.stop();
+        pane.worker.cancel();
+        self.busy(p, false);
+        recovery::record(format!("listing timeout: pane={}, generation={generation}, last_folder={}", p + 1, shown(&self.data(p).dir)));
+        self.fail("フォルダの応答がありません。接続を確認して F5 で再試行するか、別のフォルダを開いてください");
     }
     /// Panes shown by the current layout.
     fn visible(&self) -> usize {
@@ -939,6 +975,7 @@ impl Controller {
             filter,
         });
         self.busy(p, true);
+        self.arm_listing_timeout(p);
     }
     fn typed_path(&mut self, p: usize, text: String) {
         self.active(p);
@@ -1033,6 +1070,7 @@ impl Controller {
             filter: pane.filter.as_ref().map(|(_, f)| f.clone()),
         });
         self.busy(p, true);
+        self.arm_listing_timeout(p);
     }
     /// Sets or clears (empty text) the filter of pane `p` and says so.
     fn set_filter(&mut self, p: usize, text: &str) {
@@ -1759,8 +1797,21 @@ impl Controller {
             }
         }
     }
+    fn resumed(&mut self) {
+        recovery::record("system resumed with user present; rearming folder watches and refreshing visible panes".into());
+        let visible = self.visible();
+        for pane in self.panes.iter_mut().take(visible) {
+            // A remote watch handle can outlive the connection it watched.
+            pane.watch = None;
+        }
+        self.refresh_shown(None);
+        if let Some(ui) = self.ui.upgrade() {
+            ui.window().request_redraw();
+        }
+    }
     fn handle(&mut self, reply: Reply) {
         match reply {
+            Reply::Resumed => self.resumed(),
             Reply::Listing(p, generation, result) => self.complete(p, generation, result),
             Reply::Finder(p, session, event) => {
                 let Some(current) = self.panes[p].finder.as_mut().filter(|s| s.id == session) else { return };
@@ -1915,6 +1966,7 @@ impl Controller {
         if generation != self.panes[p].generation {
             return;
         }
+        self.panes[p].deadline.stop();
         let mode = self.panes[p].pending.take().unwrap_or(Mode::Refresh);
         let focus_list = matches!(&mode, Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_));
         // Opened with no item to show: the cursor starts on "..".
@@ -2350,7 +2402,8 @@ impl Controller {
             NameKind::Rename(path) => {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 taken.remove(&name.to_lowercase());
-                ("名前の変更", name, path.is_dir())
+                let folder = data.rows.iter().find(|entry| entry.path.as_ref() == path).is_some_and(|entry| entry.directory);
+                ("名前の変更", name, folder)
             }
             NameKind::NewFile => ("新規ファイル", unique("新しいテキスト ドキュメント.txt", false, &taken), false),
             NameKind::NewFolder => ("新規フォルダ", unique("新しいフォルダ", true, &taken), true),
@@ -3226,6 +3279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stale: false,
         watch: None,
         busy: slint::Timer::default(),
+        deadline: slint::Timer::default(),
         back: Vec::new(),
         forward: Vec::new(),
         column: 0,
@@ -3650,9 +3704,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 shell::dark_title_bar(h);
                 shell::window_icon(h);
                 let weak = weak.clone();
-                shell::hook_window(h, Box::new(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.invoke_dismiss_menu();
+                shell::hook_window(h, Box::new(move |notice| {
+                    match notice {
+                        shell::WindowNotice::FrameClick => {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.invoke_dismiss_menu();
+                            }
+                        }
+                        shell::WindowNotice::Resumed => { post(Reply::Resumed); }
                     }
                 }));
                 if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
@@ -3695,6 +3754,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The right pane starts active.
     ui.invoke_focus_pane(1);
+    let _recovery = recovery::start(config_file(own_root).with_file_name("recovery.log"));
+    let heartbeat = slint::Timer::default();
+    {
+        let c = Rc::downgrade(&controller);
+        heartbeat.start(slint::TimerMode::Repeated, Duration::from_secs(1), move || {
+            if let Some(c) = c.upgrade() {
+                let Ok(c) = c.try_borrow() else { return };
+                let panes: Vec<_> = c.panes.iter().enumerate().map(|(p, pane)| {
+                    format!("pane={} pending={} folder={}", p + 1, pane.pending.is_some(), shown(&pane.model.data.borrow().dir))
+                }).collect();
+                recovery::heartbeat(format!("active={} operations={} confirming={}; {}", c.active + 1, c.operations, c.confirming, panes.join("; ")));
+            }
+        });
+    }
     let _smoke = smoke.map(|i| smoke::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
     let _demo = demo.map(|i| demo::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
     slint::run_event_loop()?;
