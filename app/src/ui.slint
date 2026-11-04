@@ -1030,6 +1030,7 @@ component SettingsDialog inherits Rectangle {
     in property <string> app-version;
     in-out property <bool> search-links;
     in-out property <bool> pane-drag-drop;
+    in-out property <bool> intra-pane-move;
     // エージェント: the CLI (0 Codex, 1 none), program (empty = found automatically, shown dim),
     // write access 0 / 1 / 2, the folders access 1 adds, and the memory file.
     in-out property <int> agent-cli;
@@ -1232,7 +1233,8 @@ component SettingsDialog inherits Rectangle {
                                 spacing: 12px; alignment: start;
                                 Text { text: "ドラッグ＆ドロップ"; font-weight: 700; color: Theme.text; }
                                 CheckBox { text: "enyFile内のペイン間ドラッグ＆ドロップを有効にする"; checked <=> root.pane-drag-drop; }
-                                Text { text: "外部アプリからのドロップは常に有効です。同じペインへのドロップは操作しません。"; color: Theme.dim; wrap: word-wrap; }
+                                CheckBox { text: "同一ペイン内のフォルダへのドラッグ移動を有効にする"; checked <=> root.intra-pane-move; }
+                                Text { text: "外部アプリからのドロップは常に有効です。同一ペイン内はフォルダの名前部分への移動だけを許可し、コピーはしません。"; color: Theme.dim; wrap: word-wrap; }
                                 Text { text: "フォルダ以下の検索 (Ctrl+Alt+Shift+F)"; font-weight: 700; color: Theme.text; }
                                 CheckBox { text: "ジャンクションとシンボリックリンクの先も検索する"; checked <=> root.search-links; }
                                 Text {
@@ -1507,6 +1509,7 @@ export component App inherits Window {
     in property <string> app-version;
     in-out property <bool> settings-search-links;
     in-out property <bool> settings-pane-drag-drop;
+    in-out property <bool> settings-intra-pane-move;
     in-out property <int> drop-pane: -1;
     in-out property <int> drop-row: -1;
     in-out property <int> settings-agent-cli;
@@ -2166,6 +2169,7 @@ export component App inherits Window {
         window-opacity <=> root.settings-opacity;
         search-links <=> root.settings-search-links;
         pane-drag-drop <=> root.settings-pane-drag-drop;
+        intra-pane-move <=> root.settings-intra-pane-move;
         agent-cli <=> root.settings-agent-cli;
         agent-path <=> root.settings-agent-path;
         agent-detected: root.settings-agent-detected;

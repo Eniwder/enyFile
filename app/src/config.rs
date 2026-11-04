@@ -73,6 +73,8 @@ pub struct Config {
     pub search_links: bool,
     /// Allow drags between this window's panes; external drops are always enabled.
     pub pane_drag_drop: bool,
+    /// Same-pane folder drops may move only; never copy in place.
+    pub intra_pane_move: bool,
     /// Shift+letter: the folder last shown on each drive ("D:"), saved on exit.
     pub drive_dirs: std::collections::BTreeMap<String, PathBuf>,
     /// Where the window was when it was last closed; None = Slint's default placement.
@@ -209,6 +211,7 @@ impl Config {
             .unwrap_or(theme::DEFAULT_FONT)
             .to_string();
         let font_size = raw["font"]["size"].as_f64().map_or(theme::DEFAULT_SIZE, |s| s as f32).clamp(8.0, 32.0);
+        let intra_pane_move = raw["intra_pane_move"].as_bool().unwrap_or(false);
         let pane_drag_drop = raw["pane_drag_drop"].as_bool().unwrap_or(false);
         let search_links = raw["search_links"].as_bool().unwrap_or(false);
         let drive_dirs = raw["drive_dirs"]
@@ -258,6 +261,7 @@ impl Config {
             font_size,
             search_links,
             pane_drag_drop,
+            intra_pane_move,
             drive_dirs,
             window,
             agent_enabled,
@@ -333,6 +337,7 @@ impl Config {
             );
         }
         self.raw["font"] = json!({ "family": self.font_family, "size": self.font_size });
+        self.raw["intra_pane_move"] = json!(self.intra_pane_move);
         self.raw["pane_drag_drop"] = json!(self.pane_drag_drop);
         self.raw["search_links"] = json!(self.search_links);
         self.raw["drive_dirs"] = Value::Object(self.drive_dirs.iter().map(|(k, v)| (k.clone(), json!(v.to_string_lossy()))).collect());
@@ -413,6 +418,8 @@ mod tests {
         assert!(config.places[0].is_none() && config.place(0).is_some(), "desktop falls back to the known folder");
         assert_eq!(config.bookmarks, [Bookmark { name: "作業".into(), path: r"D:\Work".into() }]);
         assert_eq!(config.split, 0.5);
+        assert!(!config.intra_pane_move);
+        config.intra_pane_move = true;
         assert!(!config.pane_drag_drop);
         config.pane_drag_drop = true;
         config.bookmarks.push(Bookmark { name: "x".into(), path: r"C:\x".into() });
@@ -422,6 +429,7 @@ mod tests {
         let again = Config::load(file.clone());
         assert_eq!(again.bookmarks.len(), 2);
         assert!(again.pane_drag_drop);
+        assert!(again.intra_pane_move);
         assert_eq!(again.raw["theme"], "dark");
         assert!(again.raw["places"].get("desktop").is_none(), "defaults are not written");
         assert_eq!(again.place(2), Some(PathBuf::from(r"E:\写真")));

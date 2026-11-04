@@ -230,12 +230,14 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
         let probe = Target { hwnd, ui: ui.as_weak(), state: RefCell::new(State::default()) };
         let mut checked = HashSet::new();
         let mut covered = [false; 4];
+        let mut folder_name = None;
+        let mut folder_metadata = None;
         let size = ui.window().size();
         'rows: for y in (111..(size.height as f32 / scale) as i32 - 26).step_by(8) {
             for x in (2..(size.width as f32 / scale) as i32).step_by(16) {
                 let hit = ui.invoke_hit_drop(x as f32, y as f32);
                 if hit.pane < 0 || !checked.insert((hit.pane, hit.row, hit.in_name)) { continue; }
-                let expected = {
+                let (expected, kind) = {
                     let c = c.borrow();
                     let p = hit.pane as usize;
                     let data = c.data(p);
@@ -246,10 +248,14 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
                         _ => continue,
                     };
                     covered[kind + usize::from(!hit.in_name)] = true;
-                    if hit.in_name { folder } else { data.dir.clone() }
+                    (if hit.in_name { folder } else { data.dir.clone() }, kind)
                 };
                 let mut point = POINT { x: (x as f32 * scale) as i32, y: (y as f32 * scale) as i32 };
                 if !unsafe { ClientToScreen(hwnd, &mut point) }.as_bool() { return Err("ClientToScreen failed".into()); }
+                if hit.pane == 1 && kind == 2 {
+                    let position = POINTL { x: point.x, y: point.y };
+                    if hit.in_name { folder_name = Some(position); } else { folder_metadata = Some(position); }
+                }
                 let (destination, _, row) = probe.destination(&POINTL { x: point.x, y: point.y }).ok_or("no drop destination")?;
                 if destination != expected || row != if hit.in_name { hit.row } else { -1 } {
                     return Err("name and metadata drop destinations or highlights disagree".into());
@@ -308,6 +314,37 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
             enter(right, DROPEFFECT_COPY)?;
             enter(left, DROPEFFECT_NONE)?;
         }
+        // Same-pane moves are independently enabled and never become copies, even
+        // when Ctrl is pressed or the source only offers COPY.
+        c.borrow_mut().config.intra_pane_move = true;
+        c.borrow_mut().config.pane_drag_drop = false;
+        {
+            let _origin = Origin::new(1);
+            let name = folder_name.ok_or("no ordinary folder name target")?;
+            let metadata = folder_metadata.ok_or("no ordinary folder metadata target")?;
+            let both = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
+            for (position, keys, allowed, expected) in [
+                (name, 1, both, DROPEFFECT_MOVE),
+                (name, 5, both, DROPEFFECT_MOVE),
+                (name, 9, both, DROPEFFECT_NONE),
+                (name, 13, both, DROPEFFECT_NONE),
+                (name, 33, both, DROPEFFECT_NONE),
+                (name, 1, DROPEFFECT_COPY, DROPEFFECT_NONE),
+                (metadata, 1, both, DROPEFFECT_NONE),
+            ] {
+                let mut effect = allowed;
+                unsafe { target.DragEnter(&data, MODIFIERKEYS_FLAGS(keys), position, &mut effect) }.map_err(|e| e.to_string())?;
+                if effect != expected { return Err(format!("same-pane effect: {effect:?}, expected {expected:?}")); }
+                if expected == DROPEFFECT_MOVE && ui.get_drop_row() < 0 { return Err("same-pane folder move has no highlight".into()); }
+                unsafe { target.DragLeave() }.map_err(|e| e.to_string())?;
+            }
+            c.borrow_mut().config.intra_pane_move = false;
+            let mut effect = both;
+            unsafe { target.DragEnter(&data, MODIFIERKEYS_FLAGS(1), name, &mut effect) }.map_err(|e| e.to_string())?;
+            unsafe { target.DragLeave() }.map_err(|e| e.to_string())?;
+            if effect != DROPEFFECT_NONE { return Err("disabled same-pane option accepted a move".into()); }
+        }
+        c.borrow_mut().config.pane_drag_drop = true;
         // The actual HWND message path used by the short-lived wheel hook. No system
         // input is injected and no user's pointer or unrelated application is touched.
         let saved = {
@@ -349,17 +386,56 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
             c.active(saved.2);
         }
         if !file.exists() { return Err("DragLeave modified the source".into()); }
+        // Exercise Drop itself with dedicated temporary file/folder sources, proving
+        // the MOVE-only negotiation does not leave duplicates behind.
+        c.borrow_mut().config.intra_pane_move = true;
+        {
+            let _origin = Origin::new(1);
+            let point = folder_name.ok_or("no folder move target")?;
+            let (destination, _, _) = probe.destination(&point).ok_or("no same-pane move destination")?;
+            if !std::fs::canonicalize(&destination).is_ok_and(|dir| dir.starts_with(root)) {
+                return Err("move test destination escaped its temporary fixture".into());
+            }
+            let moved_file = source.join("same-pane-file.txt");
+            let moved_folder = source.join("same-pane-folder");
+            std::fs::write(&moved_file, b"move only").map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(&moved_folder).map_err(|e| e.to_string())?;
+            std::fs::write(moved_folder.join("child.txt"), b"child").map_err(|e| e.to_string())?;
+            let move_data: IDataObject = unsafe { shell::item_array(&[moved_file.clone(), moved_folder.clone()])?.BindToHandler(None, &BHID_DataObject) }.map_err(|e| e.to_string())?;
+            let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
+            unsafe {
+                target.DragEnter(&move_data, MODIFIERKEYS_FLAGS(1), point, &mut effect).map_err(|e| e.to_string())?;
+                target.Drop(&move_data, MODIFIERKEYS_FLAGS(0), point, &mut effect).map_err(|e| e.to_string())?;
+            }
+            let start = Instant::now();
+            while (moved_file.exists() || moved_folder.exists()) && start.elapsed() < Duration::from_secs(5) {
+                unsafe {
+                    let mut msg = MSG::default();
+                    while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() { let _ = TranslateMessage(&msg); DispatchMessageW(&msg); }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if moved_file.exists() || moved_folder.exists()
+                || std::fs::read(destination.join("same-pane-file.txt")).ok().as_deref() != Some(b"move only")
+                || std::fs::read(destination.join(r"same-pane-folder\child.txt")).ok().as_deref() != Some(b"child") {
+                return Err("same-pane Drop did not move the entire file/folder batch".into());
+            }
+        }
         Ok(())
     };
     let original = c.borrow().config.pane_drag_drop;
+    let original_within = c.borrow().config.intra_pane_move;
     let result = check();
     c.borrow_mut().config.pane_drag_drop = original;
+    c.borrow_mut().config.intra_pane_move = original_within;
     result
 }
 
 #[derive(Default)]
 struct State {
     wheel: Option<WheelHook>,
+    move_only: bool,
+    buttons: u32,
     data: Option<IDataObject>,
     paths: Vec<PathBuf>,
     destination: Option<PathBuf>,
@@ -427,7 +503,8 @@ impl Target {
             let controller = cell.borrow().clone()?;
             let c = controller.try_borrow().ok()?;
             if p >= c.panes.len() || c.operations != 0 { return None; }
-            if !accepts_origin(ORIGIN.get(), c.config.pane_drag_drop, p) { return None; }
+            let same_pane = ORIGIN.get() == Some(p);
+            if !same_pane && !accepts_origin(ORIGIN.get(), c.config.pane_drag_drop, p) { return None; }
             let pane = &c.panes[p];
             // Search and comparison rows can name other folders; reject their entire pane.
             if pane.found.is_some() || pane.model.compare.borrow().is_some() { return None; }
@@ -441,6 +518,7 @@ impl Target {
                 Some(Slot::Drive(_)) | Some(Slot::Gap) => return None,
                 _ => { target_row = -1; data.dir.clone() },
             };
+            if same_pane && (!c.config.intra_pane_move || target_row < 0) { return None; }
             Some((dir, hit.pane, target_row))
         })
     }
@@ -450,14 +528,22 @@ impl Target {
         let allowed = unsafe { *effect };
         unsafe { *effect = DROPEFFECT_NONE; }
         let Some((dir, pane, row)) = self.destination(pt) else { self.leave(); return Ok(()); };
-        let (paths, data, previous, target) = {
+        let same_pane = ORIGIN.get() == Some(pane as usize);
+        // Respect explicit copy/link intent by refusing it, never silently moving.
+        if same_pane && keys.0 & (8 | 32) != 0 { self.leave(); return Ok(()); }
+        let keys = if same_pane { MODIFIERKEYS_FLAGS(keys.0 | 4) } else { keys };
+        let (paths, data, previous, target, buttons) = {
             let state = self.state.borrow();
-            (state.paths.clone(), state.data.clone(), state.destination.clone(), state.target.clone())
+            (state.paths.clone(), state.data.clone(), state.destination.clone(), state.target.clone(), state.buttons)
         };
+        // Revalidate hover using the initiating button even after release. The Shell
+        // may reject a DragOver with no buttons; Drop itself receives the real state.
+        let keys = if final_check { MODIFIERKEYS_FLAGS(keys.0 | buttons) } else { keys };
         if (final_check || previous.as_ref() != Some(&dir)) && !valid_destination(&paths, &dir) { self.leave(); return Ok(()); }
         // This feature supports copy and move only. Explicit link modifiers must not
         // silently fall back to a destructive move.
-        let mut chosen = DROPEFFECT(allowed.0 & (DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0));
+        let supported = if same_pane { DROPEFFECT_MOVE.0 } else { DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0 };
+        let mut chosen = DROPEFFECT(allowed.0 & supported);
         let target = if previous.as_ref() == Some(&dir) { target } else {
             self.leave();
             let Some(data) = data else { return Ok(()); };
@@ -471,6 +557,7 @@ impl Target {
             state.target = Some(target.clone());
             Some(target)
         };
+        self.state.borrow_mut().move_only = same_pane;
         if let Some(target) = target {
             unsafe { target.DragOver(keys, *pt, &mut chosen)?; }
             unsafe { *effect = chosen; }
@@ -580,7 +667,7 @@ impl IDropTarget_Impl for Target_Impl {
         let data = data.as_ref().cloned();
         let paths = data.as_ref().and_then(shell::hdrop_paths).unwrap_or_default();
         let wheel = WheelHook::new(self.hwnd).ok();
-        *self.state.borrow_mut() = State { data, paths, wheel, ..Default::default() };
+        *self.state.borrow_mut() = State { data, paths, wheel, buttons: keys.0 & (1 | 2 | 16), ..Default::default() };
         // Unsupported virtual objects fail closed; never promise an operation we cannot validate.
         self.over(keys, pt, effect, false)
     }
@@ -601,7 +688,11 @@ impl IDropTarget_Impl for Target_Impl {
             *self.state.borrow_mut() = State::default();
             return Err(error);
         }
-        let target = self.state.borrow_mut().target.take();
+        let (target, move_only) = {
+            let mut state = self.state.borrow_mut();
+            (state.target.take(), state.move_only)
+        };
+        let keys = if move_only { MODIFIERKEYS_FLAGS(keys.0 | 4) } else { keys };
         self.highlight(-1, -1);
         let result = if unsafe { *effect } != DROPEFFECT_NONE {
             if let Some(target) = target { unsafe { target.Drop(data.as_ref(), keys, *pt, effect) } } else { Ok(()) }
