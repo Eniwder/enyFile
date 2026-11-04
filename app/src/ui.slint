@@ -46,7 +46,7 @@ export global Theme {
 // `diff` 0 same, 1 only here and new ("+"), 2 only here and old ("-"), 3 differs in the
 // cells flagged by size-diff / time-diff / attr-diff.
 // `spoof`: the name holds characters that reorder or hide text (shown as marks, in red).
-export struct DropHit { pane: int, row: int }
+export struct DropHit { pane: int, row: int, in-name: bool }
 export struct Row { compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, spoof: bool, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
 // Menu bar item: `checkable` shows a check column; a separator ignores the rest.
 export struct MenuItem { text: string, command: int, checkable: bool, checked: bool, separator: bool }
@@ -490,6 +490,8 @@ component Pane inherits Rectangle {
     in property <bool> busy;
     in property <bool> drop-active;
     in property <int> drop-row: -1;
+    // Actual name-column edge, shared by ordinary listing rows. Pane-relative.
+    out property <length> drop-name-end;
     in property <length> row-h: 23px;
     // 3-pane layout: name (with extension), size and time only.
     in property <bool> compact;
@@ -631,8 +633,6 @@ component Pane inherits Rectangle {
         for row[index] in root.rows : item := Rectangle {
             x: 0; y: index * root.row-h; width: parent.width;
             height: root.row-h;
-            border-width: root.drop-active && root.drop-row == index ? 2px : 0px;
-            border-color: Theme.accent;
             property <bool> lit: row.current && root.active;
             property <color> fg: item.lit ? Theme.cursor-text : row.selected ? Theme.selected-text : row.hidden ? Theme.hidden-text : Theme.text;
             // Name and extension: extension color, else attribute / folder colors.
@@ -666,6 +666,8 @@ component Pane inherits Rectangle {
                 // Search results: the folder below the search root, dimmed, before the name.
                 // It gives way first when the name needs the room.
                 name-area := HorizontalLayout {
+                    changed width => { root.drop-name-end = self.absolute-position.x - root.absolute-position.x + self.width; }
+                    changed x => { root.drop-name-end = self.absolute-position.x - root.absolute-position.x + self.width; }
                     horizontal-stretch: 1; min-width: 40px; spacing: 0px;
                     // The cursor row with its name cut short: after a second the whole name
                     // shows over the list (App draws it, so it may run past the pane).
@@ -722,6 +724,10 @@ component Pane inherits Rectangle {
                     }
                 }
                 Text { text: row.kind; color: item.fg; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+            }
+            if root.drop-active && root.drop-row == index : Rectangle {
+                width: max(0px, root.drop-name-end - 1px); height: parent.height;
+                border-width: 2px; border-color: Theme.accent;
             }
             TouchArea {
                 // Dragging out starts once per press, after the pointer moves a few pixels.
@@ -1794,11 +1800,11 @@ export component App inherits Window {
         page-resized(n) => { root.page-resized(3, n); } copy-path => { root.copy-path(3); } page-step(f) => { root.page-step(3, f); }
     }
     public function hit-drop(x: length, y: length) -> DropHit {
-        if x >= p0.x + 1px && x < p0.x + p0.width - 1px && y >= p0.y + 50px && y < p0.y + p0.height - 1px { return { pane: 0, row: floor((y - p0.y - 50px) / root.row-h) }; }
-        if x >= p1.x + 1px && x < p1.x + p1.width - 1px && y >= p1.y + 50px && y < p1.y + p1.height - 1px { return { pane: 1, row: floor((y - p1.y - 50px) / root.row-h) }; }
-        if root.pane-count >= 3 && x >= p2.x + 1px && x < p2.x + p2.width - 1px && y >= p2.y + 50px && y < p2.y + p2.height - 1px { return { pane: 2, row: floor((y - p2.y - 50px) / root.row-h) }; }
-        if root.quad && x >= p3.x + 1px && x < p3.x + p3.width - 1px && y >= p3.y + 50px && y < p3.y + p3.height - 1px { return { pane: 3, row: floor((y - p3.y - 50px) / root.row-h) }; }
-        return { pane: -1, row: -1 };
+        if x >= p0.x + 1px && x < p0.x + p0.width - 1px && y >= p0.y + 50px && y < p0.y + p0.height - 1px { return { pane: 0, row: floor((y - p0.y - 50px) / root.row-h), in-name: x - p0.x < p0.drop-name-end }; }
+        if x >= p1.x + 1px && x < p1.x + p1.width - 1px && y >= p1.y + 50px && y < p1.y + p1.height - 1px { return { pane: 1, row: floor((y - p1.y - 50px) / root.row-h), in-name: x - p1.x < p1.drop-name-end }; }
+        if root.pane-count >= 3 && x >= p2.x + 1px && x < p2.x + p2.width - 1px && y >= p2.y + 50px && y < p2.y + p2.height - 1px { return { pane: 2, row: floor((y - p2.y - 50px) / root.row-h), in-name: x - p2.x < p2.drop-name-end }; }
+        if root.quad && x >= p3.x + 1px && x < p3.x + p3.width - 1px && y >= p3.y + 50px && y < p3.y + p3.height - 1px { return { pane: 3, row: floor((y - p3.y - 50px) / root.row-h), in-name: x - p3.x < p3.drop-name-end }; }
+        return { pane: -1, row: -1, in-name: false };
     }
     // 2 panes.
     Splitter {

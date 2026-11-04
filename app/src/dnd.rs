@@ -62,6 +62,39 @@ pub(super) fn smoke_check(ui: &App, c: &Rc<RefCell<Controller>>, root: &Path) ->
         };
         let left = point_for(0)?;
         let right = point_for(1)?;
+        // Check real row geometry: names enter folders; metadata targets the pane.
+        // Include both ordinary folders and the parent row, without transferring files.
+        let probe = Target { hwnd, ui: ui.as_weak(), state: RefCell::new(State::default()) };
+        let mut checked = HashSet::new();
+        let mut covered = [false; 4];
+        let size = ui.window().size();
+        'rows: for y in (111..(size.height as f32 / scale) as i32 - 26).step_by(8) {
+            for x in (2..(size.width as f32 / scale) as i32).step_by(16) {
+                let hit = ui.invoke_hit_drop(x as f32, y as f32);
+                if hit.pane < 0 || !checked.insert((hit.pane, hit.row, hit.in_name)) { continue; }
+                let expected = {
+                    let c = c.borrow();
+                    let p = hit.pane as usize;
+                    let data = c.data(p);
+                    let slot = c.panes[p].model.slot(hit.row as usize + c.panes[p].model.page_start.get());
+                    let (folder, kind) = match slot {
+                        Some(Slot::Parent) => (data.dir.parent().unwrap().to_path_buf(), 0),
+                        Some(Slot::Entry(i)) if data.rows[i].directory => ((*data.rows[i].path).clone(), 2),
+                        _ => continue,
+                    };
+                    covered[kind + usize::from(!hit.in_name)] = true;
+                    if hit.in_name { folder } else { data.dir.clone() }
+                };
+                let mut point = POINT { x: (x as f32 * scale) as i32, y: (y as f32 * scale) as i32 };
+                if !unsafe { ClientToScreen(hwnd, &mut point) }.as_bool() { return Err("ClientToScreen failed".into()); }
+                let (destination, _, row) = probe.destination(&POINTL { x: point.x, y: point.y }).ok_or("no drop destination")?;
+                if destination != expected || row != if hit.in_name { hit.row } else { -1 } {
+                    return Err("name and metadata drop destinations or highlights disagree".into());
+                }
+                if covered.iter().all(|v| *v) { break 'rows; }
+            }
+        }
+        if !covered.iter().all(|v| *v) { return Err(format!("folder drop geometry coverage incomplete: {covered:?}")); }
         let enter = |point: POINTL, expected: DROPEFFECT| -> std::result::Result<(), String> {
             let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
             unsafe { target.DragEnter(&data, MODIFIERKEYS_FLAGS(9), point, &mut effect) }.map_err(|e| e.to_string())?;
@@ -176,8 +209,8 @@ impl Target {
             let row = hit.row as usize + pane.model.page_start.get();
             let mut target_row = hit.row;
             let dir = match pane.model.slot(row) {
-                Some(Slot::Parent) => data.dir.parent()?.to_path_buf(),
-                Some(Slot::Entry(i)) if data.rows[i].directory => (*data.rows[i].path).clone(),
+                Some(Slot::Parent) if hit.in_name => data.dir.parent()?.to_path_buf(),
+                Some(Slot::Entry(i)) if hit.in_name && data.rows[i].directory => (*data.rows[i].path).clone(),
                 Some(Slot::Drive(_)) | Some(Slot::Gap) => return None,
                 _ => { target_row = -1; data.dir.clone() },
             };
