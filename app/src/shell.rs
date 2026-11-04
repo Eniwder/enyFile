@@ -69,6 +69,56 @@ pub fn shell_path(path: &Path) -> PathBuf {
     }
     PathBuf::from(OsString::from_wide(&wide[4..]))
 }
+/// Extract a WSL distribution without opening the UNC path (which could start it).
+pub fn wsl_distribution(path: &Path) -> Option<String> {
+    let text = shell_path(path).to_string_lossy().replace('/', "\\");
+    let mut parts = text.strip_prefix(r"\\")?.split('\\');
+    let server = parts.next()?;
+    if !server.eq_ignore_ascii_case("wsl$") && !server.eq_ignore_ascii_case("wsl.localhost") {
+        return None;
+    }
+    parts.next().filter(|name| !name.is_empty()).map(str::to_owned)
+}
+fn running_wsl_names(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.contains(&0) {
+        if bytes.len() % 2 != 0 { return Err("WSL状態の文字コードが不正です".into()); }
+        let wide: Vec<_> = bytes.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        String::from_utf16(&wide).map_err(|e| e.to_string())?
+    } else {
+        String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?
+    };
+    Ok(text.trim_start_matches('\u{feff}').lines().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect())
+}
+/// Worker threads only. Listing running distributions does not access their filesystems.
+/// Unknown state fails closed: automatic updates must not start a stopped distribution.
+pub fn wsl_running(path: &Path) -> Result<bool, String> {
+    use std::{io::Read, os::windows::process::CommandExt, process::{Command, Stdio}};
+    let Some(distribution) = wsl_distribution(path) else { return Ok(true) };
+    let mut child = Command::new(system_dir().join("wsl.exe"))
+        .args(["--list", "--running", "--quiet"])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(match result { Err(e) => e.to_string(), _ => "WSL状態の確認がタイムアウトしました".into() });
+            }
+        }
+    };
+    let bytes = reader.join().map_err(|_| "WSL状態の読み取りに失敗しました".to_string())?.map_err(|e| e.to_string())?;
+    if !status?.success() { return Err("WSL状態を確認できませんでした".into()); }
+    Ok(running_wsl_names(&bytes)?.iter().any(|name| name.eq_ignore_ascii_case(&distribution)))
+}
 /// [`shell_path`] for paths handed to the Shell or Win32. Refused when dropping `\\?\` makes
 /// Win32 normalization point elsewhere (`victim.` becomes `victim`, `nul.txt` a device):
 /// failing is better than touching a different file.
@@ -1016,19 +1066,36 @@ impl Drop for Event {
     }
 }
 /// Watches one folder (not its subtree). Dropping it stops the watcher thread.
-pub struct Watch(Arc<Event>);
+pub struct Watch {
+    stop: Arc<Event>,
+    alive: Arc<AtomicBool>,
+}
+impl Watch {
+    pub fn is_alive(&self) -> bool { self.alive.load(Ordering::Acquire) }
+}
+struct WatchLife(Arc<AtomicBool>);
+impl Drop for WatchLife {
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+}
 impl Drop for Watch {
     fn drop(&mut self) {
-        let _ = unsafe { SetEvent(self.0.0) };
+        let _ = unsafe { SetEvent(self.stop.0) };
     }
 }
 /// Calls `changed` after a burst of changes settles (250 ms quiet, at most 1 s while busy).
 /// The handle is opened on the watcher thread, so a slow share never blocks the UI.
 pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch> {
-    let dir = wide(&dir).ok()?;
+    let path = dir;
+    let dir = wide(&path).ok()?;
     let stop = Arc::new(Event(unsafe { CreateEventW(None, true, false, None) }.ok()?));
     let thread_stop = stop.clone();
+    let alive = Arc::new(AtomicBool::new(true));
+    let life = WatchLife(alive.clone());
     std::thread::spawn(move || {
+        let _life = life;
+        if !wsl_running(&path).unwrap_or(false) || unsafe { WaitForSingleObject(thread_stop.0, 0) } == WAIT_OBJECT_0 {
+            return;
+        }
         let filter = FILE_NOTIFY_CHANGE_FILE_NAME
             | FILE_NOTIFY_CHANGE_DIR_NAME
             | FILE_NOTIFY_CHANGE_SIZE
@@ -1062,12 +1129,38 @@ pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch>
         }
         let _ = unsafe { FindCloseChangeNotification(change) };
     });
-    Some(Watch(stop))
+    Some(Watch { stop, alive })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wsl_paths_and_running_names() {
+        for path in [r"\\wsl$\Ubuntu\home\tt", r"\\wsl.localhost\Ubuntu\", r"\\?\UNC\wsl.localhost\Ubuntu\home", r"//WSL.LOCALHOST/Ubuntu/home"] {
+            assert_eq!(wsl_distribution(Path::new(path)).as_deref(), Some("Ubuntu"));
+        }
+        for path in [r"C:\wsl$\Ubuntu", r"\\server\Ubuntu", r"\\wsl.localhost\", r"\\wsl.localhost.example\Ubuntu"] {
+            assert_eq!(wsl_distribution(Path::new(path)), None);
+        }
+        let expected = vec!["Ubuntu", "Debian"];
+        assert_eq!(running_wsl_names(b"Ubuntu\r\nDebian\r\n").unwrap(), expected);
+        let wide: Vec<_> = "\u{feff}Ubuntu\r\nDebian\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(running_wsl_names(&wide).unwrap(), expected);
+        assert!(running_wsl_names(b"").unwrap().is_empty());
+        assert!(running_wsl_names(&[0xff, 0xfe, 0]).is_err());
+    }
+    #[test]
+    fn failed_watch_is_not_alive() {
+        let path = std::env::temp_dir().join(format!("enyfile-absent-watch-{}", std::process::id()));
+        assert!(!path.exists());
+        let watch = watch(path, || {}).unwrap();
+        let started = Instant::now();
+        while watch.is_alive() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!watch.is_alive(), "failed watcher must release its live state");
+    }
     #[test]
     fn shell_names() {
         let windows = system_dir().parent().unwrap().to_string_lossy().to_lowercase();

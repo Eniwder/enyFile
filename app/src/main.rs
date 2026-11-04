@@ -7,6 +7,7 @@ mod demo;
 mod finder;
 mod icons;
 mod listing;
+mod network_smoke;
 mod paste;
 mod pathid;
 mod props;
@@ -44,6 +45,8 @@ enum Mode {
     Back,
     Forward,
     Refresh,
+    /// Background refresh: never start a stopped WSL distribution.
+    Automatic,
     /// Refresh and move the cursor to exactly the created or renamed item.
     Made(Arc<PathBuf>),
     Sort,
@@ -60,6 +63,7 @@ struct Job {
     descending: bool,
     show_hidden: bool,
     filter: Option<listing::Pattern>,
+    automatic: bool,
 }
 /// Rename / new file / new folder, waiting for a name in the name dialog.
 enum NameKind {
@@ -83,6 +87,7 @@ enum Reply {
     /// Rename or creation done: (pane, folder, listing before, result path).
     Made(usize, PathBuf, Positions, Result<PathBuf, String>),
     Listing(usize, u64, Result<Arc<Snapshot>, String>),
+    AutomaticSkipped(usize, u64, String),
     Changed(usize, PathBuf),
     Resumed,
     Pasted(usize, PathBuf, Positions, Vec<PathBuf>, Result<PasteOutcome, String>),
@@ -193,6 +198,17 @@ impl Worker {
                     m.pending.take().unwrap()
                 };
                 let fresh = job.source.is_none();
+                if job.automatic {
+                    let reason = match shell::wsl_running(&job.path) {
+                        Ok(true) => None,
+                        Ok(false) => Some("WSLは停止中です。F5で再接続できます".to_string()),
+                        Err(e) => Some(format!("自動更新を見送りました: {e}。F5で再試行できます")),
+                    };
+                    if let Some(reason) = reason {
+                        if !post(Reply::AutomaticSkipped(pane, job.generation, reason)) { return; }
+                        continue;
+                    }
+                }
                 let result = if let Some(source) = job.source {
                     let rows = source.unfiltered.as_ref().map_or_else(|| source.rows.clone(), |all| all.as_ref().clone());
                     Ok((source.dir.clone(), rows, source.volume.clone()))
@@ -313,6 +329,7 @@ struct Pane {
     watch: Option<shell::Watch>,
     busy: slint::Timer,
     deadline: slint::Timer,
+    wsl_paused: bool,
     back: Vec<Saved>,
     forward: Vec<Saved>,
     column: usize,
@@ -949,6 +966,7 @@ impl Controller {
         }
     }
     fn navigate(&mut self, p: usize, path: PathBuf, mode: Mode) {
+        let automatic = matches!(mode, Mode::Automatic);
         let show_hidden = self.config.show_hidden[p];
         let pane = &mut self.panes[p];
         pane.fallback = None;
@@ -973,6 +991,7 @@ impl Controller {
             descending: pane.descending,
             show_hidden,
             filter,
+            automatic,
         });
         self.busy(p, true);
         self.arm_listing_timeout(p);
@@ -1068,6 +1087,7 @@ impl Controller {
             descending: pane.descending,
             show_hidden,
             filter: pane.filter.as_ref().map(|(_, f)| f.clone()),
+            automatic: false,
         });
         self.busy(p, true);
         self.arm_listing_timeout(p);
@@ -1793,7 +1813,7 @@ impl Controller {
             if self.panes[p].pending.is_some() {
                 self.panes[p].stale = true;
             } else {
-                self.navigate(p, dir, Mode::Refresh);
+                self.navigate(p, dir, Mode::Automatic);
             }
         }
     }
@@ -1811,6 +1831,17 @@ impl Controller {
     }
     fn handle(&mut self, reply: Reply) {
         match reply {
+            Reply::AutomaticSkipped(p, generation, reason) => {
+                if self.panes[p].generation != generation { return; }
+                let pane = &mut self.panes[p];
+                pane.pending = None;
+                pane.stale = false;
+                pane.deadline.stop();
+                pane.watch = None;
+                pane.wsl_paused = true;
+                self.busy(p, false);
+                self.message(reason);
+            }
             Reply::Resumed => self.resumed(),
             Reply::Listing(p, generation, result) => self.complete(p, generation, result),
             Reply::Finder(p, session, event) => {
@@ -1835,7 +1866,7 @@ impl Controller {
                 if self.panes[p].pending.is_some() {
                     self.panes[p].stale = true;
                 } else {
-                    self.navigate(p, dir, Mode::Refresh);
+                    self.navigate(p, dir, Mode::Automatic);
                 }
             }
             Reply::Ask(p, question, reply) => self.ask(p, question, reply),
@@ -1900,7 +1931,7 @@ impl Controller {
                 Ok(path) => {
                     self.message(format!("完了: {}", shown(&path)));
                     if self.data(p).dir == dir
-                        && self.panes[p].pending.as_ref().is_none_or(|mode| matches!(mode, Mode::Refresh | Mode::Sort | Mode::Made(_)))
+                        && self.panes[p].pending.as_ref().is_none_or(|mode| matches!(mode, Mode::Refresh | Mode::Automatic | Mode::Sort | Mode::Made(_)))
                         && self.panes[p].found.is_none()
                     {
                         self.navigate(p, dir, Mode::Made(Arc::new(path)));
@@ -1968,6 +1999,7 @@ impl Controller {
         }
         self.panes[p].deadline.stop();
         let mode = self.panes[p].pending.take().unwrap_or(Mode::Refresh);
+        let reloaded = !matches!(&mode, Mode::Sort);
         let focus_list = matches!(&mode, Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_));
         // Opened with no item to show: the cursor starts on "..".
         let entered = matches!(&mode, Mode::New(None));
@@ -1985,6 +2017,9 @@ impl Controller {
                 return;
             }
         };
+        if std::mem::take(&mut self.panes[p].wsl_paused) {
+            self.message(if shell::wsl_distribution(&data.dir).is_some() { "WSLに再接続しました" } else { "" });
+        }
         if focus_list {
             // The job for an opened folder ran without the filter.
             self.panes[p].filter = None;
@@ -2017,7 +2052,7 @@ impl Controller {
                 self.panes[p].back.push(old.clone());
                 saved
             }
-            Mode::Refresh | Mode::Sort => Some(old.clone()),
+            Mode::Refresh | Mode::Automatic | Mode::Sort => Some(old.clone()),
             Mode::Made(path) => Some(Saved {
                 path: data.dir.clone(),
                 selection: Selection::only([path.clone()]),
@@ -2118,7 +2153,9 @@ impl Controller {
         if pane.forward.len() > 64 {
             pane.forward.remove(0);
         }
-        if changed || pane.watch.is_none() {
+        if changed || !pane.watch.as_ref().is_some_and(shell::Watch::is_alive)
+            || (reloaded && shell::wsl_distribution(&data.dir).is_some())
+        {
             let dir = data.dir.clone();
             pane.watch = shell::watch(data.dir.clone(), move || {
                 post(Reply::Changed(p, dir.clone()));
@@ -2159,7 +2196,7 @@ impl Controller {
             }
         }
         if stale {
-            self.navigate(p, data.dir.clone(), Mode::Refresh);
+            self.navigate(p, data.dir.clone(), Mode::Automatic);
         }
         // Results that came in during a sort or filter of the search results.
         if self.panes[p].found.is_some() {
@@ -3230,19 +3267,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shell::harden_dll_search();
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
+    let network_smoke = args.iter().position(|a| a.as_os_str() == "--network-smoke");
+    if let Some(i) = network_smoke {
+        if args.get(i + 2).is_none() {
+            return Err("--network-smoke <local-test-root> <remote-test-folder>".into());
+        }
+    }
     // `--demo <root> <frames>`: records the README animation (demo.rs) in a fresh `<root>`.
     let demo = args.iter().position(|a| a.as_os_str() == "--demo");
     if let Some(i) = demo {
         let root = args.get(i + 1).ok_or("--demo <root> <frames>")?;
         demo::prepare(root)?;
     }
-    let own_root = smoke.or(demo).map(|i| args[i + 1].as_path());
+    let own_root = smoke.or(demo).or(network_smoke).map(|i| args[i + 1].as_path());
     crash_log(config_file(own_root).with_file_name("crash.log"));
     let config = config::Config::load(config_file(own_root));
     let (left, right) = match smoke {
         Some(i) => {
             let root = args.get(i + 1).ok_or("--smoke <root> <log>")?;
             (root.join("left"), root.join("right"))
+        }
+        None if network_smoke.is_some() => {
+            let i = network_smoke.unwrap();
+            (args[i + 1].join("local"), args[i + 2].clone())
         }
         None if demo.is_some() => demo::start_folders(own_root.unwrap()),
         // No arguments: the configured start folders, else the development sandbox.
@@ -3280,6 +3327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         watch: None,
         busy: slint::Timer::default(),
         deadline: slint::Timer::default(),
+        wsl_paused: false,
         back: Vec::new(),
         forward: Vec::new(),
         column: 0,
@@ -3769,6 +3817,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let _smoke = smoke.map(|i| smoke::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
+    let _network_smoke = network_smoke.map(|i| network_smoke::start(controller.clone(), args[i + 1].clone(), args[i + 2].clone()));
     let _demo = demo.map(|i| demo::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
     slint::run_event_loop()?;
     CONTROLLER.with(|c| c.borrow_mut().take());
