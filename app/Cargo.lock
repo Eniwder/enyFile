@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "enyfile"
-version = "1.11.5"
+version = "1.11.6"
 dependencies = [
  "chrono",
  "raw-window-handle",

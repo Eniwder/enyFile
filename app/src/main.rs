@@ -11,6 +11,7 @@ mod listing;
 mod network_smoke;
 mod paste;
 mod pathid;
+mod pathinput;
 mod props;
 mod recovery;
 mod rows;
@@ -1021,7 +1022,13 @@ impl Controller {
             std::thread::spawn(move || post(Reply::ShellFolder(p, navigation, shell::shell_folder(&name))));
             return;
         }
-        let path = PathBuf::from(text);
+        let path = match pathinput::expand(text) {
+            Ok(path) => PathBuf::from(path),
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
         let path = if path.is_absolute() {
             path
         } else {
