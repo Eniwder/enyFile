@@ -2352,11 +2352,9 @@ impl Controller {
     /// Drive buttons and Shift+letter share the remembered folder and cursor.
     fn open_drive(&mut self, p: usize, root: PathBuf) {
         let drive = drive_of(&root);
-        let last = drive.as_ref().and_then(|drive| {
-            self.config.drive_dirs.get(drive)
-                .filter(|_| drive_of(&self.data(p).dir).as_ref() != Some(drive))
-                .cloned()
-        });
+        // The last folder is shared across panes, even when this pane already
+        // shows the same drive (possibly at a different folder).
+        let last = drive.as_ref().and_then(|drive| self.config.drive_dirs.get(drive).cloned());
         match last {
             Some(dir) => {
                 let cursor = drive.as_ref().and_then(|drive| self.drive_cursors.get(drive)).cloned().flatten();

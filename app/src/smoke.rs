@@ -902,7 +902,11 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     };
                     expect(layered, "window opacity applied (80 %)")?;
                     s.pass("settings: start folder and window opacity saved and applied");
-                    // Shift+letter: the drive holding the test data.
+                    // Both panes are on the test drive. Remember the left pane's
+                    // folder and make sure Shift+letter in the right pane uses it.
+                    let remembered = c.borrow().data(0).dir.clone();
+                    let drive = crate::drive_of(&remembered).ok_or("test folder has no drive")?;
+                    c.borrow_mut().config.drive_dirs.insert(drive, remembered);
                     let letter = display(&root).chars().next().unwrap_or('C').to_string();
                     let mut e = slint::language::KeyEvent::default();
                     e.text = letter.to_uppercase().into();
@@ -910,10 +914,11 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     ui.invoke_key_event(1, e);
                 }
                 39 => {
-                    if !idle(&c) || c.borrow().data(1).dir.parent().is_some() {
+                    if !idle(&c) {
                         return Ok(false);
                     }
-                    s.pass("Shift+letter opens that drive");
+                    expect(c.borrow().data(1).dir == c.borrow().data(0).dir, "Shift+letter uses the shared remembered folder even on the same drive")?;
+                    s.pass("Shift+letter shares the remembered folder across panes on the same drive");
                     let out = std::process::Command::new("powershell")
                         .args(["-NoProfile", "-Command", "Get-Clipboard"])
                         .output()
@@ -960,8 +965,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     if !idle(&c) {
                         return Ok(false);
                     }
-                    // Toolbar Home: the active pane's start folder; then back to the test data's
-                    // drive root, where step 39 left pane 1.
+                    // Toolbar Home: the active pane's start folder; then back to the test drive root.
                     if !s.homed {
                         c.borrow_mut().config.start[1] = Some(root.join("right"));
                         c.borrow_mut().active(1);
