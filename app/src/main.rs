@@ -945,6 +945,10 @@ impl Controller {
         self.paint(other);
     }
     fn paint(&self, p: usize) {
+        let model = &self.panes[p].model;
+        if model.special.get().is_none() {
+            model.selection.borrow_mut().select_current_if_empty(&model.data.borrow().rows);
+        }
         if let Some(ui) = self.ui.upgrade() {
             // Update the rows of the page in place; a reset would destroy mouse/double-click state.
             let model = &self.panes[p].model;
@@ -2170,6 +2174,9 @@ impl Controller {
                 Special::Gap(_) => false,
             })
         };
+        if special.is_none() {
+            selection.select_current_if_empty(&data.rows);
+        }
         let reveal = if special.is_some() { None } else { selection.current };
         let pane = &mut self.panes[p];
         pane.model.special.set(special);

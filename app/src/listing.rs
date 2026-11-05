@@ -432,6 +432,15 @@ impl Selection {
     pub fn count(&self) -> usize {
         self.selected_count
     }
+    /// Keep the cursor actionable after refresh or removal clears the selection.
+    pub fn select_current_if_empty(&mut self, rows: &[Entry]) {
+        if self.count() == 0 {
+            if let Some(index) = self.current.filter(|&i| i < rows.len()) {
+                self.set(rows[index].path.clone(), true);
+                self.anchor = Some(index);
+            }
+        }
+    }
     pub fn clear(&mut self) {
         self.all = false;
         self.universe = None;
@@ -576,6 +585,30 @@ mod tests {
         ));
         s.select(&rows, 0, true, false, true);
         assert_eq!(s.count(), 7);
+    }
+    #[test]
+    fn empty_selection_follows_cursor_after_removal() {
+        let mut rows = rows();
+        let mut selection = Selection::default();
+        selection.select(&rows, 3, false, false, false);
+        rows.remove(3);
+        selection.clear();
+        selection.select_current_if_empty(&rows);
+        assert_eq!(selection.count(), 1);
+        assert!(selection.contains(&rows[3].path));
+        assert_eq!(rows[3].name, "4");
+        assert_eq!(selection.anchor, Some(3));
+
+        selection.select(&rows, 5, true, false, true);
+        selection.current = Some(0);
+        selection.select_current_if_empty(&rows);
+        assert_eq!(selection.count(), 2);
+        assert!(!selection.contains(&rows[0].path));
+
+        selection.clear();
+        selection.current = None;
+        selection.select_current_if_empty(&[]);
+        assert_eq!(selection.count(), 0);
     }
     #[test]
     fn display_formats() {
