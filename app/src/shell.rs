@@ -821,7 +821,19 @@ pub fn paste_shell_items(destination: &Path, moved: bool) -> Result<bool, String
 }
 
 /// F2 rename through the Shell (undoable from Explorer like any Shell rename).
+/// Names differing only in leading spaces use Win32: the Shell treats them as equal.
 pub fn rename(path: &Path, name: &str) -> Result<(), String> {
+    if let Some(old) = path.file_name().and_then(|n| n.to_str()) {
+        if old != name && old.trim_start_matches(' ').eq_ignore_ascii_case(name.trim_start_matches(' '))
+            && (old.starts_with(' ') || name.starts_with(' '))
+        {
+            let target = path.with_file_name(name);
+            os_path(path)?;
+            os_path(&target)?;
+            // No replace flag: an existing destination must remain untouched.
+            return rename_plain(path, &target).map_err(|e| e.to_string());
+        }
+    }
     let _ole = Apartment::new()?;
     let op = operation(FOF_ALLOWUNDO)?;
     let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
@@ -1187,6 +1199,25 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!watch.is_alive(), "failed watcher must release its live state");
+    }
+    #[test]
+    fn rename_removes_leading_space() {
+        let root = std::env::temp_dir().join(format!("enyfile-rename-space-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join(" Folder");
+        let target = root.join("Folder");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("keep.txt"), "contents").unwrap();
+        let result = rename(&source, "Folder");
+        let renamed = target.join("keep.txt").is_file() && !source.exists();
+        // A real collision must fail without replacing either folder.
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("source.txt"), "source").unwrap();
+        let collision = rename(&source, "Folder");
+        let preserved = source.join("source.txt").is_file() && target.join("keep.txt").is_file();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(result.is_ok() && renamed, "rename result: {result:?}");
+        assert!(collision.is_err() && preserved, "existing folders must not be replaced");
     }
     #[test]
     fn shell_names() {
