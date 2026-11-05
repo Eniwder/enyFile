@@ -2279,11 +2279,7 @@ impl Controller {
                         if kind == 3 {
                             let target = match special {
                                 Special::Drive(i) => ctxmenu::Target::Items(vec![self.drives[i].root.clone()]),
-                                Special::Parent => {
-                                    let Some(parent) = data.dir.parent() else { return };
-                                    ctxmenu::Target::Items(vec![parent.to_path_buf()])
-                                }
-                                Special::Gap(_) => ctxmenu::Target::Background(data.dir.clone()),
+                                Special::Parent | Special::Gap(_) => ctxmenu::Target::Background(data.dir.clone()),
                             };
                             self.show_menu(p, target, shift, None);
                         }
