@@ -2342,6 +2342,23 @@ impl Controller {
         });
         if let Err(error) = result { self.fail(format!("ドラッグを開始できません: {error}")); }
     }
+    /// Drive buttons and Shift+letter share the remembered folder and cursor.
+    fn open_drive(&mut self, p: usize, root: PathBuf) {
+        let drive = drive_of(&root);
+        let last = drive.as_ref().and_then(|drive| {
+            self.config.drive_dirs.get(drive)
+                .filter(|_| drive_of(&self.data(p).dir).as_ref() != Some(drive))
+                .cloned()
+        });
+        match last {
+            Some(dir) => {
+                let cursor = drive.as_ref().and_then(|drive| self.drive_cursors.get(drive)).cloned().flatten();
+                self.navigate(p, dir, Mode::New(cursor));
+                self.panes[p].fallback = Some(root);
+            }
+            None => self.navigate(p, root, Mode::New(None)),
+        }
+    }
     /// Enter / double click on "..", or on a drive in the drive list.
     fn enter_special(&mut self, p: usize, special: Special) {
         match special {
@@ -2349,7 +2366,7 @@ impl Controller {
             Special::Drive(i) => {
                 if let Some(drive) = self.drives.get(i) {
                     let root = drive.root.clone();
-                    self.navigate(p, root, Mode::New(None));
+                    self.open_drive(p, root);
                 }
             }
             Special::Gap(_) => {}
@@ -3087,16 +3104,7 @@ impl Controller {
         if shift && !ctrl && !alt && letter.len() == 1 && letter.chars().all(|c| c.is_ascii_alphabetic()) {
             let prefix = format!("{}:", letter.to_uppercase());
             if let Some(root) = self.drives.iter().find(|d| d.root.to_string_lossy().starts_with(&prefix)).map(|d| d.root.clone()) {
-                // The folder last shown on that drive; already on the drive, its root.
-                let last = self.config.drive_dirs.get(&prefix).filter(|_| drive_of(&data.dir).as_deref() != Some(prefix.as_str()));
-                match last.cloned() {
-                    Some(dir) => {
-                        let cursor = self.drive_cursors.get(&prefix).cloned().flatten();
-                        self.navigate(p, dir, Mode::New(cursor));
-                        self.panes[p].fallback = Some(root);
-                    }
-                    None => self.navigate(p, root, Mode::New(None)),
-                }
+                self.open_drive(p, root);
                 return true;
             }
         }
