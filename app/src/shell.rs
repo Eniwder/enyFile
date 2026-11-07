@@ -1246,7 +1246,10 @@ mod tests {
         };
         let folder_link = make_link("folder.LNK", &folder);
         let before = std::fs::read(&folder_link).unwrap();
-        assert_eq!(shortcut_folder(&folder_link).unwrap(), Some(folder.clone()));
+        let target = shortcut_folder(&folder_link).unwrap().expect("folder shortcut target");
+        // GetPath can expand 8.3 aliases (CI's RUNNER~1 temp path) to long names.
+        // Compare the filesystem paths after canonicalization, not their spelling.
+        assert_eq!(std::fs::canonicalize(target).unwrap(), std::fs::canonicalize(&folder).unwrap());
         assert_eq!(std::fs::read(&folder_link).unwrap(), before);
         let file_link = make_link("file.lnk", &file);
         assert_eq!(shortcut_folder(&file_link).unwrap(), None);
