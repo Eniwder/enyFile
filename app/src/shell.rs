@@ -876,6 +876,55 @@ pub fn delete(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + Send + S
 pub fn open(path: &Path) -> Result<(), String> {
     execute(w!("open"), path, path.parent())
 }
+
+/// Inspect a .lnk only on explicit activation, on a worker. Never call Resolve:
+/// no target search, repair, installer activation, or saving changes to the link.
+/// Some = an existing filesystem folder; None = an existing ordinary file.
+/// Failure must not fall through to executing an unclassified shortcut.
+pub fn shortcut_folder(path: &Path) -> Result<Option<PathBuf>, String> {
+    let _ole = Apartment::new()?;
+    let file = wide(path)?;
+    let target = unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
+        link.cast::<IPersistFile>().map_err(|e| e.to_string())?
+            .Load(PCWSTR(file.as_ptr()), STGM_READ).map_err(|e| e.to_string())?;
+        let mut buffer = vec![0u16; 32_768];
+        // Flags 0 asks for the normal target path (not the unexpanded RAWPATH).
+        // GetArguments/GetWorkingDirectory are intentionally not used.
+        link.GetPath(&mut buffer, std::ptr::null_mut(), 0).map_err(|e| e.to_string())?;
+        let len = buffer.iter().position(|&c| c == 0).filter(|&n| n > 0 && n < buffer.len() - 1)
+            .ok_or("ショートカットのリンク先を通常のパスとして取得できません")?;
+        PathBuf::from(OsString::from_wide(&buffer[..len]))
+    };
+    shortcut_target_folder(&target)
+}
+
+fn shortcut_target_folder(target: &Path) -> Result<Option<PathBuf>, String> {
+    use std::path::{Component, Prefix};
+    // Only absolute filesystem paths, never shell names, URLs, devices or pipes.
+    let filesystem = match target.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(_) | Prefix::VerbatimDisk(_) => true,
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                !matches!(server.to_str(), Some("." | "?")) && !share.is_empty()
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !target.is_absolute() || !filesystem {
+        return Err("ショートカットのリンク先が通常の絶対パスではありません".into());
+    }
+    let target = os_path(target)?;
+    let metadata = std::fs::metadata(&target).map_err(|e| format!("ショートカットのリンク先を確認できません: {e}"))?;
+    if metadata.is_dir() {
+        Ok(Some(target))
+    } else if metadata.is_file() {
+        Ok(None)
+    } else {
+        Err("ショートカットのリンク先がファイルまたはフォルダではありません".into())
+    }
+}
 /// A folder named "Name.{CLSID}" (e.g. GodMode) is a shell junction: Explorer shows the
 /// CLSID's virtual folder instead of the files inside, so only Explorer can open it.
 pub fn is_junction(path: &Path) -> bool {
@@ -1174,6 +1223,49 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     use super::*;
+    #[test]
+    fn folder_shortcuts_are_inspected_without_executing_arguments() {
+        let _ole = Apartment::new().unwrap();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("enyfile-links-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let folder = dir.join("日本語 & folder; $(test)");
+        std::fs::create_dir(&folder).unwrap();
+        let file = dir.join("ordinary.txt");
+        std::fs::write(&file, "test").unwrap();
+        let make_link = |name: &str, target: &Path| {
+            let path = dir.join(name);
+            unsafe {
+                let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+                link.SetPath(PCWSTR(wide(target).unwrap().as_ptr())).unwrap();
+                link.SetArguments(w!("/c echo must-not-run > unexpected.txt")).unwrap();
+                link.SetWorkingDirectory(PCWSTR(wide(&dir).unwrap().as_ptr())).unwrap();
+                link.cast::<IPersistFile>().unwrap().Save(PCWSTR(wide(&path).unwrap().as_ptr()), true).unwrap();
+            }
+            path
+        };
+        let folder_link = make_link("folder.LNK", &folder);
+        let before = std::fs::read(&folder_link).unwrap();
+        assert_eq!(shortcut_folder(&folder_link).unwrap(), Some(folder.clone()));
+        assert_eq!(std::fs::read(&folder_link).unwrap(), before);
+        let file_link = make_link("file.lnk", &file);
+        assert_eq!(shortcut_folder(&file_link).unwrap(), None);
+        std::fs::remove_dir(&folder).unwrap();
+        assert!(shortcut_folder(&folder_link).is_err(), "missing folders must not fall through to execution");
+        let broken = dir.join("broken.lnk");
+        std::fs::write(&broken, "not a shortcut").unwrap();
+        assert!(shortcut_folder(&broken).is_err());
+        assert!(!dir.join("unexpected.txt").exists());
+        for path in [folder_link, file_link, file, broken] { std::fs::remove_file(path).unwrap(); }
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn shortcut_targets_reject_non_filesystem_names() {
+        for name in ["", "relative", r"C:relative", r"\rooted", "shell:Desktop", "https://example.com", r"\\.\pipe\enyfile", r"\\?\GLOBALROOT\Device\HarddiskVolume1", r"\\?\UNC\.\pipe\enyfile"] {
+            assert!(shortcut_target_folder(Path::new(name)).is_err(), "{name}");
+        }
+    }
     #[test]
     fn wsl_paths_and_running_names() {
         for path in [r"\\wsl$\Ubuntu\home\tt", r"\\wsl.localhost\Ubuntu\", r"\\?\UNC\wsl.localhost\Ubuntu\home", r"//WSL.LOCALHOST/Ubuntu/home"] {

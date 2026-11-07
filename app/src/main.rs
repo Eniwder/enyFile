@@ -2666,6 +2666,15 @@ impl Controller {
             std::thread::spawn(move || post(Reply::Opened(shell::explore(&path))));
         } else if entry.directory {
             self.navigate(p, entry.path.as_ref().clone(), Mode::New(None));
+        } else if entry.ext.eq_ignore_ascii_case("lnk") {
+            let path = entry.path.as_ref().clone();
+            self.panes[p].navigation += 1;
+            let navigation = self.panes[p].navigation;
+            std::thread::spawn(move || match shell::shortcut_folder(&path) {
+                Ok(Some(folder)) => post(Reply::ShellFolder(p, navigation, Ok(Some(folder)))),
+                Ok(None) => post(Reply::Opened(shell::open(&path))),
+                Err(error) => post(Reply::ShellFolder(p, navigation, Err(error))),
+            });
         } else {
             let path = entry.path.as_ref().clone();
             std::thread::spawn(move || post(Reply::Opened(shell::open(&path))));
