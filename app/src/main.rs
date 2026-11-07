@@ -3320,6 +3320,7 @@ fn crash_log(file: PathBuf) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // First, before anything loads a DLL by name (the graphics stack, the Shell).
     shell::harden_dll_search();
+    theme::init_font_fallbacks();
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
     let network_smoke = args.iter().position(|a| a.as_os_str() == "--network-smoke");
@@ -3625,6 +3626,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.on_font_set(move |family, size| c.borrow_mut().font_set(family.as_str(), size as f32));
     }
     controller.borrow().apply_appearance();
+    {
+        let c = controller.clone();
+        ui.on_font_filter(move |query| c.borrow().font_filter(query.as_str()));
+    }
     {
         use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
         let c = Rc::downgrade(&controller);

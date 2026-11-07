@@ -680,9 +680,25 @@ mod tests {
         assert_eq!(selection.count(), 9);
     }
     #[test]
+    fn simplified_chinese_name_survives_directory_scan() {
+        let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("enyfile-unicode-{}-{stamp}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("01高难度");
+        fs::create_dir(&path).unwrap();
+        let result = scan(&dir, true);
+        fs::remove_dir(&path).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        let rows = result.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, OsString::from("01高难度"));
+        assert_eq!(visible(&rows[0].name.to_string_lossy()), "01高难度");
+    }
+    #[test]
     fn hidden_characters_become_visible() {
         use std::borrow::Cow;
         assert!(matches!(visible("報告書 (2).pdf"), Cow::Borrowed(_)));
+        assert!(matches!(visible("01高难度"), Cow::Borrowed("01高难度")));
         // Emoji sequences keep their joiner.
         assert!(matches!(visible("👨\u{200D}💻.txt"), Cow::Borrowed(_)));
         assert_eq!(visible("invoice\u{202E}fdp.exe"), "invoice[RLO]fdp.exe");

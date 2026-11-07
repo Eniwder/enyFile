@@ -53,6 +53,32 @@ pub const EXTENSIONS: &[(&str, &str)] = &[
 pub const DEFAULT_FONT: &str = "Meiryo UI";
 pub const DEFAULT_SIZE: f32 = 13.0;
 
+/// Call at startup, before Slint initializes its font collection or workers start.
+/// Slint's script-level Windows fallback can miss simplified characters in a
+/// Japanese Han run. Add installed Chinese fonts to its generic fallback chain;
+/// the explicitly selected UI family still takes priority.
+pub fn init_font_fallbacks() {
+    let system = crate::shell::system_dir();
+    let Some(windows) = system.parent() else { return };
+    let fonts = windows.join("Fonts");
+    let existing = std::env::var_os("SLINT_FONT_PATH");
+    let mut paths: Vec<std::path::PathBuf> = existing.as_ref()
+        .map(|value| std::env::split_paths(value).collect()).unwrap_or_default();
+    let original_len = paths.len();
+    for name in ["msyh.ttc", "simsun.ttc"] {
+        let path = fonts.join(name);
+        if path.is_file() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    if paths.len() != original_len {
+        if let Ok(value) = std::env::join_paths(paths) {
+            // Main calls this before creating any threads; no concurrent env readers.
+            unsafe { std::env::set_var("SLINT_FONT_PATH", value) };
+        }
+    }
+}
+
 pub fn parse(hex: &str) -> Option<slint::Color> {
     let hex = hex.trim().trim_start_matches('#');
     if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -84,6 +110,16 @@ pub fn extension_map(rules: &[(String, slint::Color)]) -> HashMap<String, slint:
 
 /// Installed font families (no vertical "@" variants), sorted.
 pub fn font_families() -> Vec<String> {
+    static FONTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(enumerate_font_families).clone()
+}
+
+pub fn filter_fonts(fonts: &[String], query: &str) -> Vec<String> {
+    let query = query.trim().to_lowercase();
+    fonts.iter().filter(|name| name.to_lowercase().contains(&query)).cloned().collect()
+}
+
+fn enumerate_font_families() -> Vec<String> {
     use windows::Win32::{Foundation::LPARAM, Graphics::Gdi::*};
     unsafe extern "system" fn collect(font: *const LOGFONTW, _: *const TEXTMETRICW, _: u32, list: LPARAM) -> i32 {
         let list = unsafe { &mut *(list.0 as *mut Vec<String>) };
@@ -110,6 +146,14 @@ pub fn font_families() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn font_filter_matches_substrings_without_case() {
+        let fonts = vec!["Meiryo UI".into(), "Noto Sans JP".into(), "Noto Serif JP".into(), "游ゴシック".into()];
+        assert_eq!(filter_fonts(&fonts, " NOTO "), fonts[1..3]);
+        assert_eq!(filter_fonts(&fonts, "ゴシック"), fonts[3..]);
+        assert!(filter_fonts(&fonts, "not installed").is_empty());
+        assert_eq!(filter_fonts(&fonts, ""), fonts);
+    }
     #[test]
     fn colors_and_extensions() {
         let c = parse("#40b0b0").unwrap();

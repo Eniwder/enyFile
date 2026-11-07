@@ -13,10 +13,7 @@ impl Controller {
         self.settings_font = (self.config.font_family.clone(), self.config.font_size);
         self.settings_color_rows();
         if let Some(ui) = self.ui.upgrade() {
-            if ui.get_fonts().row_count() == 0 {
-                let fonts: Vec<slint::SharedString> = theme::font_families().into_iter().map(Into::into).collect();
-                ui.set_fonts(ModelRc::new(slint::VecModel::from(fonts)));
-            }
+            self.font_filter("");
             ui.set_settings_font_family(self.settings_font.0.clone().into());
             ui.set_settings_font_size(self.settings_font.1.round() as i32);
             ui.set_settings_opacity((self.config.opacity * 100.0).round() as i32);
@@ -88,6 +85,14 @@ impl Controller {
             }
         });
     }
+    pub(super) fn font_filter(&self, query: &str) {
+        if let Some(ui) = self.ui.upgrade() {
+            let fonts: Vec<slint::SharedString> = theme::filter_fonts(&theme::font_families(), query)
+                .into_iter().map(Into::into).collect();
+            ui.set_fonts(ModelRc::new(slint::VecModel::from(fonts)));
+        }
+    }
+
     /// Copies colors, extension colors and font from the config into the UI.
     pub(super) fn apply_appearance(&self) {
         let Some(ui) = self.ui.upgrade() else { return };

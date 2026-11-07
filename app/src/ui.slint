@@ -1018,6 +1018,104 @@ component ColorEditor inherits Rectangle {
     }
 }
 
+// One editable control: its popup overlays the closed field, so the editor and
+// filtered list share a single input instead of a separate search field.
+component FontPicker inherits Rectangle {
+    in property <[string]> model;
+    in-out property <string> value;
+    in property <length> row-height: 28px;
+    callback filter(string);
+    property <int> highlighted: 0;
+    property <string> draft;
+    property <bool> select-initial;
+    height: root.row-height;
+    min-width: 180px;
+    forward-focus: closed-keys;
+    background: Theme.bar;
+    border-width: 1px; border-color: closed-keys.has-focus ? Theme.border-active : Theme.border;
+    border-radius: 3px;
+    function open(initial: string, typing: bool) {
+        root.filter(typing ? initial : "");
+        root.highlighted = 0;
+        root.draft = initial;
+        root.select-initial = !typing;
+        popup.show();
+    }
+    function choose(index: int) {
+        if index >= 0 && index < root.model.length {
+            root.value = root.model[index];
+            popup.close();
+            closed-keys.focus();
+        }
+    }
+    closed-keys := FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.DownArrow || e.text == Key.Return || e.text == " " {
+                root.open(root.value, false); return accept;
+            }
+            if !e.modifiers.control && !e.modifiers.alt && e.text != "" && e.text != Key.Tab && e.text != Key.Backtab && e.text != Key.Escape {
+                root.open(e.text, true); return accept;
+            }
+            return reject;
+        }
+    }
+    Text { x: 10px; width: parent.width - 40px; height: parent.height; text: root.value; color: Theme.text; overflow: elide; vertical-alignment: center; }
+    Text { x: parent.width - 28px; width: 24px; height: parent.height; text: "▾"; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+    TouchArea { clicked => { root.open(root.value, false); } }
+    popup := PopupWindow {
+        x: 0; y: 0; width: root.width;
+        height: root.row-height + min(8, max(1, root.model.length)) * root.row-height + 6px;
+        close-policy: close-on-click-outside;
+        forward-focus: editor;
+        Rectangle {
+            background: Theme.dialog; border-width: 1px; border-color: Theme.border-active;
+            Rectangle { y: 0; width: parent.width; height: root.row-height; background: Theme.bar; }
+            editor := TextInput {
+                x: 10px; y: 0; width: parent.width - 44px; height: root.row-height;
+                single-line: true;
+                color: Theme.text;
+                vertical-alignment: center;
+                selection-background-color: Theme.selected-bg;
+                selection-foreground-color: Theme.selected-text;
+                text <=> root.draft;
+                init => { if root.select-initial { self.select-all(); } }
+                if root.draft == "" : Text { text: "フォント名を入力"; color: Theme.dim; height: parent.height; vertical-alignment: center; }
+                edited => { root.select-initial = false; root.highlighted = 0; root.filter(self.text); }
+                accepted => { root.choose(root.highlighted); }
+                key-pressed(e) => {
+                    if e.text == Key.DownArrow { root.highlighted = min(root.model.length - 1, root.highlighted + 1); return accept; }
+                    if e.text == Key.UpArrow { root.highlighted = max(0, root.highlighted - 1); return accept; }
+                    if e.text == Key.Escape { popup.close(); closed-keys.focus(); return accept; }
+                    if e.text == Key.Tab || e.text == Key.Backtab { popup.close(); return reject; }
+                    return reject;
+                }
+            }
+            Text { x: parent.width - 28px; y: 0; width: 24px; height: root.row-height; text: "▾"; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center;
+                TouchArea { clicked => { popup.close(); closed-keys.focus(); } }
+            }
+            Rectangle {
+                x: 1px; y: root.row-height + 2px; width: parent.width - 2px; height: parent.height - self.y - 2px;
+                clip: true;
+                list := Flickable {
+                    width: parent.width; height: parent.height;
+                    content-height: max(1, root.model.length) * root.row-height;
+                    for name[index] in root.model : Rectangle {
+                        y: index * root.row-height; width: list.width; height: root.row-height;
+                        property <bool> current: index == root.highlighted;
+                        changed current => {
+                            if self.current { list.content-y = min(0px, min(list.height - self.y - self.height, max(-self.y, list.content-y))); }
+                        }
+                        background: self.current || hit.has-hover ? Theme.selected-bg : transparent;
+                        Text { x: 10px; width: parent.width - 20px; height: parent.height; text: name; color: Theme.text; overflow: elide; vertical-alignment: center; }
+                        hit := TouchArea { clicked => { root.choose(index); } }
+                    }
+                    if root.model.length == 0 : Text { x: 10px; y: 0; height: root.row-height; text: "一致するフォントがありません"; color: Theme.dim; vertical-alignment: center; }
+                }
+            }
+        }
+    }
+}
+
 // File > 設定: tabs for paths, colors, font and other options. Empty path = the Windows default folder.
 component SettingsDialog inherits Rectangle {
     in property <[PlaceRow]> places;
@@ -1066,6 +1164,7 @@ component SettingsDialog inherits Rectangle {
     callback color-ext-delete(int);
     callback colors-reset();
     callback font-set(string, int);
+    callback font-filter(string);
     in-out property <int> tab;
     property <int> ext-selected: -1;
     // Color editor state: kind 0 = base color, 1 = extension rule; index -1 = new rule.
@@ -1212,7 +1311,12 @@ component SettingsDialog inherits Rectangle {
                                 HorizontalLayout {
                                     spacing: 8px;
                                     Text { text: "フォント"; width: root.short-w; color: Theme.text; vertical-alignment: center; }
-                                    ComboBox { model: root.fonts; current-value <=> root.font-family; }
+                                    FontPicker {
+                                        model: root.fonts;
+                                        value <=> root.font-family;
+                                        row-height: root.row-h;
+                                        filter(text) => { root.font-filter(text); }
+                                    }
                                 }
                                 HorizontalLayout {
                                     spacing: 8px; alignment: start;
@@ -1223,8 +1327,10 @@ component SettingsDialog inherits Rectangle {
                                     height: max(90px, preview.preferred-height); background: Theme.pane; border-width: 1px; border-color: Theme.border;
                                     preview := VerticalLayout {
                                         padding: 10px; spacing: 4px;
-                                        Text { text: "enyFile v" + root.app-version + "   サンプル Sample 0123456789"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.text; }
-                                        Text { text: "日本語のファイル名.txt   20.4 MB   2025-05-17 09:33"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.dim; }
+                                        Text { text: "enyFile v" + root.app-version + "   Sample 0123456789"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.text; wrap: word-wrap; }
+                                        Text { text: "日本語 あいうえお カタカナ 漢字 髙 﨑 𠮷"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.dim; wrap: word-wrap; }
+                                        Text { text: "简体中文 汉语　繁體中文 龍門　한국어"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.dim; wrap: word-wrap; }
+                                        Text { text: "Åéñ　Ελληνικά　Кириллица　→ ★ ✓ 😀"; font-family: root.font-family; font-size: root.font-size * 1px; color: Theme.dim; wrap: word-wrap; }
                                     }
                                 }
                             }
@@ -1548,6 +1654,7 @@ export component App inherits Window {
     callback color-ext-delete(int);
     callback colors-reset();
     callback font-set(string, int);
+    callback font-filter(string);
     // Left pane share of the width; dragged with the splitter between the panes.
     in-out property <float> split: 0.5;
     in-out property <float> col-a: 0.3333;
@@ -2185,6 +2292,7 @@ export component App inherits Window {
         color-ext-delete(i) => { root.color-ext-delete(i); }
         colors-reset => { root.colors-reset(); }
         font-set(f, s) => { root.font-set(f, s); }
+        font-filter(text) => { root.font-filter(text); }
         edited(i, t) => { root.setting-edited(i, t); }
         browse(i) => { root.setting-browse(i); }
         reset(i) => { root.setting-reset(i); }
