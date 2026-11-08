@@ -1,5 +1,5 @@
 # cargo-deny, run by CI: known vulnerabilities (RustSec), licenses that may ship in the
-# GPL-3.0-only release, and crates from crates.io only.
+# GPL-3.0-only release, and registry sources (plus reviewed local backports).
 [graph]
 targets = ["x86_64-pc-windows-msvc"]
 

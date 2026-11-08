@@ -4,3 +4,6 @@
 *.bat text eol=crlf
 *.png binary
 *.ico binary
+# Keep upstream sources distinct in reviews; unified-diff context has intentional spaces.
+app/vendor/** linguist-vendored
+app/vendor/patches/*.diff whitespace=-blank-at-eol

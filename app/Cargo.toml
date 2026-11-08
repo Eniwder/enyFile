@@ -1,9 +1,13 @@
 [package]
 name = "enyfile"
-version = "1.11.11"
+version = "1.11.12"
 edition = "2024"
 license = "GPL-3.0-only"
 default-run = "enyfile"
+
+[features]
+# Opt-in developer benchmark; no additional APIs/features in normal builds.
+font-benchmark = ["windows/Win32_System_ProcessStatus"]
 
 [dependencies]
 slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2", "raw-window-handle-06", "unstable-winit-030"] }
@@ -13,6 +17,10 @@ serde_json = "=1.0.154"
 windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 # The COM `implement` macro refers to this crate by name (already a dependency of windows).
 windows-core = "=0.62.2"
+
+[dev-dependencies]
+# Uses the same patched text stack as Slint for a headless fallback regression check.
+parley = "=0.11.1"
 
 [[bin]]
 name = "enyfile"
@@ -26,6 +34,17 @@ path = "src/bin/shellprobe.rs"
 [profile.release]
 strip = true
 
+[[example]]
+name = "font-benchmark"
+path = "examples/font_benchmark.rs"
+required-features = ["font-benchmark"]
+
 [profile.dev]
 opt-level = 1
 incremental = true
+
+# PR #689 backport for actual-text Windows font fallback; remove on upstream migration.
+# Provenance, local delta and migration checks: vendor/README.md.
+[patch.crates-io]
+fontique = { path = "vendor/fontique" }
+parley = { path = "vendor/parley" }

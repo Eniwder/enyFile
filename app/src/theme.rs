@@ -53,32 +53,6 @@ pub const EXTENSIONS: &[(&str, &str)] = &[
 pub const DEFAULT_FONT: &str = "Meiryo UI";
 pub const DEFAULT_SIZE: f32 = 13.0;
 
-/// Call at startup, before Slint initializes its font collection or workers start.
-/// Slint's script-level Windows fallback can miss simplified characters in a
-/// Japanese Han run. Add installed Chinese fonts to its generic fallback chain;
-/// the explicitly selected UI family still takes priority.
-pub fn init_font_fallbacks() {
-    let system = crate::shell::system_dir();
-    let Some(windows) = system.parent() else { return };
-    let fonts = windows.join("Fonts");
-    let existing = std::env::var_os("SLINT_FONT_PATH");
-    let mut paths: Vec<std::path::PathBuf> = existing.as_ref()
-        .map(|value| std::env::split_paths(value).collect()).unwrap_or_default();
-    let original_len = paths.len();
-    for name in ["msyh.ttc", "simsun.ttc"] {
-        let path = fonts.join(name);
-        if path.is_file() && !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    if paths.len() != original_len {
-        if let Ok(value) = std::env::join_paths(paths) {
-            // Main calls this before creating any threads; no concurrent env readers.
-            unsafe { std::env::set_var("SLINT_FONT_PATH", value) };
-        }
-    }
-}
-
 pub fn parse(hex: &str) -> Option<slint::Color> {
     let hex = hex.trim().trim_start_matches('#');
     if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -146,6 +120,47 @@ fn enumerate_font_families() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Ask the OS through the character fallback path first, then require those
+    /// supported characters to survive Parley's normal selected-font path.
+    /// This does not require a particular CJK font on CI or bundle test fonts.
+    #[test]
+    fn os_supported_characters_survive_normal_font_selection() {
+        use parley::{FontContext, LayoutContext, StyleProperty, fontique};
+        use parley::style::{FontFamily, FontFamilyName};
+        let mut collection = fontique::Collection::default();
+        let mut cache = fontique::SourceCache::default();
+        let mut supported = String::new();
+        for ch in "A019あア漢难汉繁體中文龍門한국어𠀀⟰⨌😀".chars() {
+            let mut query = collection.query(&mut cache);
+            query.set_families(std::iter::empty::<fontique::QueryFamily<'_>>());
+            // Unknown script has no representative sample; use actual-text OS fallback.
+            query.set_fallbacks(fontique::FallbackKey::new(fontique::Script::from_bytes(*b"Zzzz"), None));
+            query.set_fallback_chars([ch]);
+            let mut found = false;
+            query.matches_with(|font| {
+                if font.charmap().and_then(|map| map.map(ch)).is_some_and(|glyph| glyph != 0) {
+                    found = true;
+                    fontique::QueryStatus::Stop
+                } else {
+                    fontique::QueryStatus::Continue
+                }
+            });
+            if found { supported.push(ch); }
+        }
+        assert!(!supported.is_empty(), "the OS should provide at least a basic text font");
+        let mut fonts = FontContext::default();
+        let mut layouts = LayoutContext::<[u8; 4]>::new();
+        let mut builder = layouts.ranged_builder(&mut fonts, &supported, 1.0, true);
+        builder.push_default(StyleProperty::FontFamily(FontFamily::Single(FontFamilyName::named(DEFAULT_FONT))));
+        builder.push_default(StyleProperty::FontSize(DEFAULT_SIZE));
+        let mut layout = builder.build(&supported);
+        layout.break_all_lines(None);
+        let missing = layout.lines().flat_map(|line| line.items()).map(|item| match item {
+            parley::layout::PositionedLayoutItem::GlyphRun(run) => run.glyphs().filter(|glyph| glyph.id == 0).count(),
+            _ => 0,
+        }).sum::<usize>();
+        assert_eq!(missing, 0, "OS-supported text lost glyphs: {supported}");
+    }
     #[test]
     fn font_filter_matches_substrings_without_case() {
         let fonts = vec!["Meiryo UI".into(), "Noto Sans JP".into(), "Noto Serif JP".into(), "游ゴシック".into()];

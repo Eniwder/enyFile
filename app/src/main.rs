@@ -3329,7 +3329,6 @@ fn crash_log(file: PathBuf) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // First, before anything loads a DLL by name (the graphics stack, the Shell).
     shell::harden_dll_search();
-    theme::init_font_fallbacks();
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
     let network_smoke = args.iter().position(|a| a.as_os_str() == "--network-smoke");
