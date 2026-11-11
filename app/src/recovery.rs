@@ -12,6 +12,36 @@ enum Event {
 }
 static EVENTS: OnceLock<SyncSender<Event>> = OnceLock::new();
 
+/// Observe native events independently of application callbacks. A queued Slint
+/// redraw can suppress later requests until a frame is delivered.
+#[derive(Default)]
+pub struct Activity {
+    waiting: Option<Instant>,
+    inputs: u64,
+    frames: u64,
+}
+impl Activity {
+    pub fn input(&mut self, now: Instant) {
+        self.inputs += 1;
+        self.waiting.get_or_insert(now);
+    }
+    pub fn frame(&mut self) {
+        self.frames += 1;
+        self.waiting = None;
+    }
+    pub fn retry_redraw(&mut self, now: Instant) -> bool {
+        if self.waiting.is_some_and(|since| now.duration_since(since) >= Duration::from_secs(2)) {
+            self.waiting = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+    pub fn status(&self) -> String {
+        format!("native-inputs={} redraw-events={} awaiting-frame={}", self.inputs, self.frames, self.waiting.is_some())
+    }
+}
+
 pub struct Monitor(Arc<AtomicBool>);
 impl Drop for Monitor {
     fn drop(&mut self) {
@@ -75,5 +105,25 @@ fn append(path: &Path, note: &str) {
     }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[{}] enyFile {}: {note}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), env!("CARGO_PKG_VERSION"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_redraw_retries_without_input_extending_the_deadline() {
+        let now = Instant::now();
+        let mut activity = Activity::default();
+        assert!(!activity.retry_redraw(now + Duration::from_secs(3)));
+        activity.input(now);
+        activity.input(now + Duration::from_secs(1));
+        assert!(!activity.retry_redraw(now + Duration::from_secs(1)));
+        assert!(activity.retry_redraw(now + Duration::from_secs(2)));
+        assert!(!activity.retry_redraw(now + Duration::from_secs(3)));
+        assert!(activity.retry_redraw(now + Duration::from_secs(4)));
+        activity.frame();
+        assert!(!activity.retry_redraw(now + Duration::from_secs(10)));
     }
 }

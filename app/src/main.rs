@@ -1861,7 +1861,7 @@ impl Controller {
         }
     }
     fn resumed(&mut self) {
-        recovery::record("system resumed with user present; rearming folder watches and refreshing visible panes".into());
+        recovery::record("system resumed; rearming folder watches and refreshing visible panes".into());
         let visible = self.visible();
         for pane in self.panes.iter_mut().take(visible) {
             // A remote watch handle can outlive the connection it watched.
@@ -1870,6 +1870,9 @@ impl Controller {
         self.refresh_shown(None);
         if let Some(ui) = self.ui.upgrade() {
             ui.window().request_redraw();
+            use slint::winit_030::WinitWindowAccessor;
+            // Bypass Slint's pending-redraw coalescing and frame throttle once.
+            ui.window().with_winit_window(|window| window.request_redraw());
         }
     }
     fn handle(&mut self, reply: Reply) {
@@ -3638,11 +3641,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let c = controller.clone();
         ui.on_font_filter(move |query| c.borrow().font_filter(query.as_str()));
     }
+    let activity = Rc::new(RefCell::new(recovery::Activity::default()));
     {
         use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
         let c = Rc::downgrade(&controller);
+        let activity = activity.clone();
+        let weak = ui.as_weak();
         ui.window().on_winit_window_event(move |_, event| {
+            match event {
+                winit::event::WindowEvent::RedrawRequested => activity.borrow_mut().frame(),
+                winit::event::WindowEvent::MouseInput { .. }
+                | winit::event::WindowEvent::MouseWheel { .. }
+                | winit::event::WindowEvent::KeyboardInput { .. }
+                | winit::event::WindowEvent::CursorMoved { .. } => activity.borrow_mut().input(Instant::now()),
+                _ => {}
+            }
             if matches!(event, winit::event::WindowEvent::Focused(true)) {
+                if let Some(ui) = weak.upgrade() {
+                    ui.window().with_winit_window(|window| window.request_redraw());
+                }
                 let c = c.clone();
                 slint::Timer::single_shot(Duration::ZERO, move || {
                     if let Some(c) = c.upgrade() {
@@ -3889,10 +3906,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         heartbeat.start(slint::TimerMode::Repeated, Duration::from_secs(1), move || {
             if let Some(c) = c.upgrade() {
                 let Ok(c) = c.try_borrow() else { return };
+                if activity.borrow_mut().retry_redraw(Instant::now()) {
+                    if let Some(ui) = c.ui.upgrade() {
+                        use slint::winit_030::WinitWindowAccessor;
+                        ui.window().with_winit_window(|window| window.request_redraw());
+                        recovery::record(format!("input without redraw for 2s; requesting native redraw; {}", activity.borrow().status()));
+                    }
+                }
                 let panes: Vec<_> = c.panes.iter().enumerate().map(|(p, pane)| {
                     format!("pane={} pending={} folder={}", p + 1, pane.pending.is_some(), shown(&pane.model.data.borrow().dir))
                 }).collect();
-                recovery::heartbeat(format!("active={} operations={} confirming={}; {}", c.active + 1, c.operations, c.confirming, panes.join("; ")));
+                recovery::heartbeat(format!("active={} operations={} confirming={}; {}; {}", c.active + 1, c.operations, c.confirming, activity.borrow().status(), panes.join("; ")));
             }
         });
     }

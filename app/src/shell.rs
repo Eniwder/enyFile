@@ -1072,7 +1072,8 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
                 ALT_ALONE.set(false);
                 unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::FrameClick) };
             }
-            WM_POWERBROADCAST if wparam.0 == PBT_APMRESUMESUSPEND as usize => {
+            WM_POWERBROADCAST if wparam.0 == PBT_APMRESUMESUSPEND as usize
+                || wparam.0 == PBT_APMRESUMEAUTOMATIC as usize => {
                 unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::Resumed) };
             }
             _ => {}
