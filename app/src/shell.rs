@@ -1033,11 +1033,12 @@ pub fn take_alt_tap() -> bool {
 pub enum WindowNotice {
     FrameClick,
     Resumed,
+    SessionEnding,
     DragWheel(WPARAM, LPARAM),
     DragTask,
     DragRedraw,
 }
-/// Watches frame clicks, user resume from sleep, and lone Alt taps.
+/// Watches session shutdown, frame clicks, user resume from sleep, and lone Alt taps.
 /// Installed once for the main window, so `on_notice` lives for the process lifetime.
 pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -1045,6 +1046,19 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
     unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, data: usize) -> LRESULT {
         let repeat = lparam.0 & (1 << 30) != 0;
         match msg {
+            WM_QUERYENDSESSION => {
+                // Agree immediately; cleanup belongs to the confirmed notification.
+                crate::recovery::record(format!("Windows session end queried; flags={:#x}", lparam.0));
+                return LRESULT(1);
+            }
+            WM_ENDSESSION => {
+                if wparam.0 != 0 {
+                    unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::SessionEnding) };
+                } else {
+                    crate::recovery::checkpoint("Windows session end cancelled; application continues".into());
+                }
+                return LRESULT(0);
+            }
             crate::dnd::TASK_MESSAGE => {
                 unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::DragTask) };
                 return LRESULT(0);

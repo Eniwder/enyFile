@@ -441,6 +441,12 @@ impl Controller {
             self.apply_opacity();
         }
     }
+    /// Stop work during session shutdown without changing focus or window opacity.
+    pub(super) fn stop_props(&mut self) {
+        if let Some(props) = self.props.take() {
+            props.cancel.store(true, Ordering::Relaxed);
+        }
+    }
     pub(super) fn close_props(&mut self) {
         let Some(props) = self.props.take() else { return };
         props.cancel.store(true, Ordering::Relaxed);

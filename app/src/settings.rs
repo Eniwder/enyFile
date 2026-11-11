@@ -300,7 +300,6 @@ impl Controller {
         };
         if self.config.window != Some(placement) {
             self.config.window = Some(placement);
-            self.save_config();
         }
     }
     pub(super) fn save_config(&mut self) {

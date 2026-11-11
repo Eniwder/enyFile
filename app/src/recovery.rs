@@ -9,6 +9,7 @@ use std::{
 enum Event {
     Heartbeat(String),
     Note(String),
+    Checkpoint(String, SyncSender<()>),
 }
 static EVENTS: OnceLock<SyncSender<Event>> = OnceLock::new();
 
@@ -53,6 +54,16 @@ pub fn record(note: String) {
         let _ = tx.try_send(Event::Note(note));
     }
 }
+/// Windows may terminate us as soon as WM_ENDSESSION returns. Give the log
+/// observer a bounded chance to persist this final entry before acknowledging it.
+pub fn checkpoint(note: String) {
+    if let Some(tx) = EVENTS.get() {
+        let (ack, done) = mpsc::sync_channel(1);
+        if tx.try_send(Event::Checkpoint(note, ack)).is_ok() {
+            let _ = done.recv_timeout(Duration::from_millis(200));
+        }
+    }
+}
 pub fn heartbeat(context: String) {
     if let Some(tx) = EVENTS.get() {
         let _ = tx.try_send(Event::Heartbeat(context));
@@ -82,6 +93,10 @@ pub fn start(path: PathBuf) -> Monitor {
                     }
                 }
                 Ok(Event::Note(note)) => append(&path, &note),
+                Ok(Event::Checkpoint(note, ack)) => {
+                    append(&path, &note);
+                    let _ = ack.try_send(());
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) if !stalled => {
                     // Sleep also pauses the heartbeat. This is evidence of a gap, not
                     // proof that the UI deadlocked, and is labelled accordingly.

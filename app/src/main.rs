@@ -156,15 +156,48 @@ const AGENT_HISTORY: usize = 100;
 
 thread_local! {
     static CONTROLLER: RefCell<Option<Rc<RefCell<Controller>>>> = const { RefCell::new(None) };
+    static SESSION_ENDING: Cell<bool> = const { Cell::new(false) };
 }
 /// Hands a worker result to the UI thread; the event loop wakes only when something arrives.
 fn post(reply: Reply) -> bool {
     slint::invoke_from_event_loop(move || {
+        if SESSION_ENDING.get() { return; }
         if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
             c.borrow_mut().handle(reply);
         }
     })
     .is_ok()
+}
+
+/// Called synchronously from WM_ENDSESSION, not queued: Windows can kill the
+/// process after we return. Do not open dialogs or wait for worker threads.
+fn end_session() {
+    if SESSION_ENDING.replace(true) { return; }
+    let status = if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+        if let Ok(mut c) = c.try_borrow_mut() {
+            c.remember_window();
+            let saved = c.config.save();
+            c.typing.stop();
+            c.agent.clock.stop();
+            if let Some(run) = &c.agent.run { run.cancel(); }
+            c.stop_props();
+            for pane in &mut c.panes {
+                pane.busy.stop();
+                pane.deadline.stop();
+                pane.watch = None;
+                pane.finder = None;
+                pane.worker.cancel();
+            }
+            format!("Windows session ending: settings={}; operations={}; confirming={}; background stop requested",
+                saved.map_or_else(|e| format!("save failed ({e})"), |()| "saved".into()), c.operations, c.confirming)
+        } else {
+            "Windows session ending: controller busy; settings save skipped".into()
+        }
+    } else {
+        "Windows session ending: controller already released".into()
+    };
+    recovery::checkpoint(status);
+    let _ = slint::quit_event_loop();
 }
 
 struct Mail {
@@ -3852,6 +3885,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         shell::WindowNotice::Resumed => { post(Reply::Resumed); }
+                        shell::WindowNotice::SessionEnding => end_session(),
                         shell::WindowNotice::DragWheel(wparam, lparam) => {
                             if let Some(ui) = weak.upgrade() { dnd::wheel(&ui, h, wparam, lparam); }
                         }
@@ -3904,6 +3938,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let c = Rc::downgrade(&controller);
         heartbeat.start(slint::TimerMode::Repeated, Duration::from_secs(1), move || {
+            if SESSION_ENDING.get() { return; }
             if let Some(c) = c.upgrade() {
                 let Ok(c) = c.try_borrow() else { return };
                 if activity.borrow_mut().retry_redraw(Instant::now()) {
@@ -3924,6 +3959,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _network_smoke = network_smoke.map(|i| network_smoke::start(controller.clone(), args[i + 1].clone(), args[i + 2].clone()));
     let _demo = demo.map(|i| demo::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
     slint::run_event_loop()?;
+    recovery::checkpoint(format!("UI event loop exited; Windows session ending={}", SESSION_ENDING.get()));
     CONTROLLER.with(|c| c.borrow_mut().take());
     Ok(())
 }
