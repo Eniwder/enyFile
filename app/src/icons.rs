@@ -312,6 +312,32 @@ fn icon_pixels(icon: HICON) -> Option<Pixels> {
 mod tests {
     use super::*;
     #[test]
+    fn file_icons_release_source_files() {
+        let _com = crate::shell::Apartment::new().unwrap();
+        let dir = std::env::temp_dir().join(format!("enyfile-icon-release-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = Path::new(&std::env::var("SystemRoot").unwrap()).join("system32/notepad.exe");
+        let path = dir.join("program.exe");
+        std::fs::copy(source, &path).unwrap();
+        let key: Arc<str> = path.to_string_lossy().as_ref().into();
+        ensure_path(&key, &path);
+        assert!(get(&key).is_some());
+        let shortcut = dir.join("program.lnk");
+        unsafe {
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            link.SetPath(PCWSTR(target.as_ptr())).unwrap();
+            let file: Vec<u16> = shortcut.as_os_str().encode_wide().chain(Some(0)).collect();
+            link.cast::<IPersistFile>().unwrap().Save(PCWSTR(file.as_ptr()), true).unwrap();
+        }
+        let key: Arc<str> = shortcut.to_string_lossy().as_ref().into();
+        ensure_path(&key, &shortcut);
+        assert!(get(&key).is_some());
+        std::fs::remove_file(&shortcut).expect("icon lookup must not keep the shortcut locked");
+        std::fs::remove_file(&path).expect("icon lookup must not keep the executable locked");
+        std::fs::remove_dir(&dir).unwrap();
+    }
+    #[test]
     fn local_places() {
         let windows = std::env::var("SystemRoot").unwrap();
         for (place, ok) in [

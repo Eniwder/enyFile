@@ -489,7 +489,10 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
     fn StartOperations(&self) -> windows::core::Result<()> {
         Ok(())
     }
-    fn FinishOperations(&self, _: HRESULT) -> windows::core::Result<()> {
+    fn FinishOperations(&self, hr: HRESULT) -> windows::core::Result<()> {
+        if self.1.is_some() {
+            crate::recovery::record(format!("delete: Shell finished; thread={:?} HRESULT=0x{:08X}", std::thread::current().id(), hr.0 as u32));
+        }
         Ok(())
     }
     fn PreRenameItem(&self, _: u32, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
@@ -516,7 +519,13 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
         }
         Ok(())
     }
-    fn PostDeleteItem(&self, _: u32, _: Item, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+    fn PostDeleteItem(&self, _: u32, item: Item, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+        if self.1.is_some() && (hr.is_err() || hr == COPYENGINE_S_USER_IGNORED) {
+            let path = item.as_ref().map(diagnostic_item_path).unwrap_or_else(|| "<null item>".into());
+            // The copy engine can report this only after its retry/skip dialog closes.
+            // Do not interpret this timestamp as the moment the lock was acquired.
+            crate::recovery::checkpoint(format!("delete: item failed/skipped; thread={:?} path={path:?} HRESULT=0x{:08X} error={}", std::thread::current().id(), hr.0 as u32, windows::core::Error::from_hresult(hr)));
+        }
         self.note(hr)
     }
     fn PreNewItem(&self, _: u32, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
@@ -536,6 +545,19 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
     }
     fn ResumeTimer(&self) -> windows::core::Result<()> {
         Ok(())
+    }
+}
+
+fn diagnostic_item_path(item: &IShellItem) -> String {
+    unsafe {
+        match item.GetDisplayName(SIGDN_FILESYSPATH) {
+            Ok(path) => {
+                let text = path.to_string().unwrap_or_else(|_| "<invalid path>".into());
+                CoTaskMemFree(Some(path.0.cast()));
+                text
+            }
+            Err(e) => format!("<path unavailable: {e}>"),
+        }
     }
 }
 
@@ -847,6 +869,14 @@ pub fn rename(path: &Path, name: &str) -> Result<(), String> {
 /// Recycle Bin by default; `permanent` matches Shift+Delete. Windows shows its own confirmation;
 /// `deleting` is called once it is answered yes and the first item is about to go.
 pub fn delete(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + Send + Sync + 'static) -> Result<bool, String> {
+    let started = Instant::now();
+    crate::recovery::record(format!("delete: requested; thread={:?} permanent={permanent} paths={paths:?}", std::thread::current().id()));
+    let result = delete_inner(paths, permanent, deleting);
+    crate::recovery::checkpoint(format!("delete: returned; thread={:?} elapsed_ms={} result={result:?}", std::thread::current().id(), started.elapsed().as_millis()));
+    result
+}
+
+fn delete_inner(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + Send + Sync + 'static) -> Result<bool, String> {
     let _ole = Apartment::new()?;
     let flags = if permanent {
         FOF_WANTNUKEWARNING
@@ -857,6 +887,7 @@ pub fn delete(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + Send + S
     let once = AtomicBool::new(false);
     let deleting = move || {
         if !once.swap(true, Ordering::Relaxed) {
+            crate::recovery::record(format!("delete: confirmation accepted; thread={:?}", std::thread::current().id()));
             deleting();
         }
     };

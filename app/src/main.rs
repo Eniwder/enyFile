@@ -2836,6 +2836,10 @@ impl Controller {
             self.message("項目が選択されていません");
             return;
         }
+        let panes: Vec<_> = self.panes.iter().enumerate().map(|(i, pane)| {
+            format!("pane={} folder={:?} pending={} watch={} search={}", i + 1, pane.model.data.borrow().dir, pane.pending.is_some(), pane.watch.as_ref().is_some_and(shell::Watch::is_alive), pane.found.is_some())
+        }).collect();
+        recovery::record(format!("delete: UI request; pane={} operations={} confirming={}; {}", p + 1, self.operations, self.confirming, panes.join("; ")));
         self.operations += 1;
         self.confirming += 1;
         std::thread::spawn(move || {

@@ -228,7 +228,15 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
             Outcome::Done
         } else {
             let id = (command - FIRST) as usize;
-            match own_verb(&verb(&menu, id), &request.target) {
+            let selected_verb = verb(&menu, id);
+            if selected_verb == "delete" {
+                let targets = match &request.target {
+                    Target::Items(paths) => format!("{paths:?}"),
+                    Target::Background(path) => format!("{path:?}"),
+                };
+                crate::recovery::record(format!("delete: context menu invoked; targets={targets}; handled by Shell context menu (no per-item callbacks)"));
+            }
+            match own_verb(&selected_verb, &request.target) {
                 Some(outcome) => outcome,
                 None => {
                     let info = CMINVOKECOMMANDINFOEX {
@@ -242,7 +250,11 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
                         ptInvoke: point,
                         ..Default::default()
                     };
-                    match menu.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO) {
+                    let result = menu.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO);
+                    if selected_verb == "delete" {
+                        crate::recovery::checkpoint(format!("delete: context menu returned; result={result:?}"));
+                    }
+                    match result {
                         Ok(()) => Outcome::Done,
                         Err(e) => Outcome::Failed(e.to_string()),
                     }

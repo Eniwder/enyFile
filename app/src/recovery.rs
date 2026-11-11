@@ -78,7 +78,7 @@ pub fn start(path: PathBuf) -> Monitor {
         let mut context = String::from("UI heartbeat not received yet");
         let mut stalled = false;
         let mut last_status = Instant::now();
-        append(&path, "UI monitor started");
+        append(&path, &format!("UI monitor started; exe={:?}", std::env::current_exe()));
         while !stopped.load(Ordering::Relaxed) {
             match rx.recv_timeout(Duration::from_secs(15)) {
                 Ok(Event::Heartbeat(next)) => {
@@ -119,7 +119,7 @@ fn append(path: &Path, note: &str) {
         let _ = std::fs::rename(path, path.with_extension("previous.log"));
     }
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "[{}] enyFile {}: {note}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), env!("CARGO_PKG_VERSION"));
+        let _ = writeln!(file, "[{}] enyFile {} pid={}: {note}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), env!("CARGO_PKG_VERSION"), std::process::id());
     }
 }
 
