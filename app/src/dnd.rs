@@ -20,6 +20,12 @@ use windows::{
 use std::os::windows::ffi::OsStrExt;
 
 thread_local! { static ORIGIN: Cell<Option<usize>> = const { Cell::new(None) }; }
+thread_local! { static DROPPING: Cell<bool> = const { Cell::new(false) }; }
+pub(super) fn is_dragging() -> bool { ORIGIN.get().is_some() || WHEEL_ROUTE.get().is_some() || DROPPING.get() }
+struct NativeDrop(bool);
+impl Drop for NativeDrop {
+    fn drop(&mut self) { DROPPING.set(self.0); }
+}
 // Wheel input can otherwise be consumed by the source application's OLE drag loop.
 // The low-level callback only posts a message; UI/COM work happens outside the hook.
 pub(super) const WHEEL_MESSAGE: u32 = WM_APP + 0x431;
@@ -331,6 +337,7 @@ impl IDropTarget_Impl for Target_Impl {
         Ok(())
     }
     fn Drop(&self, data: Ref<IDataObject>, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> WinResult<()> {
+        let _transfer = NativeDrop(DROPPING.replace(true));
         let wheel = self.state.borrow_mut().wheel.take();
         drop(wheel); // No interception while Shell transfer/conflict dialogs are open.
         // Recheck position, setting, identities and existence on release.

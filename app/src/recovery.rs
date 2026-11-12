@@ -19,7 +19,13 @@ static EVENTS: OnceLock<SyncSender<Event>> = OnceLock::new();
 pub struct Activity {
     waiting: Option<Instant>,
     inputs: u64,
+    redraws: u64,
+    render_starts: u64,
     frames: u64,
+    rendering_notifier: bool,
+    retries: u32,
+    rebuild_started: Option<Instant>,
+    pub graphics_generations: u64,
 }
 impl Activity {
     pub fn input(&mut self, now: Instant) {
@@ -29,17 +35,62 @@ impl Activity {
     pub fn frame(&mut self) {
         self.frames += 1;
         self.waiting = None;
+        self.retries = 0;
+        if let Some(started) = self.rebuild_started.take() {
+            record(format!("render recovery: first rendered frame; elapsed_ms={} (before display presentation)", started.elapsed().as_millis()));
+        }
+    }
+    pub fn observe_rendering(&mut self) {
+        self.rendering_notifier = true;
+    }
+    pub fn redraw_event(&mut self) {
+        self.redraws += 1;
+        // Unsupported renderers retain the previous, event-only fallback.
+        if !self.rendering_notifier {
+            self.frame();
+        }
+    }
+    pub fn rendering_started(&mut self) {
+        self.render_starts += 1;
     }
     pub fn retry_redraw(&mut self, now: Instant) -> bool {
         if self.waiting.is_some_and(|since| now.duration_since(since) >= Duration::from_secs(2)) {
             self.waiting = Some(now);
+            self.retries += 1;
             true
         } else {
             false
         }
     }
     pub fn status(&self) -> String {
-        format!("native-inputs={} redraw-events={} awaiting-frame={}", self.inputs, self.frames, self.waiting.is_some())
+        format!("native-inputs={} redraw-events={} render-starts={} render-ends={} rendering-notifier={} awaiting-frame={}", self.inputs, self.redraws, self.render_starts, self.frames, self.rendering_notifier, self.waiting.is_some())
+    }
+    pub fn rebuild_needed(&self) -> bool { self.retries >= 2 }
+    pub fn rendering_setup(&mut self) { self.graphics_generations += 1; }
+    pub fn begin_rebuild(&mut self, now: Instant) {
+        self.rebuild_started = Some(now);
+        self.waiting = None;
+        self.retries = 0;
+    }
+}
+
+/// Coalesce recovery sources and rate-limit expensive native window recreation.
+#[derive(Default)]
+pub struct RebuildSchedule {
+    pending: Option<&'static str>,
+    last: Option<Instant>,
+}
+impl RebuildSchedule {
+    pub fn request(&mut self, reason: &'static str) { self.pending.get_or_insert(reason); }
+    pub fn take_ready(&mut self, now: Instant, safe: bool) -> Option<&'static str> {
+        if !safe { return None; }
+        if self.last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(30)) {
+            if let Some(reason) = self.pending.take() { record(format!("render recovery suppressed during 30s cooldown: {reason}")); }
+            return None;
+        }
+        let reason = self.pending.take()?;
+        self.last = Some(now);
+        Some(reason)
     }
 }
 
@@ -126,6 +177,34 @@ fn append(path: &Path, note: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rebuild_waits_for_safe_state_and_coalesces_during_cooldown() {
+        let now = Instant::now();
+        let mut schedule = RebuildSchedule::default();
+        schedule.request("display on");
+        assert_eq!(schedule.take_ready(now, false), None);
+        assert_eq!(schedule.take_ready(now, true), Some("display on"));
+        schedule.request("watchdog");
+        schedule.request("display on");
+        assert_eq!(schedule.take_ready(now + Duration::from_secs(29), true), None);
+        assert_eq!(schedule.take_ready(now + Duration::from_secs(30), true), None);
+        schedule.request("manual");
+        assert_eq!(schedule.take_ready(now + Duration::from_secs(30), true), Some("manual"));
+        assert_eq!(schedule.take_ready(now + Duration::from_secs(60), true), None);
+    }
+
+    #[test]
+    fn redraw_event_alone_does_not_report_rendering_recovered() {
+        let now = Instant::now();
+        let mut activity = Activity::default();
+        activity.observe_rendering();
+        activity.input(now);
+        activity.redraw_event();
+        activity.rendering_started();
+        assert!(activity.retry_redraw(now + Duration::from_secs(2)));
+        activity.frame();
+        assert!(!activity.retry_redraw(now + Duration::from_secs(4)));
+    }
 
     #[test]
     fn stalled_redraw_retries_without_input_extending_the_deadline() {

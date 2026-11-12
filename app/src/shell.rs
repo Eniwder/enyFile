@@ -1064,17 +1064,30 @@ pub fn take_alt_tap() -> bool {
 pub enum WindowNotice {
     FrameClick,
     Resumed,
+    DisplayOn,
     SessionEnding,
     DragWheel(WPARAM, LPARAM),
     DragTask,
     DragRedraw,
 }
 /// Watches session shutdown, frame clicks, user resume from sleep, and lone Alt taps.
-/// Installed once for the main window, so `on_notice` lives for the process lifetime.
+/// Reinstalled for each recreated native window; released at WM_NCDESTROY.
 pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
     use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::Win32::System::{Power::*, SystemServices::GUID_SESSION_DISPLAY_STATUS};
+    struct WindowHook {
+        notify: Box<dyn Fn(WindowNotice)>,
+        power: Option<HPOWERNOTIFY>,
+        display: Option<u32>,
+    }
+    impl Drop for WindowHook {
+        fn drop(&mut self) {
+            if let Some(power) = self.power.take() { let _ = unsafe { UnregisterPowerSettingNotification(power) }; }
+        }
+    }
     const VK_MENU: usize = 0x12;
     unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, data: usize) -> LRESULT {
+        let hook = data as *mut WindowHook;
         let repeat = lparam.0 & (1 << 30) != 0;
         match msg {
             WM_QUERYENDSESSION => {
@@ -1084,22 +1097,22 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
             }
             WM_ENDSESSION => {
                 if wparam.0 != 0 {
-                    unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::SessionEnding) };
+                    unsafe { ((*hook).notify)(WindowNotice::SessionEnding) };
                 } else {
                     crate::recovery::checkpoint("Windows session end cancelled; application continues".into());
                 }
                 return LRESULT(0);
             }
             crate::dnd::TASK_MESSAGE => {
-                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::DragTask) };
+                unsafe { ((*hook).notify)(WindowNotice::DragTask) };
                 return LRESULT(0);
             }
             crate::dnd::REDRAW_MESSAGE => {
-                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::DragRedraw) };
+                unsafe { ((*hook).notify)(WindowNotice::DragRedraw) };
                 return LRESULT(0);
             }
             crate::dnd::WHEEL_MESSAGE => {
-                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::DragWheel(wparam, lparam)) };
+                unsafe { ((*hook).notify)(WindowNotice::DragWheel(wparam, lparam)) };
                 return LRESULT(0);
             }
             WM_SYSKEYDOWN if wparam.0 == VK_MENU => {
@@ -1115,18 +1128,42 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
             // Before the default handling: a title bar press enters the modal move loop there.
             WM_NCLBUTTONDOWN | WM_NCRBUTTONDOWN | WM_NCMBUTTONDOWN => {
                 ALT_ALONE.set(false);
-                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::FrameClick) };
+                unsafe { ((*hook).notify)(WindowNotice::FrameClick) };
             }
             WM_POWERBROADCAST if wparam.0 == PBT_APMRESUMESUSPEND as usize
                 || wparam.0 == PBT_APMRESUMEAUTOMATIC as usize => {
-                unsafe { (*(data as *const Box<dyn Fn(WindowNotice)>))(WindowNotice::Resumed) };
+                unsafe { ((*hook).notify)(WindowNotice::Resumed) };
+            }
+            WM_POWERBROADCAST if wparam.0 == PBT_POWERSETTINGCHANGE as usize && lparam.0 != 0 => {
+                let setting = lparam.0 as *const POWERBROADCAST_SETTING;
+                if unsafe { (*setting).PowerSetting == GUID_SESSION_DISPLAY_STATUS && (*setting).DataLength == 4 } {
+                    let state = unsafe { std::ptr::read_unaligned(std::ptr::addr_of!((*setting).Data).cast::<u32>()) };
+                    let previous = unsafe { (*hook).display.replace(state) };
+                    crate::recovery::record(format!("session display state: {previous:?} -> {state}; hwnd={hwnd:?}"));
+                    // Registration sends an initial state too. Ignore it to avoid a
+                    // recreate/register/initial-notification recovery loop.
+                    if display_became_on(previous, state) {
+                        unsafe { ((*hook).notify)(WindowNotice::DisplayOn) };
+                    }
+                }
+            }
+            WM_NCDESTROY => {
+                unsafe { let _ = RemoveWindowSubclass(hwnd, Some(proc), _id); drop(Box::from_raw(hook)); }
             }
             _ => {}
         }
         unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
     }
-    let data = Box::into_raw(Box::new(on_notice)) as usize;
-    let _ = unsafe { SetWindowSubclass(hwnd, Some(proc), 1, data) };
+    let power = unsafe { RegisterPowerSettingNotification(HANDLE(hwnd.0), &GUID_SESSION_DISPLAY_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE) };
+    if let Err(error) = &power { crate::recovery::record(format!("display notification registration failed: {error}")); }
+    let data = Box::into_raw(Box::new(WindowHook { notify: on_notice, power: power.ok(), display: None }));
+    if !unsafe { SetWindowSubclass(hwnd, Some(proc), 1, data as usize) }.as_bool() {
+        unsafe { drop(Box::from_raw(data)); }
+        crate::recovery::record("native window hook installation failed".into());
+    }
+}
+fn display_became_on(previous: Option<u32>, state: u32) -> bool {
+    matches!(previous, Some(0 | 2)) && state == 1
 }
 /// Dark title bar to match the dark theme (ignored on Windows versions without it).
 pub fn dark_title_bar(hwnd: HWND) {
@@ -1258,6 +1295,14 @@ pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn display_registration_does_not_trigger_rebuild_loop() {
+        assert!(!super::display_became_on(None, 1));
+        assert!(!super::display_became_on(Some(1), 1));
+        assert!(!super::display_became_on(Some(1), 0));
+        assert!(super::display_became_on(Some(0), 1));
+        assert!(super::display_became_on(Some(2), 1));
+    }
     #[test]
     fn path_extent_failure_is_not_a_short_tree() {
         let root = std::env::temp_dir().join(format!("enyfile-reach-{}", std::process::id()));

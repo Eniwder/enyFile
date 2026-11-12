@@ -14,7 +14,8 @@ selector or renderer and does not register a hard-coded fallback family.
   `6688bc1294fe7117d788937b6c53480169b29c566954af490830d4c09da9516a`.
 - Base: crates.io `parley 0.11.1`, checksum
   `22d2ff88bd3f7d68d1d9b09c7e6209f9a8e8c05088295140a2bcf2e9b17038c5`.
-- Reproducible source delta, excluding the capacity adjustment:
+- Reproducible fallback source delta, excluding the capacity adjustment and
+  API compatibility cleanups described below:
   [`patches/pr689-0.11.1.diff`](patches/pr689-0.11.1.diff).
 - Both packages retain their upstream `LICENSE-MIT` and `LICENSE-APACHE`.
   The MIT option and attribution are included in `THIRD-PARTY-NOTICES.txt`,
@@ -43,6 +44,19 @@ additional production dependencies are included.
 
 This product targets Windows x64. Other platform backends follow the PR's
 type changes but have not been built or tested as part of this backport.
+
+### API compatibility cleanups
+
+- Fontique's 161 fixed four-byte script tags use `Script::from_bytes(*b"....")`
+  instead of the deprecated `from_str_unchecked`. In the locked Parlance 0.1.1,
+  the old constructor delegates to the same byte constructor; tag values and
+  ordering are unchanged.
+- Parley's `bidi::mask` retains `BidiClass::to_icu4c_value` with a function-local
+  `allow(deprecated)`. ICU4X 2.3.0 deprecated this conversion without a const
+  replacement. This preserves the upstream bidirectional algorithm and avoids
+  relying on the private representation or maintaining a second class mapping.
+  Other deprecation warnings remain enabled. Revisit this allowance when
+  migrating Parley/ICU4X.
 
 ## Verification
 

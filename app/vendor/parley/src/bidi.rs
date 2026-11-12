@@ -889,6 +889,10 @@ impl BracketStack {
     }
 }
 
+// ICU4X 2.3 deprecated the numeric conversion without a const replacement.
+// Keep the upstream bit-mask algorithm and its existing class mapping intact.
+// Scope the allowance here so other deprecated API uses still produce warnings.
+#[allow(deprecated)]
 const fn mask(t: BidiClass) -> u32 {
     1 << (t.to_icu4c_value() as u32)
 }

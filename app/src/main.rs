@@ -14,6 +14,7 @@ mod pathid;
 mod pathinput;
 mod props;
 mod recovery;
+mod rendercheck;
 mod rows;
 mod settings;
 mod shell;
@@ -92,6 +93,7 @@ enum Reply {
     AutomaticSkipped(usize, u64, String),
     Changed(usize, PathBuf),
     Resumed,
+    RecoverRendering(&'static str),
     Pasted(usize, PathBuf, Positions, Vec<PathBuf>, Result<PasteOutcome, String>),
     Ask(usize, paste::Question, AnswerTx),
     /// A delete's confirmation was answered yes (or there was none).
@@ -445,6 +447,7 @@ struct Controller {
     operations: usize,
     /// Deletes whose Windows confirmation is not answered yet: pane keys wait.
     confirming: usize,
+    render_rebuild: recovery::RebuildSchedule,
     /// Conflict questions from paste workers; the front one is on screen.
     asking: VecDeque<(usize, paste::Question, AnswerTx)>,
     config: config::Config,
@@ -1894,6 +1897,7 @@ impl Controller {
         }
     }
     fn resumed(&mut self) {
+        self.render_rebuild.request("system resume");
         recovery::record("system resumed; rearming folder watches and refreshing visible panes".into());
         let visible = self.visible();
         for pane in self.panes.iter_mut().take(visible) {
@@ -1922,6 +1926,10 @@ impl Controller {
                 self.message(reason);
             }
             Reply::Resumed => self.resumed(),
+            Reply::RecoverRendering(reason) => {
+                recovery::record(format!("render recovery requested: {reason}"));
+                self.render_rebuild.request(reason);
+            }
             Reply::Listing(p, generation, result) => self.complete(p, generation, result),
             Reply::Finder(p, session, event) => {
                 let Some(current) = self.panes[p].finder.as_mut().filter(|s| s.id == session) else { return };
@@ -2867,6 +2875,11 @@ impl Controller {
         let shift = event.modifiers.shift;
         let alt = event.modifiers.alt;
         let letter = event.text.to_lowercase();
+        if ctrl && shift && !alt && is(Key::F12) {
+            self.render_rebuild.request("manual Ctrl+Shift+F12");
+            self.message("描画を再初期化します");
+            return true;
+        }
         if is(Key::Tab) {
             // Next shown pane, in order.
             let other = (p + 1) % self.visible();
@@ -3366,12 +3379,61 @@ fn crash_log(file: PathBuf) {
     }));
 }
 
+fn rebuild_rendering(
+    ui: &App,
+    reason: &'static str,
+    registration: &RefCell<Option<dnd::Registration>>,
+    attached: &Cell<Option<HWND>>,
+    activity: &RefCell<recovery::Activity>,
+) {
+    let started = Instant::now();
+    let old = hwnd(ui);
+    let position = ui.window().position();
+    let size = ui.window().size();
+    let maximized = ui.window().is_maximized();
+    recovery::checkpoint(format!("render recovery: begin; reason={reason}; hwnd={old:?}; {}", activity.borrow().status()));
+    ui.invoke_dismiss_menu();
+    // Revoke against the old HWND before Windows can reuse its numeric value.
+    let old_registration = registration.borrow_mut().take();
+    drop(old_registration);
+    attached.set(None);
+    activity.borrow_mut().begin_rebuild(started);
+    let result = ui.hide().and_then(|()| {
+        ui.window().set_position(position);
+        ui.window().set_size(size);
+        ui.window().set_maximized(maximized);
+        ui.show()
+    });
+    recovery::checkpoint(format!("render recovery: hide/show returned; elapsed_ms={} old={old:?} new={:?} result={result:?}", started.elapsed().as_millis(), hwnd(ui)));
+    if let Err(error) = result {
+        // A failed re-show must not silently strand the UI hidden.
+        let retry = ui.show();
+        recovery::checkpoint(format!("render recovery: retry show; result={retry:?}"));
+        if retry.is_err() { let _ = slint::quit_event_loop(); }
+        ui.set_message(format!("描画の再初期化に失敗しました: {error}").into());
+        ui.set_message_error(true);
+    } else {
+        ui.set_message("描画を再初期化しました".into());
+        ui.set_message_error(false);
+        ui.window().request_redraw();
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Must be set before any worker threads start. On Windows ordinary hide/show
+    // retains the GL context; this Slint 1.18.1 switch forces suspend/recreation.
+    unsafe { std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1"); }
     // First, before anything loads a DLL by name (the graphics stack, the Shell).
     shell::harden_dll_search();
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
     let network_smoke = args.iter().position(|a| a.as_os_str() == "--network-smoke");
+    let render_smoke = args.iter().position(|a| a.as_os_str() == "--render-recovery-smoke");
+    if let Some(i) = render_smoke {
+        let root = args.get(i + 1).ok_or("--render-recovery-smoke <test-root>")?;
+        std::fs::create_dir_all(root.join("left"))?;
+        std::fs::create_dir_all(root.join("right"))?;
+    }
     if let Some(i) = network_smoke {
         if args.get(i + 2).is_none() {
             return Err("--network-smoke <local-test-root> <remote-test-folder>".into());
@@ -3383,7 +3445,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let root = args.get(i + 1).ok_or("--demo <root> <frames>")?;
         demo::prepare(root)?;
     }
-    let own_root = smoke.or(demo).or(network_smoke).map(|i| args[i + 1].as_path());
+    let own_root = smoke.or(demo).or(network_smoke).or(render_smoke).map(|i| args[i + 1].as_path());
     crash_log(config_file(own_root).with_file_name("crash.log"));
     let config = config::Config::load(config_file(own_root));
     let (left, right) = match smoke {
@@ -3396,6 +3458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (args[i + 1].join("local"), args[i + 2].clone())
         }
         None if demo.is_some() => demo::start_folders(own_root.unwrap()),
+        None if render_smoke.is_some() => (own_root.unwrap().join("left"), own_root.unwrap().join("right")),
         // No arguments: the configured start folders, else the development sandbox.
         None if args.is_empty() => {
             // Developing: the sandbox (and its samples) is there even with start folders set.
@@ -3455,6 +3518,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         active: 1,
         operations: 0,
         confirming: 0,
+        render_rebuild: Default::default(),
         asking: VecDeque::new(),
         config,
         settings: Default::default(),
@@ -3680,17 +3744,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let activity = Rc::new(RefCell::new(recovery::Activity::default()));
     {
+        let rendering_activity = activity.clone();
+        match ui.window().set_rendering_notifier(move |state, _| {
+            match state {
+                slint::RenderingState::BeforeRendering => rendering_activity.borrow_mut().rendering_started(),
+                // This is before swap/presentation, not proof that pixels reached the screen.
+                slint::RenderingState::AfterRendering => rendering_activity.borrow_mut().frame(),
+                slint::RenderingState::RenderingSetup | slint::RenderingState::RenderingTeardown => {
+                    if matches!(state, slint::RenderingState::RenderingSetup) { rendering_activity.borrow_mut().rendering_setup(); }
+                    recovery::record(format!("rendering lifecycle: {state:?}"));
+                }
+                _ => {}
+            }
+        }) {
+            Ok(()) => activity.borrow_mut().observe_rendering(),
+            Err(error) => recovery::record(format!("rendering notifier unavailable: {error}; observing redraw events only")),
+        }
+    }
+    {
         use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
         let c = Rc::downgrade(&controller);
         let activity = activity.clone();
         let weak = ui.as_weak();
         ui.window().on_winit_window_event(move |_, event| {
+            if matches!(event, winit::event::WindowEvent::Focused(_) | winit::event::WindowEvent::Occluded(_)) {
+                recovery::record(format!("native window state: {event:?}; {}", activity.borrow().status()));
+            }
             match event {
-                winit::event::WindowEvent::RedrawRequested => activity.borrow_mut().frame(),
+                winit::event::WindowEvent::RedrawRequested => activity.borrow_mut().redraw_event(),
                 winit::event::WindowEvent::MouseInput { .. }
                 | winit::event::WindowEvent::MouseWheel { .. }
-                | winit::event::WindowEvent::KeyboardInput { .. }
-                | winit::event::WindowEvent::CursorMoved { .. } => activity.borrow_mut().input(Instant::now()),
+                | winit::event::WindowEvent::KeyboardInput { .. } => activity.borrow_mut().input(Instant::now()),
                 _ => {}
             }
             if matches!(event, winit::event::WindowEvent::Focused(true)) {
@@ -3850,6 +3934,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The folders last shown on each drive change all the time; written once here.
                 c.save_config();
             }
+            let _ = slint::quit_event_loop();
             slint::CloseRequestResponse::HideWindow
         });
     }
@@ -3865,13 +3950,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // winit creates the native window once the event loop runs; poll briefly for its HWND.
     let revoke = Rc::new(slint::Timer::default());
     let drop_registration = Rc::new(RefCell::new(None));
+    let attached_window = Rc::new(Cell::new(None));
     {
         let weak = ui.as_weak();
-        let stop = Rc::downgrade(&revoke);
-        let start = Instant::now();
         let registration = drop_registration.clone();
-        revoke.start(slint::TimerMode::Repeated, Duration::from_millis(16), move || {
+        let attached = attached_window.clone();
+        let stop = Rc::downgrade(&revoke);
+        revoke.start(slint::TimerMode::Repeated, Duration::from_millis(50), move || {
             let handle = weak.upgrade().and_then(|ui| hwnd(&ui));
+            if handle == attached.get() { return; }
+            let old_registration = registration.borrow_mut().take();
+            drop(old_registration);
+            attached.set(None);
             if let Some(h) = handle {
                 shell::revoke_drop_target(h);
                 match dnd::register(h, weak.clone()) {
@@ -3889,6 +3979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         shell::WindowNotice::Resumed => { post(Reply::Resumed); }
+                        shell::WindowNotice::DisplayOn => { post(Reply::RecoverRendering("session display on")); }
                         shell::WindowNotice::SessionEnding => end_session(),
                         shell::WindowNotice::DragWheel(wparam, lparam) => {
                             if let Some(ui) = weak.upgrade() { dnd::wheel(&ui, h, wparam, lparam); }
@@ -3900,11 +3991,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
                     c.borrow().apply_opacity();
                 }
-            }
-            if handle.is_some() || start.elapsed() > Duration::from_secs(5) {
-                if let Some(timer) = stop.upgrade() {
-                    timer.stop();
-                }
+                attached.set(Some(h));
+                recovery::record(format!("native window initialized: hwnd={h:?}; drop target, power notifications and opacity reapplied"));
+                if let Some(timer) = stop.upgrade() { timer.stop(); }
             }
         });
     }
@@ -3941,28 +4030,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let heartbeat = slint::Timer::default();
     {
         let c = Rc::downgrade(&controller);
+        let registration = drop_registration.clone();
+        let attached = attached_window.clone();
+        let activity = activity.clone();
+        let native_init = revoke.clone();
         heartbeat.start(slint::TimerMode::Repeated, Duration::from_secs(1), move || {
             if SESSION_ENDING.get() { return; }
             if let Some(c) = c.upgrade() {
-                let Ok(c) = c.try_borrow() else { return };
+                let Ok(mut controller) = c.try_borrow_mut() else { return };
+                let c = &mut *controller;
                 if activity.borrow_mut().retry_redraw(Instant::now()) {
                     if let Some(ui) = c.ui.upgrade() {
                         use slint::winit_030::WinitWindowAccessor;
                         ui.window().with_winit_window(|window| window.request_redraw());
-                        recovery::record(format!("input without redraw for 2s; requesting native redraw; {}", activity.borrow().status()));
+                        recovery::record(format!("input without observed render for 2s; requesting native redraw; {}", activity.borrow().status()));
+                    }
+                    if activity.borrow().rebuild_needed() {
+                        c.render_rebuild.request("render watchdog");
                     }
                 }
                 let panes: Vec<_> = c.panes.iter().enumerate().map(|(p, pane)| {
                     format!("pane={} pending={} folder={}", p + 1, pane.pending.is_some(), shown(&pane.model.data.borrow().dir))
                 }).collect();
                 recovery::heartbeat(format!("active={} operations={} confirming={}; {}; {}", c.active + 1, c.operations, c.confirming, activity.borrow().status(), panes.join("; ")));
+                let ui = c.ui.upgrade();
+                let safe = c.operations == 0 && c.confirming == 0
+                    && ui.as_ref().is_some_and(|ui| ui.window().is_visible() && !ui.window().is_minimized())
+                    && !dnd::is_dragging();
+                let reason = c.render_rebuild.take_ready(Instant::now(), safe);
+                drop(controller);
+                if let (Some(reason), Some(ui)) = (reason, ui) {
+                    rebuild_rendering(&ui, reason, &registration, &attached, &activity);
+                    native_init.restart();
+                }
             }
         });
     }
     let _smoke = smoke.map(|i| smoke::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
     let _network_smoke = network_smoke.map(|i| network_smoke::start(controller.clone(), args[i + 1].clone(), args[i + 2].clone()));
     let _demo = demo.map(|i| demo::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
-    slint::run_event_loop()?;
+    let _render_check = render_smoke.map(|i| rendercheck::start(controller.clone(), activity.clone(), attached_window.clone(), args[i + 1].clone()));
+    // hide/show recovery temporarily leaves no native window. Only a real close
+    // request (above) or session shutdown should terminate the application.
+    slint::run_event_loop_until_quit()?;
     recovery::checkpoint(format!("UI event loop exited; Windows session ending={}", SESSION_ENDING.get()));
     CONTROLLER.with(|c| c.borrow_mut().take());
     Ok(())
