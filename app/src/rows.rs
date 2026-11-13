@@ -61,6 +61,7 @@ pub enum Slot {
 /// Selection works on entry indexes; the cursor can also rest on ".." or a drive.
 /// Comparing, the rows are those of `compare` instead (no "..", no drives).
 pub struct RowsModel {
+    pub clipboard: RefCell<Arc<crate::clipmark::Files>>,
     /// Ctrl+Shift+D: the rows shared with the other pane, and this pane's side (0 old, 1 new).
     pub compare: RefCell<Option<(Rc<compare::Aligned>, usize)>>,
     pub data: RefCell<Arc<Snapshot>>,
@@ -244,6 +245,7 @@ impl RowsModel {
         let spoof = [&location, &name, &ext].iter().any(|s| matches!(s, Cow::Owned(_)));
         Some(Row {
             icon: icon_image(&entry.icon, &entry.type_icon),
+            transfer: self.clipboard.borrow().state(&entry.path),
             hidden: entry.hidden(),
             readonly: entry.attributes & 0x1 != 0,
             tinted: tint.is_some(),

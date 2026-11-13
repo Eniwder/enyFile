@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod agent;
+mod clipmark;
 mod compare;
 mod config;
 mod ctxmenu;
@@ -92,6 +93,7 @@ enum Reply {
     Listing(usize, u64, Result<Arc<Snapshot>, String>),
     AutomaticSkipped(usize, u64, String),
     Changed(usize, PathBuf),
+    ClipboardFiles(u32, Arc<clipmark::Files>),
     Resumed,
     RecoverRendering(&'static str),
     Pasted(usize, PathBuf, Positions, Vec<PathBuf>, Result<PasteOutcome, String>),
@@ -440,6 +442,8 @@ struct Finding {
     filter: Option<String>,
 }
 struct Controller {
+    clipboard_reader: mpsc::SyncSender<()>,
+    clipboard_sequence: Option<u32>,
     ui: slint::Weak<App>,
     /// Always four; the layout (2, 3 or 4 panes) decides how many are shown.
     panes: [Pane; 4],
@@ -515,6 +519,19 @@ fn hwnd(ui: &App) -> Option<HWND> {
     }
 }
 impl Controller {
+    fn set_clipboard_marks(&self, files: Arc<clipmark::Files>) {
+        for pane in &self.panes {
+            *pane.model.clipboard.borrow_mut() = files.clone();
+            for row in 0..pane.model.row_count() { pane.model.notify.row_changed(row); }
+        }
+    }
+    fn sync_clipboard_marks(&mut self) {
+        if self.clipboard_sequence != Some(shell::clipboard_sequence()) {
+            // Clear stale marks immediately, even if the new clipboard owner is busy.
+            if self.clipboard_sequence.take().is_some() { self.set_clipboard_marks(Arc::default()); }
+            let _ = self.clipboard_reader.try_send(());
+        }
+    }
     fn message(&self, message: impl Into<slint::SharedString>) {
         self.show_message(message.into(), false);
     }
@@ -1914,6 +1931,12 @@ impl Controller {
     }
     fn handle(&mut self, reply: Reply) {
         match reply {
+            Reply::ClipboardFiles(sequence, files) => {
+                if sequence == shell::clipboard_sequence() {
+                    self.clipboard_sequence = Some(sequence);
+                    self.set_clipboard_marks(files);
+                }
+            }
             Reply::AutomaticSkipped(p, generation, reason) => {
                 if self.panes[p].generation != generation { return; }
                 let pane = &mut self.panes[p];
@@ -2737,11 +2760,18 @@ impl Controller {
             .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
             .and_then(|h| shell::set_clipboard(h, &paths, cut));
         match result {
-            Ok(()) => self.message(format!(
-                "{}件を{}しました",
-                paths.len(),
-                if cut { "切り取り" } else { "コピー" }
-            )),
+            Ok(()) => {
+                self.clipboard_sequence = Some(shell::clipboard_sequence());
+                self.set_clipboard_marks(Arc::new(clipmark::Files::new(&paths, cut)));
+                // Verify asynchronously in case another application replaced the
+                // clipboard immediately after our write completed.
+                let _ = self.clipboard_reader.try_send(());
+                self.message(format!(
+                    "{}件を{}しました",
+                    paths.len(),
+                    if cut { "切り取り" } else { "コピー" }
+                ));
+            }
             Err(e) => self.fail(e),
         }
     }
@@ -3477,6 +3507,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     let panes = std::array::from_fn(|p| Pane {
         model: Rc::new(RowsModel {
+            clipboard: Default::default(),
             compare: RefCell::new(None),
             data: RefCell::new(Arc::new(Snapshot::default())),
             selection: RefCell::new(Selection::default()),
@@ -3513,6 +3544,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_p2_rows(ModelRc::from(panes[2].model.clone()));
     ui.set_p3_rows(ModelRc::from(panes[3].model.clone()));
     let controller = Rc::new(RefCell::new(Controller {
+        clipboard_reader: clipmark::reader(),
+        clipboard_sequence: None,
         ui: ui.as_weak(),
         panes,
         active: 1,
@@ -4039,6 +4072,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(c) = c.upgrade() {
                 let Ok(mut controller) = c.try_borrow_mut() else { return };
                 let c = &mut *controller;
+                c.sync_clipboard_marks();
                 if activity.borrow_mut().retry_redraw(Instant::now()) {
                     if let Some(ui) = c.ui.upgrade() {
                         use slint::winit_030::WinitWindowAccessor;

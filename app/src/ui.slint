@@ -47,7 +47,7 @@ export global Theme {
 // cells flagged by size-diff / time-diff / attr-diff.
 // `spoof`: the name holds characters that reorder or hide text (shown as marks, in red).
 export struct DropHit { pane: int, row: int, in-name: bool }
-export struct Row { compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, spoof: bool, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
+export struct Row { transfer: int, compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, spoof: bool, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
 // Menu bar item: `checkable` shows a check column; a separator ignores the rest.
 export struct MenuItem { text: string, command: int, checkable: bool, checked: bool, separator: bool }
 export struct Columns { size: bool, date: bool, time: bool, attr: bool, kind: bool }
@@ -684,9 +684,9 @@ component Pane inherits Rectangle {
                         }
                     }
                     if row.location != "" : Text { text: row.location; color: item.lit || row.selected ? item.fg : Theme.dim; overflow: elide; max-width: self.preferred-width; min-width: 16px; horizontal-stretch: 0; vertical-alignment: center; }
-                    Text { text: root.compact && row.ext != "" ? row.name + "." + row.ext : row.name; color: item.name-color; overflow: elide; horizontal-stretch: 1; min-width: row.location != "" ? min(self.preferred-width, 160px) : 40px; vertical-alignment: center; }
+                    Text { text: root.compact && row.ext != "" ? row.name + "." + row.ext : row.name; color: row.transfer == 2 ? item.name-color.transparentize(32.5%) : item.name-color; overflow: elide; horizontal-stretch: 1; min-width: row.location != "" ? min(self.preferred-width, 160px) : 40px; vertical-alignment: center; }
                 }
-                if !root.compact : Text { text: row.ext; color: item.name-color; overflow: elide; width: 40px; vertical-alignment: center; }
+                if !root.compact : Text { text: row.ext; color: row.transfer == 2 ? item.name-color.transparentize(32.5%) : item.name-color; overflow: elide; width: 40px; vertical-alignment: center; }
                 // Comparing: the cells that differ from the other side get a yellow background.
                 if root.columns.size : Rectangle {
                     width: 60px; background: row.size-diff ? Theme.diff-change-bg : transparent;

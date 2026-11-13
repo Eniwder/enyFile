@@ -369,6 +369,15 @@ pub fn read_clipboard() -> Result<(Vec<PathBuf>, u32), String> {
     Ok((paths, effect))
 }
 
+pub fn clipboard_sequence() -> u32 { unsafe { GetClipboardSequenceNumber() } }
+/// Non-file clipboard contents clear decorations; access errors are retried.
+pub fn clipboard_file_marks() -> Result<(Vec<PathBuf>, bool), String> {
+    let data = unsafe { OleGetClipboard() }.map_err(|e| e.to_string())?;
+    let paths = hdrop_paths(&data).unwrap_or_default();
+    let effect = read_dword(&data, preferred_effect()).unwrap_or(DROPEFFECT_COPY.0);
+    Ok((paths, effect & DROPEFFECT_MOVE.0 != 0 && effect & DROPEFFECT_COPY.0 == 0))
+}
+
 /// Files on the clipboard. `paths` is None for Shell items without file system paths.
 pub struct Clip {
     pub paths: Option<Vec<PathBuf>>,

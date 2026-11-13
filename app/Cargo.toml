@@ -1,6 +1,6 @@
 [package]
 name = "enyfile"
-version = "1.11.15"
+version = "1.11.16"
 edition = "2024"
 license = "GPL-3.0-only"
 default-run = "enyfile"
