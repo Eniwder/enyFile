@@ -17,11 +17,17 @@ cargo build --release --manifest-path app/Cargo.toml
 
 ## テスト
 
+初回は `rustup component add clippy rustfmt` で検査ツールを用意する。
+
 ```powershell
+cargo fmt --manifest-path app/Cargo.toml --all -- --check # 整形チェック（書き換えなし）
+cargo clippy --release --locked --manifest-path app/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --release --manifest-path app/Cargo.toml   # 単体テスト
 .\app\Check.ps1                                       # ビルド＋単体テスト＋Explorer 連携スモーク（クリップボードを書き換える）
 .\app\Check.ps1 -NoBuild                              # 再ビルドを省略
 ```
+
+CI と `Check.ps1` は整形チェックと Clippy も実行し、Clippy の警告をエラーとして扱う。`-NoBuild` でもこの検査は実行する。
 
 `Check.ps1` はフォルダ内に `.tools` があればそれを使い（オフラインでビルド）、なければ PATH 上の Rust を使う。スモークのデータは `app/data/` に作成し、次回実行時に削除する。
 

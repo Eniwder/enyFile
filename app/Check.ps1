@@ -13,6 +13,10 @@ if (Test-Path (Join-Path $root '.tools\cargo\bin')) {
     $cargoArgs = @('--offline')
 }
 $manifest = Join-Path $PSScriptRoot 'Cargo.toml'
+& cargo fmt --manifest-path $manifest --all -- --check
+if ($LASTEXITCODE -ne 0) { throw 'Formatting check failed' }
+& cargo clippy --release --locked @cargoArgs --manifest-path $manifest --all-targets --all-features -- -D warnings
+if ($LASTEXITCODE -ne 0) { throw 'Clippy failed' }
 if (-not $NoBuild) {
     & cargo build --release @cargoArgs --manifest-path $manifest
     if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
