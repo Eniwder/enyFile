@@ -15,10 +15,14 @@ use std::{
 };
 use windows::{
     Win32::{
-        Security::Cryptography::{BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCryptCreateHash, BCryptDestroyHash, BCryptFinishHash, BCryptHashData},
+        Security::Cryptography::{
+            BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALG_HANDLE, BCryptCreateHash, BCryptDestroyHash,
+            BCryptFinishHash, BCryptHashData,
+        },
         Storage::FileSystem::{
-            FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetFileVersionInfoSizeW, GetFileVersionInfoW,
-            VS_FIXEDFILEINFO, VerQueryValueW, WIN32_FIND_STREAM_DATA,
+            FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
+            GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
+            WIN32_FIND_STREAM_DATA,
         },
     },
     core::PCWSTR,
@@ -78,7 +82,11 @@ pub fn read(path: &Path) -> Result<Info, String> {
     // Size and times of what a link points to, as opening it would see; the link's own when
     // the target is gone.
     let meta = std::fs::metadata(path).unwrap_or_else(|_| own.clone());
-    let link = own.file_type().is_symlink().then(|| std::fs::read_link(path).ok()).flatten();
+    let link = own
+        .file_type()
+        .is_symlink()
+        .then(|| std::fs::read_link(path).ok())
+        .flatten();
     let streams = streams(path);
     let zone = streams
         .iter()
@@ -93,7 +101,9 @@ pub fn read(path: &Path) -> Result<Info, String> {
         attributes: own.file_attributes(),
         link,
         // A cloud file would be downloaded just to look.
-        version: (!meta.is_dir() && own.file_attributes() & REMOTE == 0).then(|| version(path)).flatten(),
+        version: (!meta.is_dir() && own.file_attributes() & REMOTE == 0)
+            .then(|| version(path))
+            .flatten(),
         zone,
         streams,
     })
@@ -104,7 +114,11 @@ pub fn read(path: &Path) -> Result<Info, String> {
 /// same data twice (or another drive, or loops). The directory listing carries each entry's
 /// size and reparse tag (std reads both from the find data), so no file is opened.
 /// `progress` gets the totals after each batch of entries and stops the work by returning false.
-pub fn usage(root: &Path, cancel: &AtomicBool, mut progress: impl FnMut(&Usage) -> bool) -> Result<Option<Usage>, String> {
+pub fn usage(
+    root: &Path,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(&Usage) -> bool,
+) -> Result<Option<Usage>, String> {
     const BATCH: usize = 512;
     let mut total = Usage::default();
     let mut pending = vec![root.to_path_buf()];
@@ -168,7 +182,13 @@ fn version(path: &Path) -> Option<String> {
         let mut fixed = std::ptr::null_mut();
         let mut len = 0;
         let root: Vec<u16> = "\\".encode_utf16().chain(Some(0)).collect();
-        if !VerQueryValueW(block.as_ptr().cast(), PCWSTR(root.as_ptr()), &mut fixed, &mut len).as_bool()
+        if !VerQueryValueW(
+            block.as_ptr().cast(),
+            PCWSTR(root.as_ptr()),
+            &mut fixed,
+            &mut len,
+        )
+        .as_bool()
             || fixed.is_null()
             || (len as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>()
         {
@@ -176,7 +196,13 @@ fn version(path: &Path) -> Option<String> {
         }
         let f = std::ptr::read_unaligned(fixed as *const VS_FIXEDFILEINFO);
         let (ms, ls) = (f.dwFileVersionMS, f.dwFileVersionLS);
-        Some(format!("{}.{}.{}.{}", ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF))
+        Some(format!(
+            "{}.{}.{}.{}",
+            ms >> 16,
+            ms & 0xFFFF,
+            ls >> 16,
+            ls & 0xFFFF
+        ))
     }
 }
 
@@ -185,11 +211,22 @@ fn streams(path: &Path) -> Vec<(String, u64)> {
     let mut data = WIN32_FIND_STREAM_DATA::default();
     let mut found = Vec::new();
     // Fails with ERROR_HANDLE_EOF when there is no stream at all (most folders).
-    let Ok(handle) = (unsafe { FindFirstStreamW(PCWSTR(wide.as_ptr()), FindStreamInfoStandard, &mut data as *mut _ as *mut _, None) }) else {
+    let Ok(handle) = (unsafe {
+        FindFirstStreamW(
+            PCWSTR(wide.as_ptr()),
+            FindStreamInfoStandard,
+            &mut data as *mut _ as *mut _,
+            None,
+        )
+    }) else {
         return found;
     };
     loop {
-        let len = data.cStreamName.iter().position(|&c| c == 0).unwrap_or(data.cStreamName.len());
+        let len = data
+            .cStreamName
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(data.cStreamName.len());
         let full = String::from_utf16_lossy(&data.cStreamName[..len]);
         // ":name:$DATA"; the unnamed main stream is "::$DATA".
         let name = full.strip_prefix(':').unwrap_or(&full);
@@ -211,13 +248,24 @@ fn zone(path: &Path) -> Option<Zone> {
     stream.push(ZONE_STREAM);
     // Anyone can write this stream: read a bounded amount.
     let mut bytes = Vec::new();
-    std::fs::File::open(PathBuf::from(stream)).ok()?.take(64 * 1024).read_to_end(&mut bytes).ok()?;
+    std::fs::File::open(PathBuf::from(stream))
+        .ok()?
+        .take(64 * 1024)
+        .read_to_end(&mut bytes)
+        .ok()?;
     Some(parse_zone(&bytes))
 }
 
 pub fn parse_zone(bytes: &[u8]) -> Zone {
     let text = match bytes {
-        [0xFF, 0xFE, rest @ ..] => String::from_utf16_lossy(&rest.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()),
+        [0xFF, 0xFE, rest @ ..] => String::from_utf16_lossy(
+            &rest
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
+        ),
         [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
         _ => String::from_utf8_lossy(bytes).into_owned(),
     };
@@ -228,7 +276,9 @@ pub fn parse_zone(bytes: &[u8]) -> Zone {
             section = line.eq_ignore_ascii_case("[ZoneTransfer]");
             continue;
         }
-        let Some((key, value)) = line.split_once('=').filter(|_| section) else { continue };
+        let Some((key, value)) = line.split_once('=').filter(|_| section) else {
+            continue;
+        };
         let value = value.trim();
         match key.trim().to_ascii_lowercase().as_str() {
             "zoneid" => zone.id = value.parse().ok(),
@@ -259,11 +309,19 @@ impl Drop for Hash {
     }
 }
 fn check(status: windows::Win32::Foundation::NTSTATUS) -> Result<(), String> {
-    if status.0 < 0 { Err(format!("CNG エラー 0x{:08X}", status.0 as u32)) } else { Ok(()) }
+    if status.0 < 0 {
+        Err(format!("CNG エラー 0x{:08X}", status.0 as u32))
+    } else {
+        Ok(())
+    }
 }
 /// SHA-256 of the file as lowercase hex; Ok(None) when cancelled. `progress` gets the bytes
 /// read so far after each chunk and stops the work by returning false.
-pub fn sha256(path: &Path, cancel: &AtomicBool, mut progress: impl FnMut(u64) -> bool) -> Result<Option<String>, String> {
+pub fn sha256(
+    path: &Path,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(u64) -> bool,
+) -> Result<Option<String>, String> {
     const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
     // Shares read, write and delete (Rust's default): hashing never locks the file.
     let mut file = std::fs::OpenOptions::new()
@@ -330,7 +388,7 @@ fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -339,10 +397,21 @@ fn grouped(n: u64) -> String {
 }
 /// `format_size` leaves small sizes without a unit (the list's size column).
 fn bytes(n: u64) -> String {
-    if n < 1000 { format!("{n} Byte") } else { listing::format_size(n) }
+    if n < 1000 {
+        format!("{n} Byte")
+    } else {
+        listing::format_size(n)
+    }
 }
 fn time(t: Option<SystemTime>) -> String {
-    t.map_or_else(|| "—".into(), |t| chrono::DateTime::<chrono::Local>::from(t).format("%Y/%m/%d %H:%M:%S").to_string())
+    t.map_or_else(
+        || "—".into(),
+        |t| {
+            chrono::DateTime::<chrono::Local>::from(t)
+                .format("%Y/%m/%d %H:%M:%S")
+                .to_string()
+        },
+    )
 }
 fn attribute_names(attributes: u32) -> String {
     let names: Vec<&str> = [
@@ -360,7 +429,11 @@ fn attribute_names(attributes: u32) -> String {
     .filter(|&&(bit, _)| attributes & bit != 0)
     .map(|&(_, name)| name)
     .collect();
-    if names.is_empty() { "なし".into() } else { names.join("、") }
+    if names.is_empty() {
+        "なし".into()
+    } else {
+        names.join("、")
+    }
 }
 /// URLs and stream names come from whoever wrote the file: cut long ones short.
 fn text(value: &str) -> String {
@@ -372,19 +445,31 @@ fn text(value: &str) -> String {
     }
 }
 fn row(label: &str, value: impl Into<String>) -> PropRow {
-    PropRow { label: label.into(), value: value.into().into(), ..PropRow::default() }
+    PropRow {
+        label: label.into(),
+        value: value.into().into(),
+        ..PropRow::default()
+    }
 }
 fn heading(label: &str) -> PropRow {
-    PropRow { label: label.into(), heading: true, ..PropRow::default() }
+    PropRow {
+        label: label.into(),
+        heading: true,
+        ..PropRow::default()
+    }
 }
 
 impl Controller {
     /// Alt+Enter on one file or folder. Several items, a drive or "..": Windows' properties.
     pub(super) fn open_props(&mut self, p: usize) -> bool {
         let items = self.targets(p);
-        let [path] = items.as_slice() else { return false };
+        let [path] = items.as_slice() else {
+            return false;
+        };
         let data = self.data(p);
-        let Some(entry) = data.rows.iter().find(|e| e.path.as_ref() == path) else { return false };
+        let Some(entry) = data.rows.iter().find(|e| e.path.as_ref() == path) else {
+            return false;
+        };
         self.close_props();
         self.props_opened += 1;
         let id = self.props_opened;
@@ -423,7 +508,10 @@ impl Controller {
             post(Reply::PropsShow(id));
         });
         if let Some(ui) = self.ui.upgrade() {
-            let name = entry.path.file_name().map_or_else(|| shown(&entry.path), |n| listing::visible(&n.to_string_lossy()).into_owned());
+            let name = entry.path.file_name().map_or_else(
+                || shown(&entry.path),
+                |n| listing::visible(&n.to_string_lossy()).into_owned(),
+            );
             ui.set_props_name(name.into());
             ui.set_props_folder(entry.path.parent().map(shown).unwrap_or_default().into());
         }
@@ -448,7 +536,9 @@ impl Controller {
         }
     }
     pub(super) fn close_props(&mut self) {
-        let Some(props) = self.props.take() else { return };
+        let Some(props) = self.props.take() else {
+            return;
+        };
         props.cancel.store(true, Ordering::Relaxed);
         if let Some(ui) = self.ui.upgrade() {
             ui.set_props_open(false);
@@ -457,7 +547,9 @@ impl Controller {
         self.apply_opacity();
     }
     pub(super) fn props_info(&mut self, id: u64, info: Result<Info, String>) {
-        let Some(props) = self.props.as_mut().filter(|p| p.id == id) else { return };
+        let Some(props) = self.props.as_mut().filter(|p| p.id == id) else {
+            return;
+        };
         props.hash = match &info {
             Ok(info) if info.directory => HashState::None,
             Ok(info) if info.attributes & REMOTE != 0 => HashState::Waiting,
@@ -472,7 +564,9 @@ impl Controller {
         self.props_show(id);
     }
     pub(super) fn props_hash(&mut self, id: u64, hashing: Hashing) {
-        let Some(props) = self.props.as_mut().filter(|p| p.id == id) else { return };
+        let Some(props) = self.props.as_mut().filter(|p| p.id == id) else {
+            return;
+        };
         props.hash = match hashing {
             Hashing::Progress(done, total) => HashState::Running(done, total),
             Hashing::Done(hex) => HashState::Done(hex),
@@ -481,7 +575,9 @@ impl Controller {
         self.props_rows();
     }
     pub(super) fn props_usage(&mut self, id: u64, measuring: Measuring) {
-        let Some(props) = self.props.as_mut().filter(|p| p.id == id) else { return };
+        let Some(props) = self.props.as_mut().filter(|p| p.id == id) else {
+            return;
+        };
         props.usage = match measuring {
             Measuring::Progress(usage) => UsageState::Running(usage),
             Measuring::Done(usage) => UsageState::Done(usage),
@@ -491,10 +587,16 @@ impl Controller {
     }
     /// H: start the hash of a cloud file, or copy a finished one.
     pub(super) fn props_hash_key(&mut self) {
-        let Some(props) = self.props.as_mut() else { return };
+        let Some(props) = self.props.as_mut() else {
+            return;
+        };
         match &props.hash {
             HashState::Waiting => {
-                let size = props.info.as_ref().and_then(|i| i.as_ref().ok()).map_or(0, |i| i.size);
+                let size = props
+                    .info
+                    .as_ref()
+                    .and_then(|i| i.as_ref().ok())
+                    .map_or(0, |i| i.size);
                 props.hash = HashState::Running(0, size);
                 let (id, path, cancel) = (props.id, props.path.clone(), props.cancel.clone());
                 std::thread::spawn(move || hash_job(id, &path, size, &cancel));
@@ -526,10 +628,17 @@ impl Controller {
         let Some(props) = &self.props else { return };
         let (p, path) = (props.pane, props.path.clone());
         self.close_props();
-        self.show_menu(p, ctxmenu::Target::Items(vec![path]), false, Some("properties"));
+        self.show_menu(
+            p,
+            ctxmenu::Target::Items(vec![path]),
+            false,
+            Some("properties"),
+        );
     }
     fn props_list(&self) -> Vec<PropRow> {
-        let Some(props) = &self.props else { return Vec::new() };
+        let Some(props) = &self.props else {
+            return Vec::new();
+        };
         let mut rows = vec![row("種類", props.kind.clone())];
         let info = match &props.info {
             None => {
@@ -548,13 +657,30 @@ impl Controller {
         match &props.usage {
             UsageState::None => {}
             UsageState::Running(u) => {
-                let dim = |label: &str, value: String| PropRow { dim: true, ..row(label, value) };
+                let dim = |label: &str, value: String| PropRow {
+                    dim: true,
+                    ..row(label, value)
+                };
                 rows.push(dim("サイズ", format!("計算中… {}", bytes(u.size))));
-                rows.push(dim("内容", format!("ファイル{}、フォルダー{}", grouped(u.files), grouped(u.folders))));
+                rows.push(dim(
+                    "内容",
+                    format!(
+                        "ファイル{}、フォルダー{}",
+                        grouped(u.files),
+                        grouped(u.folders)
+                    ),
+                ));
             }
             UsageState::Done(u) => {
                 rows.push(row("サイズ", bytes(u.size)));
-                rows.push(row("内容", format!("ファイル{}、フォルダー{}", grouped(u.files), grouped(u.folders))));
+                rows.push(row(
+                    "内容",
+                    format!(
+                        "ファイル{}、フォルダー{}",
+                        grouped(u.files),
+                        grouped(u.folders)
+                    ),
+                ));
                 let mut skipped = Vec::new();
                 if u.links > 0 {
                     skipped.push(format!("リンク{}件", grouped(u.links)));
@@ -566,7 +692,10 @@ impl Controller {
                     rows.push(row("集計外", skipped.join("、")));
                 }
             }
-            UsageState::Failed(e) => rows.push(PropRow { dim: true, ..row("サイズ", format!("計算できません: {e}")) }),
+            UsageState::Failed(e) => rows.push(PropRow {
+                dim: true,
+                ..row("サイズ", format!("計算できません: {e}"))
+            }),
         }
         rows.push(row("更新日時", time(info.modified)));
         rows.push(row("作成日時", time(info.created)));
@@ -579,28 +708,55 @@ impl Controller {
         }
         if let Some(zone) = &info.zone {
             rows.push(heading("ダウンロード情報"));
-            rows.push(row("取得元", zone.host.as_deref().map_or_else(|| "記録なし".into(), text)));
+            rows.push(row(
+                "取得元",
+                zone.host.as_deref().map_or_else(|| "記録なし".into(), text),
+            ));
             if let Some(referrer) = &zone.referrer {
                 rows.push(row("参照元", text(referrer)));
             }
-            rows.push(row("ゾーン", zone.id.map_or_else(|| "記録なし".into(), zone_name)));
+            rows.push(row(
+                "ゾーン",
+                zone.id.map_or_else(|| "記録なし".into(), zone_name),
+            ));
         }
         rows.push(heading("詳細情報"));
         let sha = match &props.hash {
             HashState::None => None,
-            HashState::Waiting => Some(("クラウド上のファイルです。H で計算（ダウンロードされます）".to_string(), false)),
+            HashState::Waiting => Some((
+                "クラウド上のファイルです。H で計算（ダウンロードされます）".to_string(),
+                false,
+            )),
             HashState::Running(done, total) => {
                 let percent = if *total == 0 { 0 } else { done * 100 / total };
-                Some((format!("計算中… {percent}%（{} / {}）", bytes(*done), bytes(*total)), false))
+                Some((
+                    format!("計算中… {percent}%（{} / {}）", bytes(*done), bytes(*total)),
+                    false,
+                ))
             }
             HashState::Done(hex) => Some((hex.clone(), true)),
             HashState::Failed(e) => Some((format!("計算できません: {e}"), false)),
         };
         if let Some((value, finished)) = sha {
-            rows.push(PropRow { mono: finished, dim: !finished, ..row("SHA-256", value) });
+            rows.push(PropRow {
+                mono: finished,
+                dim: !finished,
+                ..row("SHA-256", value)
+            });
         }
-        let streams: Vec<String> = info.streams.iter().map(|(name, size)| format!("{}（{}）", text(name), bytes(*size))).collect();
-        rows.push(row("ADS", if streams.is_empty() { "なし".into() } else { streams.join("、") }));
+        let streams: Vec<String> = info
+            .streams
+            .iter()
+            .map(|(name, size)| format!("{}（{}）", text(name), bytes(*size)))
+            .collect();
+        rows.push(row(
+            "ADS",
+            if streams.is_empty() {
+                "なし".into()
+            } else {
+                streams.join("、")
+            },
+        ));
         rows
     }
     fn props_rows(&self) {
@@ -657,9 +813,17 @@ mod tests {
     use super::*;
     #[test]
     fn file_version() {
-        let notepad = PathBuf::from(std::env::var("SystemRoot").unwrap()).join(r"System32\notepad.exe");
+        let notepad =
+            PathBuf::from(std::env::var("SystemRoot").unwrap()).join(r"System32\notepad.exe");
         let found = read(&notepad).unwrap().version.unwrap();
-        assert_eq!(found.split('.').filter(|n| n.parse::<u16>().is_ok()).count(), 4, "{found}");
+        assert_eq!(
+            found
+                .split('.')
+                .filter(|n| n.parse::<u16>().is_ok())
+                .count(),
+            4,
+            "{found}"
+        );
         let text = std::env::temp_dir().join(format!("enyfile-version-{}.txt", std::process::id()));
         std::fs::write(&text, "no version here").unwrap();
         assert_eq!(read(&text).unwrap().version, None);
@@ -670,14 +834,25 @@ mod tests {
         let text = b"[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=https://example.com/download\r\nHostUrl=https://example.com/files/sample.zip\r\n";
         assert_eq!(
             parse_zone(text),
-            Zone { id: Some(3), host: Some("https://example.com/files/sample.zip".into()), referrer: Some("https://example.com/download".into()) }
+            Zone {
+                id: Some(3),
+                host: Some("https://example.com/files/sample.zip".into()),
+                referrer: Some("https://example.com/download".into())
+            }
         );
         // UTF-16 with a BOM, keys in any case, other sections ignored.
         let wide: Vec<u8> = "\u{FEFF}[Other]\nHostUrl=x\n[zonetransfer]\nzoneid=4\n"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect();
-        assert_eq!(parse_zone(&wide), Zone { id: Some(4), host: None, referrer: None });
+        assert_eq!(
+            parse_zone(&wide),
+            Zone {
+                id: Some(4),
+                host: None,
+                referrer: None
+            }
+        );
         assert_eq!(parse_zone(b"garbage\0\xff"), Zone::default());
     }
     #[test]
@@ -698,7 +873,10 @@ mod tests {
             sha256(&empty, &never, |_| true).unwrap().as_deref(),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         );
-        assert_eq!(sha256(&file, &AtomicBool::new(true), |_| true).unwrap(), None);
+        assert_eq!(
+            sha256(&file, &AtomicBool::new(true), |_| true).unwrap(),
+            None
+        );
         assert_eq!(sha256(&file, &never, |_| false).unwrap(), None);
         // A downloaded file: the browser's stream shows up in the streams and as the zone.
         let mut stream = file.as_os_str().to_owned();
@@ -707,8 +885,14 @@ mod tests {
         std::fs::write(PathBuf::from(stream), zone).unwrap();
         let info = read(&file).unwrap();
         assert_eq!(info.size, 3);
-        assert_eq!(info.streams, vec![("Zone.Identifier".to_string(), zone.len() as u64)]);
-        assert_eq!(info.zone.unwrap().host.as_deref(), Some("https://example.com/a.zip"));
+        assert_eq!(
+            info.streams,
+            vec![("Zone.Identifier".to_string(), zone.len() as u64)]
+        );
+        assert_eq!(
+            info.zone.unwrap().host.as_deref(),
+            Some("https://example.com/a.zip")
+        );
         assert!(read(&dir).unwrap().streams.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -721,11 +905,25 @@ mod tests {
         std::fs::write(dir.join("one.txt"), "12345").unwrap();
         std::fs::write(dir.join(r"a\b\two.bin"), vec![7u8; 100_000]).unwrap();
         // A junction back to the top folder: entering it would loop.
-        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(dir.join(r"a\loop")).arg(&dir).output().unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(dir.join(r"a\loop"))
+            .arg(&dir)
+            .output()
+            .unwrap();
         assert!(made.status.success());
         let never = AtomicBool::new(false);
         let found = usage(&dir, &never, |_| true).unwrap().unwrap();
-        assert_eq!((found.size, found.files, found.folders, found.links, found.unreadable), (100_005, 2, 3, 1, 0));
+        assert_eq!(
+            (
+                found.size,
+                found.files,
+                found.folders,
+                found.links,
+                found.unreadable
+            ),
+            (100_005, 2, 3, 1, 0)
+        );
         assert_eq!(usage(&dir, &AtomicBool::new(true), |_| true).unwrap(), None);
         assert_eq!(usage(&dir, &never, |_| false).unwrap(), None);
         assert!(usage(&dir.join("missing"), &never, |_| true).is_err());

@@ -61,7 +61,8 @@ fn find_rc() -> Option<PathBuf> {
         Ok("x86") => "x86",
         _ => "x64",
     };
-    let pf = std::env::var_os("ProgramFiles(x86)").unwrap_or_else(|| r"C:\Program Files (x86)".into());
+    let pf =
+        std::env::var_os("ProgramFiles(x86)").unwrap_or_else(|| r"C:\Program Files (x86)".into());
     let bin = PathBuf::from(pf).join(r"Windows Kits\10\bin");
     let mut found: Vec<PathBuf> = std::fs::read_dir(bin)
         .ok()?

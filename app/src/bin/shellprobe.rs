@@ -1,15 +1,20 @@
-﻿//! Test stand-in for Explorer, used only by the smoke test.
+//! Test stand-in for Explorer, used only by the smoke test.
 //!   paste <folder>             invoke the Shell's own "paste" verb on a folder
 //!   copy|cut <file> <ready>    put the Shell's own data object on the clipboard, write <ready>,
 //!                              keep it alive; `cut` exits 0 once the target reports Paste Succeeded
 use std::{
     os::windows::ffi::OsStrExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use windows::{
     Win32::{
-        System::{Com::*, DataExchange::{GetClipboardSequenceNumber, RegisterClipboardFormatW}, Memory::*, Ole::*},
+        System::{
+            Com::*,
+            DataExchange::{GetClipboardSequenceNumber, RegisterClipboardFormatW},
+            Memory::*,
+            Ole::*,
+        },
         UI::{Shell::*, WindowsAndMessaging::*},
     },
     core::{PCSTR, PCWSTR, w},
@@ -32,7 +37,7 @@ fn pump(until: Duration, mut done: impl FnMut() -> bool) -> bool {
     }
     false
 }
-fn wide(path: &PathBuf) -> Vec<u16> {
+fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 fn etc(cf: u32) -> FORMATETC {
@@ -50,7 +55,8 @@ fn dword(data: &IDataObject, cf: u32) -> Option<u32> {
         let value = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
             let h = medium.u.hGlobal;
             let ptr = GlobalLock(h);
-            let value = (!ptr.is_null() && GlobalSize(h) >= 4).then(|| u32::from_le_bytes(*ptr.cast::<[u8; 4]>()));
+            let value = (!ptr.is_null() && GlobalSize(h) >= 4)
+                .then(|| u32::from_le_bytes(*ptr.cast::<[u8; 4]>()));
             let _ = GlobalUnlock(h);
             value
         } else {
@@ -72,11 +78,12 @@ fn main() -> windows::core::Result<()> {
                 let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None)?;
                 let menu: IContextMenu = folder.BindToHandler(None, &BHID_SFUIObject)?;
                 let popup = CreatePopupMenu()?;
-                menu.QueryContextMenu(popup, 0, 1, 0x7fff, CMF_NORMAL).ok()?;
+                menu.QueryContextMenu(popup, 0, 1, 0x7fff, CMF_NORMAL)
+                    .ok()?;
                 let info = CMINVOKECOMMANDINFO {
                     cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
                     fMask: SEE_MASK_FLAG_NO_UI, // same bit as CMIC_MASK_FLAG_NO_UI
-                    lpVerb: PCSTR(b"paste\0".as_ptr()),
+                    lpVerb: PCSTR(c"paste".as_ptr().cast()),
                     nShow: SW_SHOWNORMAL.0,
                     ..Default::default()
                 };
@@ -104,12 +111,18 @@ fn main() -> windows::core::Result<()> {
                     u: STGMEDIUM_0 { hGlobal: h },
                     pUnkForRelease: std::mem::ManuallyDrop::new(None),
                 };
-                data.SetData(&etc(RegisterClipboardFormatW(w!("Preferred DropEffect"))), &medium, true)?;
+                data.SetData(
+                    &etc(RegisterClipboardFormatW(w!("Preferred DropEffect"))),
+                    &medium,
+                    true,
+                )?;
                 OleSetClipboard(&data)?;
                 let sequence = GetClipboardSequenceNumber();
                 std::fs::write(&args[2], b"ready").unwrap();
                 let succeeded = RegisterClipboardFormatW(w!("Paste Succeeded"));
-                let reported = pump(Duration::from_secs(30), || dword(&data, succeeded) == Some(2));
+                let reported = pump(Duration::from_secs(30), || {
+                    dword(&data, succeeded) == Some(2)
+                });
                 // Let the target finish its own clipboard handling before we exit.
                 pump(Duration::from_millis(1500), || false);
                 if GetClipboardSequenceNumber() == sequence {

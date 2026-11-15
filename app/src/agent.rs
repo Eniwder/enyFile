@@ -26,9 +26,14 @@ const MEMORY_BYTES: usize = 256 * 1024;
 
 fn read_limited(mut input: impl Read, limit: usize) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    (&mut input).take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    (&mut input)
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
     if bytes.len() > limit {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("入力が上限の {limit} バイトを超えています")));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("入力が上限の {limit} バイトを超えています"),
+        ));
     }
     Ok(bytes)
 }
@@ -38,15 +43,22 @@ fn json_line(input: &mut impl BufRead, bytes: &mut Vec<u8>) -> std::io::Result<b
     bytes.clear();
     loop {
         let chunk = input.fill_buf()?;
-        if chunk.is_empty() { return Ok(!bytes.is_empty()); }
+        if chunk.is_empty() {
+            return Ok(!bytes.is_empty());
+        }
         let end = chunk.iter().position(|&b| b == b'\n');
         let n = end.map_or(chunk.len(), |n| n + 1);
         if bytes.len() + n > JSON_LINE_BYTES {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "エージェントのJSONLが1行16 MiBの上限を超えました"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "エージェントのJSONLが1行16 MiBの上限を超えました",
+            ));
         }
         bytes.extend_from_slice(&chunk[..n]);
         input.consume(n);
-        if end.is_some() { return Ok(true); }
+        if end.is_some() {
+            return Ok(true);
+        }
     }
 }
 
@@ -59,7 +71,9 @@ fn stderr_tail(mut input: impl Read) -> std::io::Result<String> {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             result => result?,
         };
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         let discard = (tail.len() + n).saturating_sub(STDERR_BYTES);
         tail.drain(..discard);
         tail.extend(&chunk[..n]);
@@ -67,7 +81,10 @@ fn stderr_tail(mut input: impl Read) -> std::io::Result<String> {
     let bytes: Vec<u8> = tail.into_iter().collect();
     // A retained tail can start midway through UTF-8; lossy decoding is intentional.
     let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<_> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<_> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     Ok(lines[lines.len().saturating_sub(6)..].join("\n"))
 }
 
@@ -216,7 +233,9 @@ pub fn version(configured: Option<&Path>) -> Result<String, String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     let output = read_limited(child.stdout.take().unwrap(), STDERR_BYTES);
-    if output.is_err() { let _ = child.kill(); }
+    if output.is_err() {
+        let _ = child.kill();
+    }
     let _ = child.wait();
     let output = output.map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&output);
@@ -237,7 +256,9 @@ pub fn start(request: Request, sink: impl Fn(Event) -> bool + Send + 'static) ->
         // Checked on every end, cancelled or failed too: the agent may have written before.
         if let Some(approved) = &request.approved {
             match read_memory_file(&request.memory) {
-                Ok(now) if now != *approved => { sink(Event::Memory(now)); }
+                Ok(now) if now != *approved => {
+                    sink(Event::Memory(now));
+                }
                 Ok(_) => {}
                 Err(e) => outcome = Outcome::Failed(format!("メモリファイルを確認できません: {e}")),
             }
@@ -289,7 +310,13 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
         _ => cut_memory(memory),
     };
     let writable = writable(request, |dir| {
-        sink(Event::Log(Kind::Info, format!("追加フォルダが見つからないため除きました: {}", dir.display())));
+        sink(Event::Log(
+            Kind::Info,
+            format!(
+                "追加フォルダが見つからないため除きました: {}",
+                dir.display()
+            ),
+        ));
     });
     let prompt = codex::prompt(request, &memory, &writable);
     let mut command = codex::command(&program, request, &writable);
@@ -306,7 +333,8 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
     };
     // Assigned before the prompt is written, so whatever the agent runs belongs to the job.
     let job = Job::new().and_then(|job| unsafe {
-        AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())).map_err(|e| e.to_string())?;
+        AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle()))
+            .map_err(|e| e.to_string())?;
         Ok(job)
     });
     match job {
@@ -328,9 +356,10 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
         });
     }
     // Only the end of stderr is kept: it explains a failure that has no JSON error event.
-    let stderr = child.stderr.take().map(|err| {
-        std::thread::spawn(move || stderr_tail(err))
-    });
+    let stderr = child
+        .stderr
+        .take()
+        .map(|err| std::thread::spawn(move || stderr_tail(err)));
     let mut parser = codex::Parser::default();
     let mut read_error = None;
     if let Some(out) = child.stdout.take() {
@@ -338,8 +367,12 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
         let mut bytes = Vec::new();
         'read: loop {
             let line = match json_line(&mut out, &mut bytes).and_then(|more| {
-                if !more { return Ok(None); }
-                std::str::from_utf8(&bytes).map(Some).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                if !more {
+                    return Ok(None);
+                }
+                std::str::from_utf8(&bytes)
+                    .map(Some)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             }) {
                 Ok(Some(line)) => line,
                 Ok(None) => break,
@@ -359,8 +392,12 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
         }
     }
     let status = child.wait();
-    let stderr = stderr.and_then(|t| t.join().ok()).unwrap_or_else(|| Ok(String::new()));
-    if let Some(error) = read_error { return Outcome::Failed(error); }
+    let stderr = stderr
+        .and_then(|t| t.join().ok())
+        .unwrap_or_else(|| Ok(String::new()));
+    if let Some(error) = read_error {
+        return Outcome::Failed(error);
+    }
     if shared.cancelled.load(Ordering::SeqCst) {
         return Outcome::Cancelled;
     }
@@ -373,7 +410,9 @@ fn execute(request: &Request, shared: &Shared, sink: &dyn Fn(Event) -> bool) -> 
     };
     match status {
         Ok(status) if status.success() => Outcome::Done,
-        Ok(status) if stderr.is_empty() => Outcome::Failed(format!("終了コード {}", status.code().unwrap_or(-1))),
+        Ok(status) if stderr.is_empty() => {
+            Outcome::Failed(format!("終了コード {}", status.code().unwrap_or(-1)))
+        }
         Ok(_) => Outcome::Failed(stderr),
         Err(e) => Outcome::Failed(e.to_string()),
     }
@@ -424,7 +463,11 @@ pub fn memory_diff(old: &str, new: &str) -> Vec<(i32, String)> {
         let mut t = vec![0u32; (n + 1) * w];
         for i in (0..n).rev() {
             for j in (0..m).rev() {
-                t[i * w + j] = if a[i] == b[j] { t[(i + 1) * w + j + 1] + 1 } else { t[(i + 1) * w + j].max(t[i * w + j + 1]) };
+                t[i * w + j] = if a[i] == b[j] {
+                    t[(i + 1) * w + j + 1] + 1
+                } else {
+                    t[(i + 1) * w + j].max(t[i * w + j + 1])
+                };
             }
         }
         let (mut i, mut j) = (0, 0);
@@ -444,7 +487,11 @@ pub fn memory_diff(old: &str, new: &str) -> Vec<(i32, String)> {
     if ops.iter().all(|(kind, _)| *kind == 0) {
         return Vec::new();
     }
-    let near = |k: usize| ops[k.saturating_sub(1)..(k + 2).min(ops.len())].iter().any(|(kind, _)| *kind != 0);
+    let near = |k: usize| {
+        ops[k.saturating_sub(1)..(k + 2).min(ops.len())]
+            .iter()
+            .any(|(kind, _)| *kind != 0)
+    };
     let mut lines: Vec<(i32, String)> = Vec::new();
     for (k, (kind, text)) in ops.iter().enumerate() {
         if *kind != 0 || near(k) {
@@ -479,7 +526,10 @@ mod codex {
             return if program.is_file() {
                 Ok(program.to_path_buf())
             } else {
-                Err(format!("設定の Codex が見つかりません: {}", program.display()))
+                Err(format!(
+                    "設定の Codex が見つかりません: {}",
+                    program.display()
+                ))
             };
         }
         if let Some(paths) = std::env::var_os("PATH") {
@@ -493,14 +543,24 @@ mod codex {
                 }
             }
         }
-        let extensions = std::env::var_os("USERPROFILE").map(|home| Path::new(&home).join(".vscode").join("extensions"));
+        let extensions = std::env::var_os("USERPROFILE")
+            .map(|home| Path::new(&home).join(".vscode").join("extensions"));
         let bundled = extensions
             .and_then(|dir| std::fs::read_dir(dir).ok())
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("openai.chatgpt-"))
-            .map(|e| e.path().join("bin").join("windows-x86_64").join("codex.exe"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("openai.chatgpt-")
+            })
+            .map(|e| {
+                e.path()
+                    .join("bin")
+                    .join("windows-x86_64")
+                    .join("codex.exe")
+            })
             .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
             .max();
         bundled.map(|(_, p)| p).ok_or_else(|| {
@@ -513,7 +573,17 @@ mod codex {
         // approval_policy=never: a command the sandbox refuses fails instead of asking, and
         // the agent is never offered a way out of the sandbox. project_doc_max_bytes=0: no
         // AGENTS.md is read, so one dropped into the folder (Downloads) gives no orders.
-        command.args(["exec", "--json", "--color", "never", "--skip-git-repo-check", "-c", "approval_policy=never", "-c", "project_doc_max_bytes=0"]);
+        command.args([
+            "exec",
+            "--json",
+            "--color",
+            "never",
+            "--skip-git-repo-check",
+            "-c",
+            "approval_policy=never",
+            "-c",
+            "project_doc_max_bytes=0",
+        ]);
         match request.access {
             Access::Full => {
                 command.args(["-s", "danger-full-access"]);
@@ -535,7 +605,9 @@ mod codex {
         command
     }
     pub fn valid_id(id: &str) -> bool {
-        !id.is_empty() && !id.starts_with('-') && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        !id.is_empty()
+            && !id.starts_with('-')
+            && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     }
 
     /// The filer's context and the request. The first turn also carries the rules and the
@@ -544,11 +616,17 @@ mod codex {
         let mut text = String::new();
         if request.session.is_none() {
             let access = match request.access {
-                Access::Full => "anywhere (no sandbox). Still keep changes to what the request needs.".to_string(),
+                Access::Full => {
+                    "anywhere (no sandbox). Still keep changes to what the request needs."
+                        .to_string()
+                }
                 _ => {
                     let mut dirs = vec![request.cwd.display().to_string()];
                     dirs.extend(writable.iter().map(|d| d.display().to_string()));
-                    format!("only inside these folders (and below): {}. The sandbox enforces this.", dirs.join(" ; "))
+                    format!(
+                        "only inside these folders (and below): {}. The sandbox enforces this.",
+                        dirs.join(" ; ")
+                    )
                 }
             };
             text.push_str(&format!(
@@ -572,7 +650,10 @@ mod codex {
         // Every turn: the panes and the setting can change between requests.
         if !request.panes.is_empty() {
             let writable = request.panes_writable || request.access == Access::Full;
-            text.push_str(&format!("Folders shown in the other panes ({}):\n", if writable { "writable" } else { "read-only" }));
+            text.push_str(&format!(
+                "Folders shown in the other panes ({}):\n",
+                if writable { "writable" } else { "read-only" }
+            ));
             for dir in &request.panes {
                 text.push_str(&format!("- {}\n", dir.display()));
             }
@@ -601,26 +682,56 @@ mod codex {
     }
     impl Parser {
         pub fn parse(&mut self, line: &str) -> Vec<Event> {
-            let Ok(event) = serde_json::from_str::<Value>(line) else { return Vec::new() };
+            let Ok(event) = serde_json::from_str::<Value>(line) else {
+                return Vec::new();
+            };
             let item = &event["item"];
             let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
-            match (event["type"].as_str().unwrap_or_default(), item["type"].as_str().unwrap_or_default()) {
-                ("thread.started", _) => match event["thread_id"].as_str().filter(|id| valid_id(id)) {
-                    Some(id) => vec![Event::Session(id.into())],
-                    None => Vec::new(),
-                },
-                ("turn.started", _) | ("item.started", "reasoning") => vec![Event::Status("考え中…".into())],
-                ("item.started", "command_execution") => vec![Event::Status(format!("実行中: {}", command_line(&item["command"])))],
+            match (
+                event["type"].as_str().unwrap_or_default(),
+                item["type"].as_str().unwrap_or_default(),
+            ) {
+                ("thread.started", _) => {
+                    match event["thread_id"].as_str().filter(|id| valid_id(id)) {
+                        Some(id) => vec![Event::Session(id.into())],
+                        None => Vec::new(),
+                    }
+                }
+                ("turn.started", _) | ("item.started", "reasoning") => {
+                    vec![Event::Status("考え中…".into())]
+                }
+                ("item.started", "command_execution") => vec![Event::Status(format!(
+                    "実行中: {}",
+                    command_line(&item["command"])
+                ))],
                 ("item.started", "file_change") => vec![Event::Status("ファイルを変更中…".into())],
-                ("item.started", "web_search") => vec![Event::Status(format!("Web 検索: {}", text(&item["query"])))],
-                ("item.started", "mcp_tool_call") => vec![Event::Status(format!("ツール: {}.{}", text(&item["server"]), text(&item["tool"])))],
+                ("item.started", "web_search") => {
+                    vec![Event::Status(format!("Web 検索: {}", text(&item["query"])))]
+                }
+                ("item.started", "mcp_tool_call") => vec![Event::Status(format!(
+                    "ツール: {}.{}",
+                    text(&item["server"]),
+                    text(&item["tool"])
+                ))],
                 ("item.updated" | "item.started", "todo_list") => {
                     let items = item["items"].as_array().cloned().unwrap_or_default();
-                    let done = items.iter().filter(|i| i["completed"].as_bool() == Some(true)).count();
-                    let next = items.iter().find(|i| i["completed"].as_bool() != Some(true)).map(|i| text(&i["text"]));
-                    vec![Event::Status(format!("計画 {done}/{} {}", items.len(), next.unwrap_or_default()))]
+                    let done = items
+                        .iter()
+                        .filter(|i| i["completed"].as_bool() == Some(true))
+                        .count();
+                    let next = items
+                        .iter()
+                        .find(|i| i["completed"].as_bool() != Some(true))
+                        .map(|i| text(&i["text"]));
+                    vec![Event::Status(format!(
+                        "計画 {done}/{} {}",
+                        items.len(),
+                        next.unwrap_or_default()
+                    ))]
                 }
-                ("item.completed", "agent_message") => vec![Event::Log(Kind::Message, text(&item["text"]))],
+                ("item.completed", "agent_message") => {
+                    vec![Event::Log(Kind::Message, text(&item["text"]))]
+                }
                 ("item.completed", "command_execution") => {
                     let result = match (item["exit_code"].as_i64(), item["status"].as_str()) {
                         (Some(0), _) => String::new(),
@@ -629,7 +740,10 @@ mod codex {
                         (None, Some(status)) if status != "completed" => format!("  → {status}"),
                         _ => String::new(),
                     };
-                    vec![Event::Log(Kind::Step, format!("$ {}{result}", command_line(&item["command"])))]
+                    vec![Event::Log(
+                        Kind::Step,
+                        format!("$ {}{result}", command_line(&item["command"])),
+                    )]
                 }
                 ("item.completed", "file_change") => item["changes"]
                     .as_array()
@@ -644,11 +758,19 @@ mod codex {
                         Event::Log(Kind::Step, format!("{verb}: {}", text(&change["path"])))
                     })
                     .collect(),
-                ("item.completed", "web_search") => vec![Event::Log(Kind::Step, format!("Web 検索: {}", text(&item["query"])))],
+                ("item.completed", "web_search") => vec![Event::Log(
+                    Kind::Step,
+                    format!("Web 検索: {}", text(&item["query"])),
+                )],
                 ("item.completed", "mcp_tool_call") => {
-                    vec![Event::Log(Kind::Step, format!("ツール: {}.{}", text(&item["server"]), text(&item["tool"])))]
+                    vec![Event::Log(
+                        Kind::Step,
+                        format!("ツール: {}.{}", text(&item["server"]), text(&item["tool"])),
+                    )]
                 }
-                ("item.completed", "error") => vec![Event::Log(Kind::Error, text(&item["message"]))],
+                ("item.completed", "error") => {
+                    vec![Event::Log(Kind::Error, text(&item["message"]))]
+                }
                 ("turn.failed", _) => {
                     self.failure = Some(text(&event["error"]["message"]));
                     Vec::new()
@@ -662,10 +784,16 @@ mod codex {
     /// PowerShell commands arrive as `"...\powershell.exe" -Command '<script>'`: the script.
     fn command_line(command: &Value) -> String {
         let command = match command {
-            Value::Array(parts) => parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "),
+            Value::Array(parts) => parts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
             other => other.as_str().unwrap_or_default().to_string(),
         };
-        let script = command.split_once(" -Command ").map_or(command.as_str(), |(_, s)| s);
+        let script = command
+            .split_once(" -Command ")
+            .map_or(command.as_str(), |(_, s)| s);
         shorten(script, 160)
     }
 }
@@ -680,7 +808,10 @@ mod tests {
         assert_eq!(input.position(), (STDERR_BYTES * 20) as u64);
         assert_eq!(tail.len(), STDERR_BYTES);
         let text = (0..20).map(|i| format!("line {i}\n")).collect::<String>();
-        assert_eq!(stderr_tail(text.as_bytes()).unwrap(), "line 14\nline 15\nline 16\nline 17\nline 18\nline 19");
+        assert_eq!(
+            stderr_tail(text.as_bytes()).unwrap(),
+            "line 14\nline 15\nline 16\nline 17\nline 18\nline 19"
+        );
         // Start the byte tail inside a multibyte character, and include invalid UTF-8.
         let mut bytes = "あ".repeat(STDERR_BYTES).into_bytes();
         bytes.push(0xff);
@@ -691,9 +822,16 @@ mod tests {
     #[test]
     fn json_records_are_bounded_without_parsing_a_truncated_prefix() {
         let mut bytes = Vec::new();
-        let mut input = BufReader::with_capacity(7, std::io::Cursor::new(b"{\"type\":\"turn.started\"}\r\n{}"));
+        let mut input = BufReader::with_capacity(
+            7,
+            std::io::Cursor::new(b"{\"type\":\"turn.started\"}\r\n{}"),
+        );
         assert!(json_line(&mut input, &mut bytes).unwrap());
-        assert!(!codex::Parser::default().parse(std::str::from_utf8(&bytes).unwrap()).is_empty());
+        assert!(
+            !codex::Parser::default()
+                .parse(std::str::from_utf8(&bytes).unwrap())
+                .is_empty()
+        );
         assert!(json_line(&mut input, &mut bytes).unwrap());
         assert_eq!(bytes, b"{}");
         assert!(!json_line(&mut input, &mut bytes).unwrap());
@@ -708,17 +846,27 @@ mod tests {
         let record = serde_json::json!({"type":"item.completed", "item":{"type":"agent_message", "text":message}}).to_string();
         let mut input = BufReader::new(record.as_bytes());
         assert!(json_line(&mut input, &mut bytes).unwrap());
-        assert_eq!(codex::Parser::default().parse(std::str::from_utf8(&bytes).unwrap()), [Event::Log(Kind::Message, message)]);
+        assert_eq!(
+            codex::Parser::default().parse(std::str::from_utf8(&bytes).unwrap()),
+            [Event::Log(Kind::Message, message)]
+        );
     }
     #[test]
     fn memory_is_limited_before_it_reaches_the_ui() {
-        let file = std::env::temp_dir().join(format!("enyfile-memory-limit-{}.md", std::process::id()));
+        let file =
+            std::env::temp_dir().join(format!("enyfile-memory-limit-{}.md", std::process::id()));
         {
             let f = std::fs::File::create(&file).unwrap();
             f.set_len(MEMORY_BYTES as u64 + 1).unwrap();
         }
-        assert_eq!(read_memory(&file).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
-        assert_eq!(std::fs::metadata(&file).unwrap().len(), MEMORY_BYTES as u64 + 1);
+        assert_eq!(
+            read_memory(&file).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().len(),
+            MEMORY_BYTES as u64 + 1
+        );
         std::fs::write(&file, "- 日本語のメモ\n").unwrap();
         assert_eq!(read_memory(&file).unwrap(), "- 日本語のメモ\n");
         assert_eq!(read_limited(&b"abcd"[..], 4).unwrap(), b"abcd");
@@ -744,8 +892,14 @@ mod tests {
         };
         let started = std::time::Instant::now();
         let outcome = execute(&request, &shared, &|_| true);
-        assert!(matches!(outcome, Outcome::Failed(ref message) if message.contains("16 MiB")), "{outcome:?}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(30), "the sleeping CLI descendant was not stopped promptly");
+        assert!(
+            matches!(outcome, Outcome::Failed(ref message) if message.contains("16 MiB")),
+            "{outcome:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the sleeping CLI descendant was not stopped promptly"
+        );
         // Closing the job and every pipe precedes fixture cleanup.
         drop(shared);
         std::fs::remove_dir_all(root).unwrap();
@@ -767,39 +921,111 @@ mod tests {
         }
     }
     fn args(command: &Command) -> Vec<String> {
-        command.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+        command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
     }
     #[test]
     fn command_lines() {
-        let writable = [PathBuf::from(r"H:\Pictures"), PathBuf::from(r"C:\enyFile\agent")];
-        let new = codex::command(Path::new("codex.exe"), &request(None, Access::Extra), &writable);
+        let writable = [
+            PathBuf::from(r"H:\Pictures"),
+            PathBuf::from(r"C:\enyFile\agent"),
+        ];
+        let new = codex::command(
+            Path::new("codex.exe"),
+            &request(None, Access::Extra),
+            &writable,
+        );
         assert_eq!(
             args(&new),
-            ["exec", "--json", "--color", "never", "--skip-git-repo-check", "-c", "approval_policy=never", "-c", "project_doc_max_bytes=0", "-s", "workspace-write", "--add-dir", r"H:\Pictures", "--add-dir", r"C:\enyFile\agent", "-C", r"D:\写真 2024", "-"]
+            [
+                "exec",
+                "--json",
+                "--color",
+                "never",
+                "--skip-git-repo-check",
+                "-c",
+                "approval_policy=never",
+                "-c",
+                "project_doc_max_bytes=0",
+                "-s",
+                "workspace-write",
+                "--add-dir",
+                r"H:\Pictures",
+                "--add-dir",
+                r"C:\enyFile\agent",
+                "-C",
+                r"D:\写真 2024",
+                "-"
+            ]
         );
         // Resuming keeps the sandbox options, before `resume`.
-        let resumed = codex::command(Path::new("codex.exe"), &request(Some("01a1-ff"), Access::Folder), &writable[1..]);
+        let resumed = codex::command(
+            Path::new("codex.exe"),
+            &request(Some("01a1-ff"), Access::Folder),
+            &writable[1..],
+        );
         assert_eq!(
             args(&resumed)[9..],
-            ["-s", "workspace-write", "--add-dir", r"C:\enyFile\agent", "-C", r"D:\写真 2024", "resume", "01a1-ff", "-"]
+            [
+                "-s",
+                "workspace-write",
+                "--add-dir",
+                r"C:\enyFile\agent",
+                "-C",
+                r"D:\写真 2024",
+                "resume",
+                "01a1-ff",
+                "-"
+            ]
         );
-        let full = codex::command(Path::new("codex.exe"), &request(None, Access::Full), &writable);
-        assert!(args(&full).windows(2).any(|w| w == ["-s", "danger-full-access"]));
+        let full = codex::command(
+            Path::new("codex.exe"),
+            &request(None, Access::Full),
+            &writable,
+        );
+        assert!(
+            args(&full)
+                .windows(2)
+                .any(|w| w == ["-s", "danger-full-access"])
+        );
         assert!(!args(&full).contains(&"--add-dir".to_string()));
         // Not an id: it never reaches the command line.
-        let odd = codex::command(Path::new("codex.exe"), &request(Some("--dangerously-bypass-approvals-and-sandbox"), Access::Folder), &[]);
+        let odd = codex::command(
+            Path::new("codex.exe"),
+            &request(
+                Some("--dangerously-bypass-approvals-and-sandbox"),
+                Access::Folder,
+            ),
+            &[],
+        );
         assert!(!args(&odd).iter().any(|a| a.starts_with("--dangerously")));
     }
     #[test]
     fn prompt_has_context_and_memory_once() {
-        let first = codex::prompt(&request(None, Access::Folder), "- 画像の保存先は H:\\Pictures", &[]);
+        let first = codex::prompt(
+            &request(None, Access::Folder),
+            "- 画像の保存先は H:\\Pictures",
+            &[],
+        );
         assert!(first.contains("H:\\Pictures") && first.contains(r"Current folder: D:\写真 2024"));
-        assert!(first.contains(r"- D:\写真 2024\a b.png") && first.ends_with("Request:\n画像を全部 256×256 にして\n"));
-        let next = codex::prompt(&request(Some("x"), Access::Folder), "- 画像の保存先は H:\\Pictures", &[]);
+        assert!(
+            first.contains(r"- D:\写真 2024\a b.png")
+                && first.ends_with("Request:\n画像を全部 256×256 にして\n")
+        );
+        let next = codex::prompt(
+            &request(Some("x"), Access::Folder),
+            "- 画像の保存先は H:\\Pictures",
+            &[],
+        );
         assert!(!next.contains("<memory>") && next.contains("Selected items (1)"));
         // The other panes go with every turn, saying whether they may be written.
         assert!(next.contains("Folders shown in the other panes (read-only):\n- H:\\縮小\n"));
-        let open = Request { panes_writable: true, ..request(Some("x"), Access::Folder) };
+        let open = Request {
+            panes_writable: true,
+            ..request(Some("x"), Access::Folder)
+        };
         assert!(codex::prompt(&open, "", &[]).contains("other panes (writable)"));
     }
     #[test]
@@ -807,19 +1033,38 @@ mod tests {
         let memory = PathBuf::from(r"C:\enyFile\agent");
         let none = |_: &Path| {};
         // Read-only by default: only the memory's folder besides the working folder.
-        assert_eq!(writable(&request(None, Access::Folder), none), [memory.clone()]);
-        let mut open = Request { panes_writable: true, ..request(None, Access::Folder) };
+        assert_eq!(
+            writable(&request(None, Access::Folder), none),
+            std::slice::from_ref(&memory)
+        );
+        let mut open = Request {
+            panes_writable: true,
+            ..request(None, Access::Folder)
+        };
         // The working folder shown twice (two panes on it) is not added again.
         open.panes.push(open.cwd.clone());
-        assert_eq!(writable(&open, none), [PathBuf::from(r"H:\縮小"), memory.clone()]);
+        assert_eq!(
+            writable(&open, none),
+            [PathBuf::from(r"H:\縮小"), memory.clone()]
+        );
         // B: the extra folders too, those that exist; C needs no list.
         let existing = std::env::temp_dir();
         let gone = PathBuf::from(r"Z:\enyfile-no-such-folder");
-        let extra = Request { access: Access::Extra, extra: vec![existing.clone(), gone.clone()], ..open };
+        let extra = Request {
+            access: Access::Extra,
+            extra: vec![existing.clone(), gone.clone()],
+            ..open
+        };
         let mut missed = Vec::new();
-        assert_eq!(writable(&extra, |d| missed.push(d.to_path_buf())), [PathBuf::from(r"H:\縮小"), existing, memory.clone()]);
+        assert_eq!(
+            writable(&extra, |d| missed.push(d.to_path_buf())),
+            [PathBuf::from(r"H:\縮小"), existing, memory.clone()]
+        );
         assert_eq!(missed, [gone]);
-        let full = Request { panes_writable: true, ..request(None, Access::Full) };
+        let full = Request {
+            panes_writable: true,
+            ..request(None, Access::Full)
+        };
         assert_eq!(writable(&full, none), [memory]);
     }
     #[test]
@@ -827,7 +1072,14 @@ mod tests {
         let old = "# メモ\n- a\n- b\n- c\n- d\n- e\n";
         assert_eq!(
             memory_diff(old, "# メモ\n- a\n- b\n- c\n- d2\n- e\n- 新しい指示\n"),
-            [(3, String::new()), (0, "- c".into()), (2, "- d".into()), (1, "- d2".into()), (0, "- e".into()), (1, "- 新しい指示".into())]
+            [
+                (3, String::new()),
+                (0, "- c".into()),
+                (2, "- d".into()),
+                (1, "- d2".into()),
+                (0, "- e".into()),
+                (1, "- 新しい指示".into())
+            ]
         );
         assert_eq!(memory_diff("", "x"), [(1, "x".to_string())]);
         assert_eq!(memory_diff("x\n", ""), [(2, "x".to_string())]);
@@ -857,6 +1109,9 @@ mod tests {
                 Event::Log(Kind::Message, "完了しました".into()),
             ]
         );
-        assert_eq!(parser.failure.as_deref(), Some("You've hit your usage limit."));
+        assert_eq!(
+            parser.failure.as_deref(),
+            Some("You've hit your usage limit.")
+        );
     }
 }

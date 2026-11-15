@@ -8,13 +8,33 @@ use std::{
 };
 
 fn names(c: &Rc<RefCell<Controller>>, p: usize) -> Vec<String> {
-    c.borrow().data(p).rows.iter().map(|e| e.name.clone()).collect()
+    c.borrow()
+        .data(p)
+        .rows
+        .iter()
+        .map(|e| e.name.clone())
+        .collect()
 }
 /// Compared rows of pane `p`: the entry name, or "" for an empty row.
 fn compared(c: &Rc<RefCell<Controller>>, p: usize) -> Vec<String> {
     let c = c.borrow();
     let model = &c.panes[p].model;
-    (0..model.total()).map(|r| model.row_at(r).map_or("?".into(), |row| if row.gap { String::new() } else { format!("{}{}{}", row.name, if row.ext.is_empty() { "" } else { "." }, row.ext) })).collect()
+    (0..model.total())
+        .map(|r| {
+            model.row_at(r).map_or("?".into(), |row| {
+                if row.gap {
+                    String::new()
+                } else {
+                    format!(
+                        "{}{}{}",
+                        row.name,
+                        if row.ext.is_empty() { "" } else { "." },
+                        row.ext
+                    )
+                }
+            })
+        })
+        .collect()
 }
 fn ctrl_shift_key(ui: &App, p: i32, letter: &str) {
     let mut event = slint::language::KeyEvent::default();
@@ -48,21 +68,30 @@ fn asked(c: &Rc<RefCell<Controller>>) -> Option<(String, paste::Kind)> {
 fn idle(c: &Rc<RefCell<Controller>>) -> bool {
     let c = c.borrow();
     c.operations == 0
-        && c.panes
-            .iter()
-            .all(|p| p.pending.is_none() && !p.stale && !p.model.data.borrow().dir.as_os_str().is_empty())
+        && c.panes.iter().all(|p| {
+            p.pending.is_none() && !p.stale && !p.model.data.borrow().dir.as_os_str().is_empty()
+        })
 }
 /// The recursive search of pane 0 for `text` is answered and its results are sorted in.
 fn searched(c: &Rc<RefCell<Controller>>, text: &str) -> bool {
     idle(c)
-        && c.borrow().panes[0]
-            .found
-            .as_ref()
-            .is_some_and(|f| f.text == text && !f.running && f.finished.is_none() && f.backlog.is_empty() && !f.replace)
+        && c.borrow().panes[0].found.as_ref().is_some_and(|f| {
+            f.text == text
+                && !f.running
+                && f.finished.is_none()
+                && f.backlog.is_empty()
+                && !f.replace
+        })
 }
 /// Search results of pane 0 as "folder\name", in name order (the pane may sort descending).
 fn found(c: &Rc<RefCell<Controller>>) -> Vec<String> {
-    let mut found: Vec<String> = c.borrow().data(0).rows.iter().map(|e| format!("{}{}", e.location, e.name)).collect();
+    let mut found: Vec<String> = c
+        .borrow()
+        .data(0)
+        .rows
+        .iter()
+        .map(|e| format!("{}{}", e.location, e.name))
+        .collect();
     found.sort();
     found
 }
@@ -103,10 +132,18 @@ fn shift_key(ui: &App, p: i32, key: slint::platform::Key) {
 fn window_ctrl_key(ui: &App, letter: &str) {
     use slint::platform::{Key, WindowEvent};
     let w = ui.window();
-    w.dispatch_event(WindowEvent::KeyPressed { text: Key::Control.into() });
-    w.dispatch_event(WindowEvent::KeyPressed { text: letter.into() });
-    w.dispatch_event(WindowEvent::KeyReleased { text: letter.into() });
-    w.dispatch_event(WindowEvent::KeyReleased { text: Key::Control.into() });
+    w.dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    w.dispatch_event(WindowEvent::KeyPressed {
+        text: letter.into(),
+    });
+    w.dispatch_event(WindowEvent::KeyReleased {
+        text: letter.into(),
+    });
+    w.dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Control.into(),
+    });
 }
 fn expect(ok: bool, what: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(what.into()) }
@@ -150,8 +187,16 @@ struct State {
 /// A stand-in for `codex exec --json`: records its arguments and prompt, makes a file in its
 /// working folder and answers with Codex's events. `slow` waits in a grandchild first.
 fn fake_agent(root: &Path, slow: bool) -> Result<PathBuf, String> {
-    let file = root.join(if slow { "fake-agent-slow.cmd" } else { "fake-agent.cmd" });
-    let wait = if slow { "ping -n 60 127.0.0.1 >nul\r\n" } else { "" };
+    let file = root.join(if slow {
+        "fake-agent-slow.cmd"
+    } else {
+        "fake-agent.cmd"
+    });
+    let wait = if slow {
+        "ping -n 60 127.0.0.1 >nul\r\n"
+    } else {
+        ""
+    };
     let script = format!(
         "@echo off\r\n\
          if \"%~1\"==\"--version\" (echo codex-cli 9.9.9-fake& exit /b 0)\r\n\
@@ -168,7 +213,12 @@ fn fake_agent(root: &Path, slow: bool) -> Result<PathBuf, String> {
     Ok(file)
 }
 fn agent_texts(c: &Rc<RefCell<Controller>>) -> Vec<String> {
-    c.borrow().agent.lines.iter().map(|l| l.text.to_string()).collect()
+    c.borrow()
+        .agent
+        .lines
+        .iter()
+        .map(|l| l.text.to_string())
+        .collect()
 }
 impl State {
     fn spawn(&mut self, args: &[&std::ffi::OsStr]) -> Result<(), String> {
@@ -176,7 +226,12 @@ impl State {
         let probe = exe.with_file_name("enyfile-shellprobe.exe");
         // Shell parsing names do not accept the `\\?\` form `canonicalize` produces.
         let args = args.iter().map(|a| shell::shell_path(Path::new(a)));
-        self.probe = Some(Command::new(probe).args(args).spawn().map_err(|e| e.to_string())?);
+        self.probe = Some(
+            Command::new(probe)
+                .args(args)
+                .spawn()
+                .map_err(|e| e.to_string())?,
+        );
         Ok(())
     }
     /// None while running; Some(exit code) once finished.
@@ -201,7 +256,10 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
         log: Vec::new(),
         root: std::fs::canonicalize(&root).unwrap_or(root),
         hold: Duration::from_millis(
-            std::env::var("ENYFILE_SMOKE_HOLD_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            std::env::var("ENYFILE_SMOKE_HOLD_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         ),
         seen: None,
         held: None,
@@ -221,10 +279,10 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
             Some(e) => format!("FAIL step {}: {e}", state.step),
             None => "PASS all".into(),
         });
-        if let Some(log) = &log {
-            if let Ok(mut f) = std::fs::File::create(log) {
-                let _ = f.write_all(state.log.join("\n").as_bytes());
-            }
+        if let Some(log) = &log
+            && let Ok(mut f) = std::fs::File::create(log)
+        {
+            let _ = f.write_all(state.log.join("\n").as_bytes());
         }
         let _ = slint::quit_event_loop();
     };

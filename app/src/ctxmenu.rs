@@ -7,10 +7,7 @@ use windows::{
     Win32::{
         Foundation::*,
         System::LibraryLoader::GetModuleHandleW,
-        UI::{
-            Shell::*,
-            WindowsAndMessaging::*,
-        },
+        UI::{Shell::*, WindowsAndMessaging::*},
     },
     core::{Interface, PCSTR, PCWSTR, PSTR, w},
 };
@@ -102,13 +99,23 @@ impl Menus {
     }
     pub fn show(&self, request: Request) {
         if self.tx.send(request).is_ok() {
-            let _ = unsafe { PostMessageW(Some(HWND(self.hwnd as *mut _)), WM_APP, WPARAM(0), LPARAM(0)) };
+            let _ = unsafe {
+                PostMessageW(
+                    Some(HWND(self.hwnd as *mut _)),
+                    WM_APP,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
         }
     }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if matches!(msg, WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR) {
+    if matches!(
+        msg,
+        WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR
+    ) {
         let handled = CURRENT.with(|current| {
             let current = current.borrow();
             let menu = current.as_ref()?;
@@ -118,7 +125,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     .ok()
                     .map(|_| result)
             } else if let Ok(menu) = menu.cast::<IContextMenu2>() {
-                unsafe { menu.HandleMenuMsg(msg, wparam, lparam) }.ok().map(|_| LRESULT(0))
+                unsafe { menu.HandleMenuMsg(msg, wparam, lparam) }
+                    .ok()
+                    .map(|_| LRESULT(0))
             } else {
                 None
             }
@@ -132,13 +141,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 fn wide(path: &std::path::Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
-    crate::shell::shell_path(path).as_os_str().encode_wide().chain(Some(0)).collect()
+    crate::shell::shell_path(path)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect()
 }
 unsafe fn items_menu(paths: &[PathBuf]) -> windows::core::Result<IContextMenu> {
-    let array = crate::shell::item_array(paths).map_err(|e| windows::core::Error::new(E_FAIL, e))?;
+    let array =
+        crate::shell::item_array(paths).map_err(|e| windows::core::Error::new(E_FAIL, e))?;
     unsafe { array.BindToHandler(None, &BHID_SFUIObject) }
 }
-unsafe fn background_menu(dir: &std::path::Path, hwnd: HWND) -> windows::core::Result<IContextMenu> {
+unsafe fn background_menu(
+    dir: &std::path::Path,
+    hwnd: HWND,
+) -> windows::core::Result<IContextMenu> {
     let dir = wide(dir);
     unsafe {
         let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(dir.as_ptr()), None)?;
@@ -149,7 +166,13 @@ unsafe fn background_menu(dir: &std::path::Path, hwnd: HWND) -> windows::core::R
 fn verb(menu: &IContextMenu, id: usize) -> String {
     let mut buffer = [0u16; 128];
     let ok = unsafe {
-        menu.GetCommandString(id, GCS_VERBW, None, PSTR(buffer.as_mut_ptr().cast()), buffer.len() as u32)
+        menu.GetCommandString(
+            id,
+            GCS_VERBW,
+            None,
+            PSTR(buffer.as_mut_ptr().cast()),
+            buffer.len() as u32,
+        )
     };
     if ok.is_err() {
         return String::new();
@@ -163,7 +186,9 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
     // `wide` strips `\\?\`; refuse names that would then mean another file (or folder,
     // for New and Paste on the background).
     let checked = match &request.target {
-        Target::Items(paths) => paths.iter().try_for_each(|p| crate::shell::os_path(p).map(drop)),
+        Target::Items(paths) => paths
+            .iter()
+            .try_for_each(|p| crate::shell::os_path(p).map(drop)),
         Target::Background(dir) => crate::shell::os_path(dir).map(drop),
     };
     if let Err(e) = checked {
@@ -176,7 +201,9 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
             Target::Items(paths) => paths.first().and_then(|p| p.parent()).map(wide),
             Target::Background(dir) => Some(wide(dir)),
         };
-        let folder = folder.as_ref().map_or(PCWSTR::null(), |f| PCWSTR(f.as_ptr()));
+        let folder = folder
+            .as_ref()
+            .map_or(PCWSTR::null(), |f| PCWSTR(f.as_ptr()));
         let menu = match &request.target {
             Target::Items(paths) => items_menu(paths),
             Target::Background(dir) => background_menu(dir, hwnd),
@@ -192,7 +219,10 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
         if request.extended {
             flags |= CMF_EXTENDEDVERBS;
         }
-        if menu.QueryContextMenu(popup, 0, FIRST, 0x7FFF, flags).is_err() {
+        if menu
+            .QueryContextMenu(popup, 0, FIRST, 0x7FFF, flags)
+            .is_err()
+        {
             let _ = DestroyMenu(popup);
             return Outcome::Failed("QueryContextMenu".into());
         }
@@ -222,7 +252,15 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
         let _ = GetCursorPos(&mut point);
         // A menu only closes on outside clicks when its owner is the foreground window.
         let _ = SetForegroundWindow(hwnd);
-        let command = TrackPopupMenuEx(popup, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, point.x, point.y, hwnd, None).0 as u32;
+        let command = TrackPopupMenuEx(
+            popup,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
+            point.x,
+            point.y,
+            hwnd,
+            None,
+        )
+        .0 as u32;
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let outcome = if command < FIRST {
             Outcome::Done
@@ -234,7 +272,9 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
                     Target::Items(paths) => format!("{paths:?}"),
                     Target::Background(path) => format!("{path:?}"),
                 };
-                crate::recovery::record(format!("delete: context menu invoked; targets={targets}; handled by Shell context menu (no per-item callbacks)"));
+                crate::recovery::record(format!(
+                    "delete: context menu invoked; targets={targets}; handled by Shell context menu (no per-item callbacks)"
+                ));
             }
             match own_verb(&selected_verb, &request.target) {
                 Some(outcome) => outcome,
@@ -250,9 +290,12 @@ fn show(hwnd: HWND, request: Request) -> Outcome {
                         ptInvoke: point,
                         ..Default::default()
                     };
-                    let result = menu.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO);
+                    let result =
+                        menu.InvokeCommand(&info as *const _ as *const CMINVOKECOMMANDINFO);
                     if selected_verb == "delete" {
-                        crate::recovery::checkpoint(format!("delete: context menu returned; result={result:?}"));
+                        crate::recovery::checkpoint(format!(
+                            "delete: context menu returned; result={result:?}"
+                        ));
                     }
                     match result {
                         Ok(()) => Outcome::Done,
@@ -279,7 +322,9 @@ fn own_verb(verb: &str, target: &Target) -> Option<Outcome> {
         ("paste", Target::Background(dir)) => Outcome::Paste(dir.clone()),
         ("paste", _) => single.map_or(Outcome::Done, |folder| Outcome::Paste(folder.clone())),
         // A drive's label is not a name our dialog can change.
-        ("rename", _) => single.filter(|p| p.parent().is_some()).map_or(Outcome::Done, |p| Outcome::Rename(p.clone())),
+        ("rename", _) => single
+            .filter(|p| p.parent().is_some())
+            .map_or(Outcome::Done, |p| Outcome::Rename(p.clone())),
         _ => return None,
     })
 }
@@ -296,9 +341,13 @@ mod tests {
         let is = |o: Option<Outcome>, path: &str| matches!(o, Some(Outcome::Paste(p) | Outcome::Rename(p)) if p == Path::new(path));
         let done = |o: Option<Outcome>| matches!(o, Some(Outcome::Done));
         assert!(is(own_verb("paste", &one(r"C:\dir\sub")), r"C:\dir\sub"));
-        assert!(matches!(own_verb("paste", &Target::Background(PathBuf::from(r"C:\dir"))), Some(Outcome::Paste(p)) if p == Path::new(r"C:\dir")));
+        assert!(
+            matches!(own_verb("paste", &Target::Background(PathBuf::from(r"C:\dir"))), Some(Outcome::Paste(p)) if p == Path::new(r"C:\dir"))
+        );
         assert!(done(own_verb("paste", &two)));
-        assert!(matches!(own_verb("rename", &one(r"C:\dir\a.txt")), Some(Outcome::Rename(p)) if p == Path::new(r"C:\dir\a.txt")));
+        assert!(
+            matches!(own_verb("rename", &one(r"C:\dir\a.txt")), Some(Outcome::Rename(p)) if p == Path::new(r"C:\dir\a.txt"))
+        );
         assert!(done(own_verb("rename", &one(r"\\?\D:\"))));
         assert!(done(own_verb("rename", &one(r"D:\"))));
         assert!(done(own_verb("rename", &two)));

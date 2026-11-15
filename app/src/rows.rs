@@ -1,6 +1,9 @@
 //! The pane list as a Slint model: "..", the entries, then the drives, shown one page at
 //! a time; comparing, the rows shared with the other pane instead.
-use crate::{Row, compare, icons, listing::{self, Drive, Entry, Selection}};
+use crate::{
+    Row, compare, icons,
+    listing::{self, Drive, Entry, Selection},
+};
 use slint::{Model, ModelNotify, ModelTracker};
 use std::{
     borrow::Cow,
@@ -79,7 +82,10 @@ pub struct RowsModel {
 impl RowsModel {
     pub fn slot(&self, row: usize) -> Option<Slot> {
         if let Some((aligned, side)) = &*self.compare.borrow() {
-            return aligned.pairs.get(row).map(|pair| pair[*side].map_or(Slot::Gap, Slot::Entry));
+            return aligned
+                .pairs
+                .get(row)
+                .map(|pair| pair[*side].map_or(Slot::Gap, Slot::Entry));
         }
         let data = self.data.borrow();
         let (offset, entries) = (data.offset(), data.rows.len());
@@ -94,8 +100,13 @@ impl RowsModel {
     }
     /// The first entry row met going from `from` toward `to`, both included.
     pub fn entry_toward(&self, from: usize, to: usize) -> Option<usize> {
-        let rows: Box<dyn Iterator<Item = usize>> = if from <= to { Box::new(from..=to) } else { Box::new((to..=from).rev()) };
-        rows.into_iter().find(|&row| matches!(self.slot(row), Some(Slot::Entry(_))))
+        let rows: Box<dyn Iterator<Item = usize>> = if from <= to {
+            Box::new(from..=to)
+        } else {
+            Box::new((to..=from).rev())
+        };
+        rows.into_iter()
+            .find(|&row| matches!(self.slot(row), Some(Slot::Entry(_))))
     }
     pub fn special_row(&self, special: Special) -> usize {
         let data = self.data.borrow();
@@ -156,13 +167,20 @@ impl RowsModel {
     }
     pub fn pages(&self) -> (usize, usize) {
         let size = self.page_size.get().max(1);
-        (self.page_start.get() / size + 1, self.total().div_ceil(size).max(1))
+        (
+            self.page_start.get() / size + 1,
+            self.total().div_ceil(size).max(1),
+        )
     }
     /// The shown page's widest name (with its search location) and kind, guessed by
     /// character count with wide characters counting double. The pane measures these two
     /// to widen the kind column into room the names leave.
     pub fn widest(&self) -> (String, String) {
-        let guess = |s: &str| s.chars().map(|c| if c.len_utf8() > 2 { 2 } else { 1 }).sum::<usize>();
+        let guess = |s: &str| {
+            s.chars()
+                .map(|c| if c.len_utf8() > 2 { 2 } else { 1 })
+                .sum::<usize>()
+        };
         let (mut name, mut kind) = (String::new(), String::new());
         let start = self.page_start.get();
         for row in (start..start + self.row_count()).filter_map(|i| self.row_at(i)) {
@@ -183,7 +201,9 @@ impl RowsModel {
 impl Model for RowsModel {
     type Data = Row;
     fn row_count(&self) -> usize {
-        self.total().saturating_sub(self.page_start.get()).min(self.page_size.get().max(1))
+        self.total()
+            .saturating_sub(self.page_start.get())
+            .min(self.page_size.get().max(1))
     }
     fn row_data(&self, row: usize) -> Option<Row> {
         if row >= self.row_count() {
@@ -217,9 +237,18 @@ impl RowsModel {
                 return Some(Row {
                     name: listing::visible(&drive.name).as_ref().into(),
                     // No medium (empty optical drive): no bar, no free space.
-                    kind: if drive.total > 0 { format!("{} フリー", listing::format_size(drive.free)) } else { String::new() }.into(),
+                    kind: if drive.total > 0 {
+                        format!("{} フリー", listing::format_size(drive.free))
+                    } else {
+                        String::new()
+                    }
+                    .into(),
                     drive: true,
-                    used: if drive.total > 0 { 1.0 - drive.free as f32 / drive.total as f32 } else { 0.0 },
+                    used: if drive.total > 0 {
+                        1.0 - drive.free as f32 / drive.total as f32
+                    } else {
+                        0.0
+                    },
                     current: self.special.get() == Some(Special::Drive(i)),
                     icon: icon_image(&drive.icon, &drive.icon),
                     ..Row::default()
@@ -235,14 +264,28 @@ impl RowsModel {
             }
             Slot::Entry(index) => index,
         };
-        let diff = self.compare.borrow().as_ref().map(|(aligned, _)| aligned.diffs[row]);
+        let diff = self
+            .compare
+            .borrow()
+            .as_ref()
+            .map(|(aligned, _)| aligned.diffs[row]);
         let data = self.data.borrow();
         let entry = data.rows.get(index)?;
         let selection = self.selection.borrow();
         let (date, time) = listing::format_date(entry.modified, chrono::Local::now().date_naive());
-        let tint = (!entry.directory).then(|| self.ext_colors.borrow().get(&entry.ext.to_lowercase()).copied()).flatten();
-        let [location, name, ext] = [&entry.location, &entry.stem, &entry.ext].map(|s| listing::visible(s));
-        let spoof = [&location, &name, &ext].iter().any(|s| matches!(s, Cow::Owned(_)));
+        let tint = (!entry.directory)
+            .then(|| {
+                self.ext_colors
+                    .borrow()
+                    .get(&entry.ext.to_lowercase())
+                    .copied()
+            })
+            .flatten();
+        let [location, name, ext] =
+            [&entry.location, &entry.stem, &entry.ext].map(|s| listing::visible(s));
+        let spoof = [&location, &name, &ext]
+            .iter()
+            .any(|s| matches!(s, Cow::Owned(_)));
         Some(Row {
             icon: icon_image(&entry.icon, &entry.type_icon),
             transfer: self.clipboard.borrow().state(&entry.path),

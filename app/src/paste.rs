@@ -174,7 +174,12 @@ impl Planner<'_> {
         }
         self.plan.ops.push(op);
     }
-    fn place(&mut self, source: &Path, dir: &Path, top: bool) -> Result<Result<(), Cancelled>, String> {
+    fn place(
+        &mut self,
+        source: &Path,
+        dir: &Path,
+        top: bool,
+    ) -> Result<Result<(), Cancelled>, String> {
         let name = source
             .file_name()
             .ok_or_else(|| format!("{} は貼り付けできません", source.display()))?
@@ -220,9 +225,16 @@ impl Planner<'_> {
         let auto = auto_name(&name, from.directory, &taken);
         // Capture before asking: looking up after the answer would accept a swap
         // made while the confirmation was open. The planner already cached this ID.
-        let target_id = if kind == Kind::Folder { crate::pathid::ident(&target) } else { self.ids.get(&target) };
+        let target_id = if kind == Kind::Folder {
+            crate::pathid::ident(&target)
+        } else {
+            self.ids.get(&target)
+        };
         // "Replace, apply to all" reaching a folder that cannot be replaced: asked about.
-        let rule = self.rules.get(&kind).filter(|rule| **rule != Answer::Replace || target_id.is_some());
+        let rule = self
+            .rules
+            .get(&kind)
+            .filter(|rule| **rule != Answer::Replace || target_id.is_some());
         let answer = match rule {
             Some(Answer::Rename(_)) => Answer::Rename(auto),
             Some(rule) => rule.clone(),
@@ -250,7 +262,10 @@ impl Planner<'_> {
             Answer::Newer if from.modified <= to.modified => self.plan.skipped = true,
             Answer::Overwrite | Answer::Newer if kind == Kind::File => {
                 self.push(source, dir, None, false, top);
-                self.plan.ops.last_mut().unwrap().overwrites = Some(Overwrite { meta: to, id: target_id });
+                self.plan.ops.last_mut().unwrap().overwrites = Some(Overwrite {
+                    meta: to,
+                    id: target_id,
+                });
             }
             Answer::Rename(new) => {
                 self.names(dir)?.insert(fold(&new));
@@ -315,7 +330,10 @@ pub fn plan(
 }
 /// `inner` relative to `outer`, both resolved as the file system names them now.
 fn below(inner: &Path, outer: &Path) -> Option<PathBuf> {
-    let (inner, outer) = (std::fs::canonicalize(inner).ok()?, std::fs::canonicalize(outer).ok()?);
+    let (inner, outer) = (
+        std::fs::canonicalize(inner).ok()?,
+        std::fs::canonicalize(outer).ok()?,
+    );
     let rest = inner.strip_prefix(&outer).ok()?;
     (!rest.as_os_str().is_empty()).then(|| rest.to_path_buf())
 }
@@ -339,7 +357,10 @@ impl Plan {
             return Err("確認中に貼り付け先が変わったため中止しました".into());
         }
         // All up front: a refusal halfway through would leave items set aside.
-        let paths = self.remove.iter().chain(self.ops.iter().flat_map(|op| [&op.source, &op.dir]));
+        let paths = self
+            .remove
+            .iter()
+            .chain(self.ops.iter().flat_map(|op| [&op.source, &op.dir]));
         for path in paths {
             crate::shell::os_path(path)?;
         }
@@ -350,27 +371,47 @@ impl Plan {
         }
         for (path, planned) in self.remove.iter().zip(&self.remove_ids) {
             if planned.is_none() {
-                return Err(format!("置換するフォルダを識別できないため中止しました: {}", path.display()));
+                return Err(format!(
+                    "置換するフォルダを識別できないため中止しました: {}",
+                    path.display()
+                ));
             }
             if crate::pathid::ident(path) != *planned {
-                return Err(format!("置換するフォルダが確認後に変わったため中止しました: {}", path.display()));
+                return Err(format!(
+                    "置換するフォルダが確認後に変わったため中止しました: {}",
+                    path.display()
+                ));
             }
         }
         if let Some(op) = self.ops.iter().find(|op| ids.within(&op.dir, &op.source)) {
-            return Err(format!("フォルダをその中へは貼り付けられません: {}", op.source.display()));
+            return Err(format!(
+                "フォルダをその中へは貼り付けられません: {}",
+                op.source.display()
+            ));
         }
         let mut inside = Vec::new();
         for op in &self.ops {
-            let Some(i) = self.remove.iter().position(|path| ids.within(&op.source, path)) else {
+            let Some(i) = self
+                .remove
+                .iter()
+                .position(|path| ids.within(&op.source, path))
+            else {
                 inside.push(None);
                 continue;
             };
             // Replacing an item with itself deletes it; a source we cannot find again below
             // the set-aside item would be lost the same way.
-            let below = (!ids.same(&op.source, &self.remove[i])).then(|| below(&op.source, &self.remove[i])).flatten();
+            let below = (!ids.same(&op.source, &self.remove[i]))
+                .then(|| below(&op.source, &self.remove[i]))
+                .flatten();
             match below {
                 Some(rest) => inside.push(Some((i, rest))),
-                None => return Err(format!("貼り付け元を削除することになるため中止しました: {}", op.source.display())),
+                None => {
+                    return Err(format!(
+                        "貼り付け元を削除することになるため中止しました: {}",
+                        op.source.display()
+                    ));
+                }
             }
         }
         Ok(inside)
@@ -382,7 +423,9 @@ impl Plan {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
         for dir in &self.merged {
-            let link = std::fs::symlink_metadata(dir).map_or(true, |m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0);
+            let link = std::fs::symlink_metadata(dir).map_or(true, |m| {
+                m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            });
             if !link {
                 let _ = std::fs::remove_dir(dir);
             }
@@ -424,7 +467,11 @@ mod tests {
             .iter()
             .map(|op| {
                 let t = op.target();
-                format!("{}/{}", t.parent().unwrap().file_name().unwrap().to_string_lossy(), t.file_name().unwrap().to_string_lossy())
+                format!(
+                    "{}/{}",
+                    t.parent().unwrap().file_name().unwrap().to_string_lossy(),
+                    t.file_name().unwrap().to_string_lossy()
+                )
             })
             .collect()
     }
@@ -434,7 +481,11 @@ mod tests {
         let sources = [f.0.join("src/Folder"), f.0.join("src/a.txt")];
         let mut asked = Vec::new();
         let plan = plan(&sources, &f.0.join("dst"), false, &mut |q| {
-            asked.push((q.kind, q.target.file_name().unwrap().to_string_lossy().into_owned(), q.auto_name.clone()));
+            asked.push((
+                q.kind,
+                q.target.file_name().unwrap().to_string_lossy().into_owned(),
+                q.auto_name.clone(),
+            ));
             match q.kind {
                 Kind::Folder => (Answer::Merge, false),
                 _ if q.target.ends_with("inner.txt") => (Answer::Overwrite, false),
@@ -451,7 +502,10 @@ mod tests {
                 (Kind::File, "a.txt".into(), "a (3).txt".into()),
             ]
         );
-        assert_eq!(names(&plan), ["Folder/inner.txt", "Folder/sub", "dst/a (3).txt"]);
+        assert_eq!(
+            names(&plan),
+            ["Folder/inner.txt", "Folder/sub", "dst/a (3).txt"]
+        );
         assert!(plan.remove.is_empty() && !plan.skipped && !plan.changed());
         assert_eq!(plan.targets.len(), 2);
     }
@@ -463,7 +517,11 @@ mod tests {
         let mut count = 0;
         let cancelled = plan(&sources, &f.0.join("dst"), false, &mut |q| {
             count += 1;
-            if q.kind == Kind::Folder { (Answer::Replace, true) } else { (Answer::Cancel, false) }
+            if q.kind == Kind::Folder {
+                (Answer::Replace, true)
+            } else {
+                (Answer::Cancel, false)
+            }
         })
         .unwrap();
         assert!(cancelled.is_none() && count == 2);
@@ -479,17 +537,30 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(asked, 2);
-        assert_eq!(names(&plan), ["Folder/inner (2).txt", "Folder/sub", "dst/a (3).txt"]);
+        assert_eq!(
+            names(&plan),
+            ["Folder/inner (2).txt", "Folder/sub", "dst/a (3).txt"]
+        );
         // Newer-only skips an older incoming file.
         let older = plan_newer(&f);
         assert!(older.skipped && older.ops.is_empty());
     }
     fn plan_newer(f: &Fixture) -> Plan {
         let old = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
-        std::fs::File::options().write(true).open(f.0.join("src/a.txt")).unwrap().set_modified(old).unwrap();
-        plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| (Answer::Newer, false))
+        std::fs::File::options()
+            .write(true)
+            .open(f.0.join("src/a.txt"))
             .unwrap()
-            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        plan(
+            &[f.0.join("src/a.txt")],
+            &f.0.join("dst"),
+            false,
+            &mut |_| (Answer::Newer, false),
+        )
+        .unwrap()
+        .unwrap()
     }
     /// Audit #1: Replace must never delete what is being pasted.
     #[test]
@@ -505,34 +576,60 @@ mod tests {
         // aside (shell::tests::replace_with_a_folder_inside_it runs it).
         let nested = crate::shell::shell_path(&root.join(r"w\Folder\Folder"));
         let mut asked = 0;
-        let replaced = plan(&[root.join(r"x\B"), nested.clone()], &root.join("w"), false, &mut |_| {
-            asked += 1;
-            (Answer::Replace, true)
-        })
+        let replaced = plan(
+            &[root.join(r"x\B"), nested.clone()],
+            &root.join("w"),
+            false,
+            &mut |_| {
+                asked += 1;
+                (Answer::Replace, true)
+            },
+        )
         .unwrap()
         .unwrap();
         assert_eq!(asked, 1);
         assert_eq!(replaced.remove, [root.join(r"w\B"), root.join(r"w\Folder")]);
-        assert_eq!(replaced.verify().unwrap(), [None, Some((1, PathBuf::from("Folder")))]);
+        assert_eq!(
+            replaced.verify().unwrap(),
+            [None, Some((1, PathBuf::from("Folder")))]
+        );
         // (b) An item already in the destination: a copy is duplicated without a question,
         // a move does nothing.
         let here = root.join(r"dst\a.txt");
         let mut questions = 0;
-        let copy = plan(&[crate::shell::shell_path(&here), f.0.join("src/a.txt")], &root.join("dst"), false, &mut |_| {
-            questions += 1;
-            (Answer::Skip, false)
-        })
+        let copy = plan(
+            &[crate::shell::shell_path(&here), f.0.join("src/a.txt")],
+            &root.join("dst"),
+            false,
+            &mut |_| {
+                questions += 1;
+                (Answer::Skip, false)
+            },
+        )
         .unwrap()
         .unwrap();
         assert_eq!(names(&copy)[0], "dst/a (3).txt", "\"a (2).txt\" is taken");
         assert_eq!(questions, 1, "only src/a.txt is asked about");
-        let moved = plan(&[here.clone()], &root.join("dst"), true, &mut |_| unreachable!()).unwrap().unwrap();
+        let moved = plan(
+            std::slice::from_ref(&here),
+            &root.join("dst"),
+            true,
+            &mut |_| unreachable!(),
+        )
+        .unwrap()
+        .unwrap();
         assert!(moved.ops.is_empty() && moved.remove.is_empty());
         // A hand-made plan that replaces the source with itself is refused before anything runs.
         let bad = Plan {
             remove: vec![root.join(r"w\Folder\Folder")],
             remove_ids: vec![crate::pathid::ident(&nested)],
-            ops: vec![Op { source: nested, dir: root.join("x"), name: None, fresh: false, overwrites: None }],
+            ops: vec![Op {
+                source: nested,
+                dir: root.join("x"),
+                name: None,
+                fresh: false,
+                overwrites: None,
+            }],
             ..Plan::default()
         };
         assert!(bad.verify().unwrap_err().contains("貼り付け元を削除"));
@@ -543,12 +640,19 @@ mod tests {
     #[test]
     fn replace_only_an_identified_folder() {
         let f = fixture("identified");
-        let replace = || plan(&[f.0.join("src/Folder")], &f.0.join("dst"), false, &mut |q| {
-            assert!(q.replaceable);
-            (Answer::Replace, false)
-        })
-        .unwrap()
-        .unwrap();
+        let replace = || {
+            plan(
+                &[f.0.join("src/Folder")],
+                &f.0.join("dst"),
+                false,
+                &mut |q| {
+                    assert!(q.replaceable);
+                    (Answer::Replace, false)
+                },
+            )
+            .unwrap()
+            .unwrap()
+        };
         let ok = replace();
         assert!(ok.remove_ids[0].is_some() && ok.verify().is_ok());
         let mut unknown = replace();
@@ -572,18 +676,42 @@ mod tests {
         for answer in [Answer::Overwrite, Answer::Newer] {
             // "Newer" needs the incoming file to be newer when asked.
             let newer = SystemTime::now() + std::time::Duration::from_secs(60);
-            std::fs::File::options().write(true).open(f.0.join("src/a.txt")).unwrap().set_modified(newer).unwrap();
-            let plan = plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| (answer.clone(), false)).unwrap().unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(f.0.join("src/a.txt"))
+                .unwrap()
+                .set_modified(newer)
+                .unwrap();
+            let plan = plan(
+                &[f.0.join("src/a.txt")],
+                &f.0.join("dst"),
+                false,
+                &mut |_| (answer.clone(), false),
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(plan.ops.len(), 1);
             assert!(!plan.changed() && plan.verify().is_ok(), "{answer:?}");
             // Saved by another app while the dialog was open: same size, new time.
             let later = SystemTime::now() + std::time::Duration::from_secs(120);
-            std::fs::File::options().write(true).open(&existing).unwrap().set_modified(later).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&existing)
+                .unwrap()
+                .set_modified(later)
+                .unwrap();
             assert!(plan.changed() && plan.verify().is_err(), "{answer:?}");
             std::fs::write(&existing, "a-old").unwrap();
         }
         // Deleted meanwhile: also not what the user chose to overwrite.
-        let plan = plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| (Answer::Overwrite, false)).unwrap().unwrap();
+        let plan = plan(
+            &[f.0.join("src/a.txt")],
+            &f.0.join("dst"),
+            false,
+            &mut |_| (Answer::Overwrite, false),
+        )
+        .unwrap()
+        .unwrap();
         std::fs::remove_file(&existing).unwrap();
         assert!(plan.changed());
     }
@@ -592,13 +720,25 @@ mod tests {
         let f = fixture("identity");
         let existing = f.0.join("dst/a.txt");
         let seen = meta(&existing).unwrap();
-        let planned = plan(&[f.0.join("src/a.txt")], &f.0.join("dst"), false, &mut |_| {
-            // Keep the old object alive, so its ID cannot be reused.
-            std::fs::rename(&existing, f.0.join("dst/old.txt")).unwrap();
-            std::fs::write(&existing, b"other").unwrap();
-            std::fs::File::options().write(true).open(&existing).unwrap().set_modified(seen.modified).unwrap();
-            (Answer::Overwrite, false)
-        }).unwrap().unwrap();
+        let planned = plan(
+            &[f.0.join("src/a.txt")],
+            &f.0.join("dst"),
+            false,
+            &mut |_| {
+                // Keep the old object alive, so its ID cannot be reused.
+                std::fs::rename(&existing, f.0.join("dst/old.txt")).unwrap();
+                std::fs::write(&existing, b"other").unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(&existing)
+                    .unwrap()
+                    .set_modified(seen.modified)
+                    .unwrap();
+                (Answer::Overwrite, false)
+            },
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(meta(&existing), Some(seen));
         assert!(planned.changed());
         assert!(planned.verify().is_err());
@@ -613,12 +753,20 @@ mod tests {
     fn merge_unreadable_source_fails_before_any_transfer() {
         let f = fixture("merge-error");
         let source = f.0.join("src/Folder");
-        let result = plan(std::slice::from_ref(&source), &f.0.join("dst"), true, &mut |_| {
-            std::fs::rename(&source, f.0.join("src/aside")).unwrap();
-            (Answer::Merge, false)
-        });
+        let result = plan(
+            std::slice::from_ref(&source),
+            &f.0.join("dst"),
+            true,
+            &mut |_| {
+                std::fs::rename(&source, f.0.join("src/aside")).unwrap();
+                (Answer::Merge, false)
+            },
+        );
         assert!(result.is_err());
-        assert_eq!(std::fs::read(f.0.join("dst/Folder/inner.txt")).unwrap(), b"old");
+        assert_eq!(
+            std::fs::read(f.0.join("dst/Folder/inner.txt")).unwrap(),
+            b"old"
+        );
         assert!(f.0.join("src/aside/sub/deep.txt").exists());
     }
     /// Audit #10: a merged source folder that is a junction keeps its link after a move.
@@ -628,21 +776,43 @@ mod tests {
         let root = crate::shell::shell_path(&std::fs::canonicalize(&f.0).unwrap());
         std::fs::create_dir_all(root.join("elsewhere")).unwrap();
         std::fs::write(root.join(r"elsewhere\inner.txt"), "real").unwrap();
-        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(root.join(r"src\J")).arg(root.join("elsewhere")).output().unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(root.join(r"src\J"))
+            .arg(root.join("elsewhere"))
+            .output()
+            .unwrap();
         assert!(made.status.success());
         std::fs::create_dir_all(root.join(r"dst\J")).unwrap();
         std::fs::write(root.join(r"dst\J\inner.txt"), "old").unwrap();
         // Merge J, skip its only file: nothing moves, and J is "emptied" only through the link.
-        let mut ask = |q: Question| (if q.kind == Kind::Folder { Answer::Merge } else { Answer::Skip }, false);
-        let moved = plan(&[root.join(r"src\J")], &root.join("dst"), true, &mut ask).unwrap().unwrap();
+        let mut ask = |q: Question| {
+            (
+                if q.kind == Kind::Folder {
+                    Answer::Merge
+                } else {
+                    Answer::Skip
+                },
+                false,
+            )
+        };
+        let moved = plan(&[root.join(r"src\J")], &root.join("dst"), true, &mut ask)
+            .unwrap()
+            .unwrap();
         assert_eq!(moved.merged, [root.join(r"src\J")]);
         moved.remove_emptied();
-        assert!(std::fs::symlink_metadata(root.join(r"src\J")).is_ok(), "junction removed");
+        assert!(
+            std::fs::symlink_metadata(root.join(r"src\J")).is_ok(),
+            "junction removed"
+        );
         assert!(root.join(r"src\J\inner.txt").is_file());
         // Even when the move really emptied the target, the link itself is not ours to remove.
         std::fs::remove_file(root.join(r"elsewhere\inner.txt")).unwrap();
         moved.remove_emptied();
-        assert!(std::fs::symlink_metadata(root.join(r"src\J")).is_ok(), "empty junction removed");
+        assert!(
+            std::fs::symlink_metadata(root.join(r"src\J")).is_ok(),
+            "empty junction removed"
+        );
     }
     /// A folder pasted into itself or below itself is left out before any question.
     #[test]
@@ -650,15 +820,29 @@ mod tests {
         let f = fixture("inside");
         let folder = f.0.join("src/Folder");
         let mut asked = 0;
-        let plan = plan(&[folder.clone(), f.0.join("src/a.txt")], &std::fs::canonicalize(folder.join("sub")).unwrap(), false, &mut |_| {
-            asked += 1;
-            (Answer::Skip, false)
-        })
+        let plan = plan(
+            &[folder.clone(), f.0.join("src/a.txt")],
+            &std::fs::canonicalize(folder.join("sub")).unwrap(),
+            false,
+            &mut |_| {
+                asked += 1;
+                (Answer::Skip, false)
+            },
+        )
         .unwrap()
         .unwrap();
         assert_eq!((plan.inside, asked), (1, 0));
         assert_eq!(names(&plan), ["sub/a.txt"]);
-        let into_itself = Plan { ops: vec![Op { source: folder.clone(), dir: folder.clone(), name: None, fresh: true, overwrites: None }], ..Plan::default() };
+        let into_itself = Plan {
+            ops: vec![Op {
+                source: folder.clone(),
+                dir: folder.clone(),
+                name: None,
+                fresh: true,
+                overwrites: None,
+            }],
+            ..Plan::default()
+        };
         assert!(into_itself.verify().is_err());
     }
     #[test]

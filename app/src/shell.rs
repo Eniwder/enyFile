@@ -26,7 +26,9 @@ use windows::{
 /// their own DLLs: COM loads them by full path with the altered search order.
 /// The exe's static imports are covered by /DEPENDENTLOADFLAG (build.rs).
 pub fn harden_dll_search() {
-    use windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
+    use windows::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+    };
     let _ = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) };
 }
 /// System32, for starting Windows' own programs by full path: a bare name is looked up in
@@ -78,27 +80,52 @@ pub fn wsl_distribution(path: &Path) -> Option<String> {
     if !server.eq_ignore_ascii_case("wsl$") && !server.eq_ignore_ascii_case("wsl.localhost") {
         return None;
     }
-    parts.next().filter(|name| !name.is_empty()).map(str::to_owned)
+    parts
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 fn running_wsl_names(bytes: &[u8]) -> Result<Vec<String>, String> {
     let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.contains(&0) {
-        if bytes.len() % 2 != 0 { return Err("WSL状態の文字コードが不正です".into()); }
-        let wide: Vec<_> = bytes.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        if !bytes.len().is_multiple_of(2) {
+            return Err("WSL状態の文字コードが不正です".into());
+        }
+        let wide: Vec<_> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
         String::from_utf16(&wide).map_err(|e| e.to_string())?
     } else {
         String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())?
     };
-    Ok(text.trim_start_matches('\u{feff}').lines().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect())
+    Ok(text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 /// Worker threads only. Listing running distributions does not access their filesystems.
 /// Unknown state fails closed: automatic updates must not start a stopped distribution.
 pub fn wsl_running(path: &Path) -> Result<bool, String> {
-    use std::{io::Read, os::windows::process::CommandExt, process::{Command, Stdio}};
-    let Some(distribution) = wsl_distribution(path) else { return Ok(true) };
+    use std::{
+        io::Read,
+        os::windows::process::CommandExt,
+        process::{Command, Stdio},
+    };
+    let Some(distribution) = wsl_distribution(path) else {
+        return Ok(true);
+    };
     let mut child = Command::new(system_dir().join("wsl.exe"))
         .args(["--list", "--running", "--quiet"])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
     let mut stdout = child.stdout.take().unwrap();
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -108,17 +135,29 @@ pub fn wsl_running(path: &Path) -> Result<bool, String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if started.elapsed() < Duration::from_secs(5) => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
             result => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break Err(match result { Err(e) => e.to_string(), _ => "WSL状態の確認がタイムアウトしました".into() });
+                break Err(match result {
+                    Err(e) => e.to_string(),
+                    _ => "WSL状態の確認がタイムアウトしました".into(),
+                });
             }
         }
     };
-    let bytes = reader.join().map_err(|_| "WSL状態の読み取りに失敗しました".to_string())?.map_err(|e| e.to_string())?;
-    if !status?.success() { return Err("WSL状態を確認できませんでした".into()); }
-    Ok(running_wsl_names(&bytes)?.iter().any(|name| name.eq_ignore_ascii_case(&distribution)))
+    let bytes = reader
+        .join()
+        .map_err(|_| "WSL状態の読み取りに失敗しました".to_string())?
+        .map_err(|e| e.to_string())?;
+    if !status?.success() {
+        return Err("WSL状態を確認できませんでした".into());
+    }
+    Ok(running_wsl_names(&bytes)?
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(&distribution)))
 }
 /// [`shell_path`] for paths handed to the Shell or Win32. Refused when dropping `\\?\` makes
 /// Win32 normalization point elsewhere (`victim.` becomes `victim`, `nul.txt` a device):
@@ -127,12 +166,17 @@ pub fn os_path(path: &Path) -> Result<PathBuf, String> {
     let plain = shell_path(path);
     if plain.as_os_str() != path.as_os_str() {
         let odd = path.components().find_map(|c| match c {
-            std::path::Component::Normal(name) => win32_alters(&name.to_string_lossy()).then_some(name),
+            std::path::Component::Normal(name) => {
+                win32_alters(&name.to_string_lossy()).then_some(name)
+            }
             std::path::Component::CurDir | std::path::Component::ParentDir => Some(c.as_os_str()),
             _ => None,
         });
         if let Some(name) = odd {
-            return Err(format!("Windows の通常のパスでは扱えない名前です: {}", name.to_string_lossy()));
+            return Err(format!(
+                "Windows の通常のパスでは扱えない名前です: {}",
+                name.to_string_lossy()
+            ));
         }
     }
     Ok(plain)
@@ -142,19 +186,33 @@ fn win32_alters(name: &str) -> bool {
     if name.ends_with(['.', ' ']) {
         return true;
     }
-    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_uppercase();
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_uppercase();
     let numbered = |prefix: &str| {
         base.strip_prefix(prefix).is_some_and(|n| {
             let mut chars = n.chars();
-            matches!((chars.next(), chars.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
+            matches!(
+                (chars.next(), chars.next()),
+                (Some('0'..='9' | '¹' | '²' | '³'), None)
+            )
         })
     };
-    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
-        || numbered("COM")
+    matches!(
+        base.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered("COM")
         || numbered("LPT")
 }
 fn wide(path: &Path) -> Result<Vec<u16>, String> {
-    Ok(os_path(path)?.as_os_str().encode_wide().chain(Some(0)).collect())
+    Ok(os_path(path)?
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect())
 }
 /// The `\\?\` form, for Win32 calls on paths that may exceed MAX_PATH (the manifest's
 /// long-path awareness only counts where the system enables it). A plain path is normalized
@@ -164,9 +222,16 @@ fn verbatim(path: &Path) -> PathBuf {
     if text.starts_with(&r"\\?\".encode_utf16().collect::<Vec<_>>()) {
         return path.to_path_buf();
     }
-    let full: Vec<u16> = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).as_os_str().encode_wide().collect();
+    let full: Vec<u16> = std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .as_os_str()
+        .encode_wide()
+        .collect();
     let out: Vec<u16> = match full.strip_prefix(&[92, 92][..]) {
-        Some(unc) => r"\\?\UNC\".encode_utf16().chain(unc.iter().copied()).collect(),
+        Some(unc) => r"\\?\UNC\"
+            .encode_utf16()
+            .chain(unc.iter().copied())
+            .collect(),
         None => r"\\?\".encode_utf16().chain(full).collect(),
     };
     PathBuf::from(OsString::from_wide(&out))
@@ -267,7 +332,11 @@ pub fn set_clipboard(owner: HWND, paths: &[PathBuf], cut: bool) -> Result<(), St
 pub fn set_clipboard_text(owner: HWND, text: &str) -> Result<(), String> {
     let clipboard = Clipboard::open(Some(owner), 5)?;
     unsafe { EmptyClipboard() }.map_err(|e| e.to_string())?;
-    let bytes: Vec<u8> = text.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect();
+    let bytes: Vec<u8> = text
+        .encode_utf16()
+        .chain(Some(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
     clipboard.put(CF_UNICODETEXT.0 as u32, &bytes)
 }
 
@@ -323,14 +392,25 @@ fn write_dword(data: &IDataObject, cf: u32, value: u32) {
 /// DragQueryFileW trusts the block: the list must start inside it and end with a double
 /// NUL before its end. Another process supplies it, so check first.
 fn hdrop_valid(bytes: &[u8]) -> bool {
-    let Some(header) = bytes.get(..20) else { return false };
+    let Some(header) = bytes.get(..20) else {
+        return false;
+    };
     let at = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
     let wide = header[16..20] != [0; 4];
-    let Some(list) = bytes.get(at..).filter(|_| at >= 20) else { return false };
+    let Some(list) = bytes.get(at..).filter(|_| at >= 20) else {
+        return false;
+    };
     // The list ends at the first empty name.
     let ends = |units: &[u16]| units.first() == Some(&0) || units.windows(2).any(|w| w == [0, 0]);
     if wide {
-        ends(&list.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect::<Vec<_>>())
+        ends(
+            &list
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect::<Vec<_>>(),
+        )
     } else {
         ends(&list.iter().map(|&b| u16::from(b)).collect::<Vec<_>>())
     }
@@ -341,7 +421,8 @@ pub(super) fn hdrop_paths(data: &IDataObject) -> Option<Vec<PathBuf>> {
         let valid = medium.tymed == TYMED_HGLOBAL.0 as u32 && {
             let h = medium.u.hGlobal;
             let ptr = GlobalLock(h);
-            let valid = !ptr.is_null() && hdrop_valid(std::slice::from_raw_parts(ptr.cast::<u8>(), GlobalSize(h)));
+            let valid = !ptr.is_null()
+                && hdrop_valid(std::slice::from_raw_parts(ptr.cast::<u8>(), GlobalSize(h)));
             let _ = GlobalUnlock(h);
             valid
         };
@@ -370,13 +451,18 @@ pub fn read_clipboard() -> Result<(Vec<PathBuf>, u32), String> {
     Ok((paths, effect))
 }
 
-pub fn clipboard_sequence() -> u32 { unsafe { GetClipboardSequenceNumber() } }
+pub fn clipboard_sequence() -> u32 {
+    unsafe { GetClipboardSequenceNumber() }
+}
 /// Non-file clipboard contents clear decorations; access errors are retried.
 pub fn clipboard_file_marks() -> Result<(Vec<PathBuf>, bool), String> {
     let data = unsafe { OleGetClipboard() }.map_err(|e| e.to_string())?;
     let paths = hdrop_paths(&data).unwrap_or_default();
     let effect = read_dword(&data, preferred_effect()).unwrap_or(DROPEFFECT_COPY.0);
-    Ok((paths, effect & DROPEFFECT_MOVE.0 != 0 && effect & DROPEFFECT_COPY.0 == 0))
+    Ok((
+        paths,
+        effect & DROPEFFECT_MOVE.0 != 0 && effect & DROPEFFECT_COPY.0 == 0,
+    ))
 }
 
 /// Files on the clipboard. `paths` is None for Shell items without file system paths.
@@ -452,7 +538,8 @@ pub fn item_array(paths: &[PathBuf]) -> Result<IShellItemArray, String> {
 /// also carries out a move. Blocks in the system's drag loop; call on the window's thread
 /// with nothing borrowed. Returns the effect the target chose.
 pub fn drag_out(paths: &[PathBuf]) -> Result<DROPEFFECT, String> {
-    let data: IDataObject = unsafe { item_array(paths)?.BindToHandler(None, &BHID_DataObject) }.map_err(|e| e.to_string())?;
+    let data: IDataObject = unsafe { item_array(paths)?.BindToHandler(None, &BHID_DataObject) }
+        .map_err(|e| e.to_string())?;
     let allowed = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0 | DROPEFFECT_LINK.0);
     unsafe { SHDoDragDrop(None, &data, None::<&IDropSource>, allowed) }.map_err(|e| e.to_string())
 }
@@ -501,26 +588,53 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
     }
     fn FinishOperations(&self, hr: HRESULT) -> windows::core::Result<()> {
         if self.1.is_some() {
-            crate::recovery::record(format!("delete: Shell finished; thread={:?} HRESULT=0x{:08X}", std::thread::current().id(), hr.0 as u32));
+            crate::recovery::record(format!(
+                "delete: Shell finished; thread={:?} HRESULT=0x{:08X}",
+                std::thread::current().id(),
+                hr.0 as u32
+            ));
         }
         Ok(())
     }
     fn PreRenameItem(&self, _: u32, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
         Ok(())
     }
-    fn PostRenameItem(&self, _: u32, _: Item, _: &PCWSTR, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+    fn PostRenameItem(
+        &self,
+        _: u32,
+        _: Item,
+        _: &PCWSTR,
+        hr: HRESULT,
+        _: Item,
+    ) -> windows::core::Result<()> {
         self.note(hr)
     }
     fn PreMoveItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
         Ok(())
     }
-    fn PostMoveItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+    fn PostMoveItem(
+        &self,
+        _: u32,
+        _: Item,
+        _: Item,
+        _: &PCWSTR,
+        hr: HRESULT,
+        _: Item,
+    ) -> windows::core::Result<()> {
         self.note(hr)
     }
     fn PreCopyItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
         Ok(())
     }
-    fn PostCopyItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+    fn PostCopyItem(
+        &self,
+        _: u32,
+        _: Item,
+        _: Item,
+        _: &PCWSTR,
+        hr: HRESULT,
+        _: Item,
+    ) -> windows::core::Result<()> {
         self.note(hr)
     }
     fn PreDeleteItem(&self, _: u32, item: Item) -> windows::core::Result<()> {
@@ -532,12 +646,26 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
         }
         Ok(())
     }
-    fn PostDeleteItem(&self, _: u32, item: Item, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+    fn PostDeleteItem(
+        &self,
+        _: u32,
+        item: Item,
+        hr: HRESULT,
+        _: Item,
+    ) -> windows::core::Result<()> {
         if self.1.is_some() && (hr.is_err() || hr == COPYENGINE_S_USER_IGNORED) {
-            let path = item.as_ref().map(diagnostic_item_path).unwrap_or_else(|| "<null item>".into());
+            let path = item
+                .as_ref()
+                .map(diagnostic_item_path)
+                .unwrap_or_else(|| "<null item>".into());
             // The copy engine can report this only after its retry/skip dialog closes.
             // Do not interpret this timestamp as the moment the lock was acquired.
-            crate::recovery::checkpoint(format!("delete: item failed/skipped; thread={:?} path={path:?} HRESULT=0x{:08X} error={}", std::thread::current().id(), hr.0 as u32, windows::core::Error::from_hresult(hr)));
+            crate::recovery::checkpoint(format!(
+                "delete: item failed/skipped; thread={:?} path={path:?} HRESULT=0x{:08X} error={}",
+                std::thread::current().id(),
+                hr.0 as u32,
+                windows::core::Error::from_hresult(hr)
+            ));
             delete_diagnostics::inspect(&path, "after-failure", true);
         }
         self.note(hr)
@@ -545,7 +673,16 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
     fn PreNewItem(&self, _: u32, _: Item, _: &PCWSTR) -> windows::core::Result<()> {
         Ok(())
     }
-    fn PostNewItem(&self, _: u32, _: Item, _: &PCWSTR, _: &PCWSTR, _: u32, hr: HRESULT, _: Item) -> windows::core::Result<()> {
+    fn PostNewItem(
+        &self,
+        _: u32,
+        _: Item,
+        _: &PCWSTR,
+        _: &PCWSTR,
+        _: u32,
+        hr: HRESULT,
+        _: Item,
+    ) -> windows::core::Result<()> {
         self.note(hr)
     }
     fn UpdateProgress(&self, _: u32, _: u32) -> windows::core::Result<()> {
@@ -599,11 +736,20 @@ pub fn transfer(plan: &crate::paste::Plan) -> Result<Transferred, String> {
         .ops
         .iter()
         .zip(inside)
-        .map(|(op, inside)| inside.map_or_else(|| op.source.clone(), |(i, rest)| aside[i].1.join(rest)))
+        .map(|(op, inside)| {
+            inside.map_or_else(|| op.source.clone(), |(i, rest)| aside[i].1.join(rest))
+        })
         .collect();
     match paste_ops(plan, &sources, &direct) {
-        Ok((false, false)) => Ok(Transferred { kept: delete_aside(&aside), ..Default::default() }),
-        Ok((aborted, missed)) => Ok(Transferred { aborted, missed, kept: restore(&aside) }),
+        Ok((false, false)) => Ok(Transferred {
+            kept: delete_aside(&aside),
+            ..Default::default()
+        }),
+        Ok((aborted, missed)) => Ok(Transferred {
+            aborted,
+            missed,
+            kept: restore(&aside),
+        }),
         Err(e) => Err(with_kept(e, &restore(&aside))),
     }
 }
@@ -612,8 +758,15 @@ pub fn with_kept(message: String, kept: &[PathBuf]) -> String {
     if kept.is_empty() {
         return message;
     }
-    let names: Vec<_> = kept.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy()).collect();
-    format!("{message}（置換前のフォルダが残っています: {}）", names.join("、"))
+    let names: Vec<_> = kept
+        .iter()
+        .filter_map(|p| p.file_name())
+        .map(|n| n.to_string_lossy())
+        .collect();
+    format!(
+        "{message}（置換前のフォルダが残っています: {}）",
+        names.join("、")
+    )
 }
 /// Same-folder renames: instant, and they fail rather than replace an existing item.
 /// A virus scanner or the indexer may hold something inside open for a moment (the copy
@@ -624,12 +777,24 @@ fn rename_plain(from: &Path, to: &Path) -> windows::core::Result<()> {
 /// A move within one volume (no copy fallback), for renames and for items the copy engine
 /// cannot reach. A folder moves as one rename, however deep it goes.
 fn move_plain(from: &Path, to: &Path, flags: MOVE_FILE_FLAGS) -> windows::core::Result<()> {
-    let wide = |p: &Path| -> Vec<u16> { verbatim(p).as_os_str().encode_wide().chain(Some(0)).collect() };
+    let wide = |p: &Path| -> Vec<u16> {
+        verbatim(p)
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    };
     let (from, to) = (wide(from), wide(to));
-    let busy = [ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, ERROR_ACCESS_DENIED];
+    let busy = [
+        ERROR_SHARING_VIOLATION,
+        ERROR_LOCK_VIOLATION,
+        ERROR_ACCESS_DENIED,
+    ];
     for _ in 0..10 {
         match unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), flags) } {
-            Err(e) if busy.iter().any(|c| e.code() == c.to_hresult()) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) if busy.iter().any(|c| e.code() == c.to_hresult()) => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
             done => return done,
         }
     }
@@ -666,16 +831,24 @@ fn reach(dir: &Path, limit: usize) -> Result<usize, String> {
 /// For each op, whether it goes past [`SHELL_MAX`] and is moved here instead of by the copy
 /// engine. Checked before anything changes: a long copy, or a long move to another volume,
 /// refuses the whole paste. `inside` is from [`crate::paste::Plan::verify`].
-fn beyond_shell(plan: &crate::paste::Plan, inside: &[Option<(usize, PathBuf)>]) -> Result<Vec<bool>, String> {
+fn beyond_shell(
+    plan: &crate::paste::Plan,
+    inside: &[Option<(usize, PathBuf)>],
+) -> Result<Vec<bool>, String> {
     use std::os::windows::fs::MetadataExt;
     let len = |p: &Path| shell_path(p).as_os_str().encode_wide().count();
     let mut direct = Vec::new();
     for (op, inside) in plan.ops.iter().zip(inside) {
         // A source inside a replaced folder is reached through its set-aside name.
-        let aside = if inside.is_some() { "~enyfile-old-99".len() } else { 0 };
+        let aside = if inside.is_some() {
+            "~enyfile-old-99".len()
+        } else {
+            0
+        };
         let base = (len(&op.source) + aside).max(len(&op.target()));
         let attributes = std::fs::symlink_metadata(&op.source)
-            .map_err(|e| format!("{}: {e}", op.source.display()))?.file_attributes();
+            .map_err(|e| format!("{}: {e}", op.source.display()))?
+            .file_attributes();
         let extent = if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
             0
         } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
@@ -706,14 +879,21 @@ fn set_aside(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
         let mut renamed = Err(String::new());
         for n in 1..100 {
             let mut name = path.file_name().unwrap_or_default().to_os_string();
-            name.push(if n == 1 { "~enyfile-old".to_string() } else { format!("~enyfile-old-{n}") });
+            name.push(if n == 1 {
+                "~enyfile-old".to_string()
+            } else {
+                format!("~enyfile-old-{n}")
+            });
             let temp = path.with_file_name(name);
             match rename_plain(path, &temp) {
                 Ok(()) => {
                     renamed = Ok(temp);
                     break;
                 }
-                Err(e) if [ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS].iter().any(|c| e.code() == c.to_hresult()) => {}
+                Err(e)
+                    if [ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS]
+                        .iter()
+                        .any(|c| e.code() == c.to_hresult()) => {}
                 Err(e) => {
                     renamed = Err(e.message());
                     break;
@@ -723,7 +903,10 @@ fn set_aside(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>, String> {
         match renamed {
             Ok(temp) => aside.push((path.clone(), temp)),
             Err(e) => {
-                let e = format!("置換するフォルダを退避できません: {}: {e}", shell_path(path).display());
+                let e = format!(
+                    "置換するフォルダを退避できません: {}: {e}",
+                    shell_path(path).display()
+                );
                 return Err(with_kept(e, &restore(&aside)));
             }
         }
@@ -756,18 +939,31 @@ fn delete_aside(aside: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
     if deleted == Ok(false) {
         return Vec::new();
     }
-    aside.iter().map(|(_, temp)| temp.clone()).filter(|temp| std::fs::symlink_metadata(temp).is_ok()).collect()
+    aside
+        .iter()
+        .map(|(_, temp)| temp.clone())
+        .filter(|temp| std::fs::symlink_metadata(temp).is_ok())
+        .collect()
 }
 /// The copies and moves themselves: whether aborted, and whether any item was left out.
 /// `direct` ops (see [`beyond_shell`]) are moved here, after the copy engine's, unless the
 /// user aborted those.
-fn paste_ops(plan: &crate::paste::Plan, sources: &[PathBuf], direct: &[bool]) -> Result<(bool, bool), String> {
+fn paste_ops(
+    plan: &crate::paste::Plan,
+    sources: &[PathBuf],
+    direct: &[bool],
+) -> Result<(bool, bool), String> {
     let steps = || plan.ops.iter().zip(sources).zip(direct);
     let (aborted, missed) = shell_ops(plan, steps().filter(|(_, d)| !**d).map(|(s, _)| s))?;
     if !aborted {
         for ((step, source), _) in steps().filter(|(_, d)| **d) {
-            let flags = if step.overwrites.is_some() { MOVEFILE_REPLACE_EXISTING } else { MOVE_FILE_FLAGS(0) };
-            move_plain(source, &step.target(), flags).map_err(|e| format!("{}: {}", shell_path(source).display(), e.message()))?;
+            let flags = if step.overwrites.is_some() {
+                MOVEFILE_REPLACE_EXISTING
+            } else {
+                MOVE_FILE_FLAGS(0)
+            };
+            move_plain(source, &step.target(), flags)
+                .map_err(|e| format!("{}: {}", shell_path(source).display(), e.message()))?;
         }
     }
     Ok((aborted, missed))
@@ -792,8 +988,10 @@ fn shell_ops<'a>(
             if !folders.contains_key(&step.dir) {
                 folders.insert(step.dir.clone(), item(&step.dir)?);
             }
-            let name: Option<Vec<u16>> =
-                step.name.as_ref().map(|n| n.encode_utf16().chain(Some(0)).collect());
+            let name: Option<Vec<u16>> = step
+                .name
+                .as_ref()
+                .map(|n| n.encode_utf16().chain(Some(0)).collect());
             let name = name.as_ref().map_or(PCWSTR::null(), |n| PCWSTR(n.as_ptr()));
             let source = item(source)?;
             if plan.moved {
@@ -859,21 +1057,24 @@ pub fn paste_shell_items(destination: &Path, moved: bool) -> Result<bool, String
 /// F2 rename through the Shell (undoable from Explorer like any Shell rename).
 /// Names differing only in leading spaces use Win32: the Shell treats them as equal.
 pub fn rename(path: &Path, name: &str) -> Result<(), String> {
-    if let Some(old) = path.file_name().and_then(|n| n.to_str()) {
-        if old != name && old.trim_start_matches(' ').eq_ignore_ascii_case(name.trim_start_matches(' '))
-            && (old.starts_with(' ') || name.starts_with(' '))
-        {
-            let target = path.with_file_name(name);
-            os_path(path)?;
-            os_path(&target)?;
-            // No replace flag: an existing destination must remain untouched.
-            return rename_plain(path, &target).map_err(|e| e.to_string());
-        }
+    if let Some(old) = path.file_name().and_then(|n| n.to_str())
+        && old != name
+        && old
+            .trim_start_matches(' ')
+            .eq_ignore_ascii_case(name.trim_start_matches(' '))
+        && (old.starts_with(' ') || name.starts_with(' '))
+    {
+        let target = path.with_file_name(name);
+        os_path(path)?;
+        os_path(&target)?;
+        // No replace flag: an existing destination must remain untouched.
+        return rename_plain(path, &target).map_err(|e| e.to_string());
     }
     let _ole = Apartment::new()?;
     let op = operation(FOF_ALLOWUNDO)?;
     let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-    unsafe { op.RenameItem(&item(path)?, PCWSTR(name.as_ptr()), None) }.map_err(|e| e.to_string())?;
+    unsafe { op.RenameItem(&item(path)?, PCWSTR(name.as_ptr()), None) }
+        .map_err(|e| e.to_string())?;
     match finish(&op)? {
         false => Ok(()),
         true => Err("名前の変更は中止されました".into()),
@@ -882,15 +1083,30 @@ pub fn rename(path: &Path, name: &str) -> Result<(), String> {
 
 /// Recycle Bin by default; `permanent` matches Shift+Delete. Windows shows its own confirmation;
 /// `deleting` is called once it is answered yes and the first item is about to go.
-pub fn delete(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + Send + Sync + 'static) -> Result<bool, String> {
+pub fn delete(
+    paths: &[PathBuf],
+    permanent: bool,
+    deleting: impl Fn() + Send + Sync + 'static,
+) -> Result<bool, String> {
     let started = Instant::now();
-    crate::recovery::record(format!("delete: requested; thread={:?} permanent={permanent} paths={paths:?}", std::thread::current().id()));
+    crate::recovery::record(format!(
+        "delete: requested; thread={:?} permanent={permanent} paths={paths:?}",
+        std::thread::current().id()
+    ));
     let result = delete_inner(paths, permanent, deleting);
-    crate::recovery::checkpoint(format!("delete: returned; thread={:?} elapsed_ms={} result={result:?}", std::thread::current().id(), started.elapsed().as_millis()));
+    crate::recovery::checkpoint(format!(
+        "delete: returned; thread={:?} elapsed_ms={} result={result:?}",
+        std::thread::current().id(),
+        started.elapsed().as_millis()
+    ));
     result
 }
 
-fn delete_inner(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + Send + Sync + 'static) -> Result<bool, String> {
+fn delete_inner(
+    paths: &[PathBuf],
+    permanent: bool,
+    deleting: impl Fn() + Send + Sync + 'static,
+) -> Result<bool, String> {
     let _ole = Apartment::new()?;
     let flags = if permanent {
         FOF_WANTNUKEWARNING
@@ -901,11 +1117,15 @@ fn delete_inner(paths: &[PathBuf], permanent: bool, deleting: impl Fn() + Send +
     let once = AtomicBool::new(false);
     let deleting = move || {
         if !once.swap(true, Ordering::Relaxed) {
-            crate::recovery::record(format!("delete: confirmation accepted; thread={:?}", std::thread::current().id()));
+            crate::recovery::record(format!(
+                "delete: confirmation accepted; thread={:?}",
+                std::thread::current().id()
+            ));
             deleting();
         }
     };
-    let sink: IFileOperationProgressSink = Missed(Arc::new(AtomicBool::new(false)), Some(Box::new(deleting))).into();
+    let sink: IFileOperationProgressSink =
+        Missed(Arc::new(AtomicBool::new(false)), Some(Box::new(deleting))).into();
     unsafe {
         op.Advise(&sink).map_err(|e| e.to_string())?;
         for path in paths {
@@ -930,14 +1150,21 @@ pub fn shortcut_folder(path: &Path) -> Result<Option<PathBuf>, String> {
     let _ole = Apartment::new()?;
     let file = wide(path)?;
     let target = unsafe {
-        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
-        link.cast::<IPersistFile>().map_err(|e| e.to_string())?
-            .Load(PCWSTR(file.as_ptr()), STGM_READ).map_err(|e| e.to_string())?;
+        let link: IShellLinkW =
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
+        link.cast::<IPersistFile>()
+            .map_err(|e| e.to_string())?
+            .Load(PCWSTR(file.as_ptr()), STGM_READ)
+            .map_err(|e| e.to_string())?;
         let mut buffer = vec![0u16; 32_768];
         // Flags 0 asks for the normal target path (not the unexpanded RAWPATH).
         // GetArguments/GetWorkingDirectory are intentionally not used.
-        link.GetPath(&mut buffer, std::ptr::null_mut(), 0).map_err(|e| e.to_string())?;
-        let len = buffer.iter().position(|&c| c == 0).filter(|&n| n > 0 && n < buffer.len() - 1)
+        link.GetPath(&mut buffer, std::ptr::null_mut(), 0)
+            .map_err(|e| e.to_string())?;
+        let len = buffer
+            .iter()
+            .position(|&c| c == 0)
+            .filter(|&n| n > 0 && n < buffer.len() - 1)
             .ok_or("ショートカットのリンク先を通常のパスとして取得できません")?;
         PathBuf::from(OsString::from_wide(&buffer[..len]))
     };
@@ -961,7 +1188,8 @@ fn shortcut_target_folder(target: &Path) -> Result<Option<PathBuf>, String> {
         return Err("ショートカットのリンク先が通常の絶対パスではありません".into());
     }
     let target = os_path(target)?;
-    let metadata = std::fs::metadata(&target).map_err(|e| format!("ショートカットのリンク先を確認できません: {e}"))?;
+    let metadata = std::fs::metadata(&target)
+        .map_err(|e| format!("ショートカットのリンク先を確認できません: {e}"))?;
     if metadata.is_dir() {
         Ok(Some(target))
     } else if metadata.is_file() {
@@ -983,10 +1211,13 @@ pub fn is_junction(path: &Path) -> bool {
     b.len() == 38
         && b[0] == b'{'
         && b[37] == b'}'
-        && b[1..37]
-            .iter()
-            .enumerate()
-            .all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { *c == b'-' } else { c.is_ascii_hexdigit() })
+        && b[1..37].iter().enumerate().all(|(i, c)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *c == b'-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
 }
 /// The "explore" verb, not "open": a folder's default verb may belong to another file manager.
 pub fn explore(dir: &Path) -> Result<(), String> {
@@ -1004,11 +1235,16 @@ pub fn shell_folder(name: &str) -> Result<Option<PathBuf>, String> {
         let plain = unsafe { path.to_string() }.ok().map(PathBuf::from);
         unsafe { CoTaskMemFree(Some(path.0 as *const _)) };
         if let Some(path) = plain {
-            return if path.is_dir() { Ok(Some(path)) } else { Err(not_folder()) };
+            return if path.is_dir() {
+                Ok(Some(path))
+            } else {
+                Err(not_folder())
+            };
         }
     }
     // No path: only a virtual folder binds as one.
-    unsafe { item.BindToHandler::<_, IShellFolder>(None, &BHID_SFObject) }.map_err(|_| not_folder())?;
+    unsafe { item.BindToHandler::<_, IShellFolder>(None, &BHID_SFObject) }
+        .map_err(|_| not_folder())?;
     explore(Path::new(name))?;
     Ok(None)
 }
@@ -1022,7 +1258,9 @@ fn execute(verb: PCWSTR, path: &Path, folder: Option<&Path>) -> Result<(), Strin
             verb,
             PCWSTR(path.as_ptr()),
             PCWSTR::null(),
-            folder.as_ref().map_or(PCWSTR::null(), |f| PCWSTR(f.as_ptr())),
+            folder
+                .as_ref()
+                .map_or(PCWSTR::null(), |f| PCWSTR(f.as_ptr())),
             SW_SHOWNORMAL,
         )
     };
@@ -1045,7 +1283,11 @@ pub fn pick_folder(start: Option<&Path>) -> Option<PathBuf> {
             let _ = dialog.SetFolder(&folder);
         }
         dialog.Show(None).ok()?;
-        let name = dialog.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let name = dialog
+            .GetResult()
+            .ok()?
+            .GetDisplayName(SIGDN_FILESYSPATH)
+            .ok()?;
         let path = name.to_string().ok().map(PathBuf::from);
         CoTaskMemFree(Some(name.0 as *const _));
         path
@@ -1061,7 +1303,12 @@ pub fn revoke_drop_target(hwnd: HWND) {
 /// saved position from an unplugged display does not reopen the window out of reach.
 pub fn on_screen(x: i32, y: i32, width: u32) -> bool {
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromRect};
-    let strip = RECT { left: x, top: y, right: x.saturating_add(width as i32), bottom: y.saturating_add(32) };
+    let strip = RECT {
+        left: x,
+        top: y,
+        right: x.saturating_add(width as i32),
+        bottom: y.saturating_add(32),
+    };
     !unsafe { MonitorFromRect(&strip, MONITOR_DEFAULTTONULL) }.is_invalid()
 }
 thread_local! {
@@ -1087,8 +1334,8 @@ pub enum WindowNotice {
 /// Watches session shutdown, frame clicks, user resume from sleep, and lone Alt taps.
 /// Reinstalled for each recreated native window; released at WM_NCDESTROY.
 pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
-    use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::Win32::System::{Power::*, SystemServices::GUID_SESSION_DISPLAY_STATUS};
+    use windows::Win32::UI::WindowsAndMessaging::*;
     struct WindowHook {
         notify: Box<dyn Fn(WindowNotice)>,
         power: Option<HPOWERNOTIFY>,
@@ -1096,24 +1343,38 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
     }
     impl Drop for WindowHook {
         fn drop(&mut self) {
-            if let Some(power) = self.power.take() { let _ = unsafe { UnregisterPowerSettingNotification(power) }; }
+            if let Some(power) = self.power.take() {
+                let _ = unsafe { UnregisterPowerSettingNotification(power) };
+            }
         }
     }
     const VK_MENU: usize = 0x12;
-    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, data: usize) -> LRESULT {
+    unsafe extern "system" fn proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        data: usize,
+    ) -> LRESULT {
         let hook = data as *mut WindowHook;
         let repeat = lparam.0 & (1 << 30) != 0;
         match msg {
             WM_QUERYENDSESSION => {
                 // Agree immediately; cleanup belongs to the confirmed notification.
-                crate::recovery::record(format!("Windows session end queried; flags={:#x}", lparam.0));
+                crate::recovery::record(format!(
+                    "Windows session end queried; flags={:#x}",
+                    lparam.0
+                ));
                 return LRESULT(1);
             }
             WM_ENDSESSION => {
                 if wparam.0 != 0 {
                     unsafe { ((*hook).notify)(WindowNotice::SessionEnding) };
                 } else {
-                    crate::recovery::checkpoint("Windows session end cancelled; application continues".into());
+                    crate::recovery::checkpoint(
+                        "Windows session end cancelled; application continues".into(),
+                    );
                 }
                 return LRESULT(0);
             }
@@ -1135,7 +1396,8 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
                 }
             }
             WM_SYSKEYUP if wparam.0 == VK_MENU => ALT_TAP.set(ALT_ALONE.replace(false)),
-            WM_KEYDOWN | WM_SYSKEYDOWN | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_KILLFOCUS => {
+            WM_KEYDOWN | WM_SYSKEYDOWN | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
+            | WM_KILLFOCUS => {
                 ALT_ALONE.set(false);
                 ALT_TAP.set(false);
             }
@@ -1144,16 +1406,25 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
                 ALT_ALONE.set(false);
                 unsafe { ((*hook).notify)(WindowNotice::FrameClick) };
             }
-            WM_POWERBROADCAST if wparam.0 == PBT_APMRESUMESUSPEND as usize
-                || wparam.0 == PBT_APMRESUMEAUTOMATIC as usize => {
+            WM_POWERBROADCAST
+                if wparam.0 == PBT_APMRESUMESUSPEND as usize
+                    || wparam.0 == PBT_APMRESUMEAUTOMATIC as usize =>
+            {
                 unsafe { ((*hook).notify)(WindowNotice::Resumed) };
             }
             WM_POWERBROADCAST if wparam.0 == PBT_POWERSETTINGCHANGE as usize && lparam.0 != 0 => {
                 let setting = lparam.0 as *const POWERBROADCAST_SETTING;
-                if unsafe { (*setting).PowerSetting == GUID_SESSION_DISPLAY_STATUS && (*setting).DataLength == 4 } {
-                    let state = unsafe { std::ptr::read_unaligned(std::ptr::addr_of!((*setting).Data).cast::<u32>()) };
+                if unsafe {
+                    (*setting).PowerSetting == GUID_SESSION_DISPLAY_STATUS
+                        && (*setting).DataLength == 4
+                } {
+                    let state = unsafe {
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*setting).Data).cast::<u32>())
+                    };
                     let previous = unsafe { (*hook).display.replace(state) };
-                    crate::recovery::record(format!("session display state: {previous:?} -> {state}; hwnd={hwnd:?}"));
+                    crate::recovery::record(format!(
+                        "session display state: {previous:?} -> {state}; hwnd={hwnd:?}"
+                    ));
                     // Registration sends an initial state too. Ignore it to avoid a
                     // recreate/register/initial-notification recovery loop.
                     if display_became_on(previous, state) {
@@ -1161,18 +1432,33 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
                     }
                 }
             }
-            WM_NCDESTROY => {
-                unsafe { let _ = RemoveWindowSubclass(hwnd, Some(proc), _id); drop(Box::from_raw(hook)); }
-            }
+            WM_NCDESTROY => unsafe {
+                let _ = RemoveWindowSubclass(hwnd, Some(proc), _id);
+                drop(Box::from_raw(hook));
+            },
             _ => {}
         }
         unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
     }
-    let power = unsafe { RegisterPowerSettingNotification(HANDLE(hwnd.0), &GUID_SESSION_DISPLAY_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE) };
-    if let Err(error) = &power { crate::recovery::record(format!("display notification registration failed: {error}")); }
-    let data = Box::into_raw(Box::new(WindowHook { notify: on_notice, power: power.ok(), display: None }));
+    let power = unsafe {
+        RegisterPowerSettingNotification(
+            HANDLE(hwnd.0),
+            &GUID_SESSION_DISPLAY_STATUS,
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        )
+    };
+    if let Err(error) = &power {
+        crate::recovery::record(format!("display notification registration failed: {error}"));
+    }
+    let data = Box::into_raw(Box::new(WindowHook {
+        notify: on_notice,
+        power: power.ok(),
+        display: None,
+    }));
     if !unsafe { SetWindowSubclass(hwnd, Some(proc), 1, data as usize) }.as_bool() {
-        unsafe { drop(Box::from_raw(data)); }
+        unsafe {
+            drop(Box::from_raw(data));
+        }
         crate::recovery::record("native window hook installation failed".into());
     }
 }
@@ -1213,8 +1499,13 @@ pub fn dark_title_bar(hwnd: HWND) {
 /// resource (build.rs) for both so the taskbar and Alt+Tab get crisp sizes too.
 pub fn window_icon(hwnd: HWND) {
     use windows::Win32::{System::LibraryLoader::GetModuleHandleW, UI::WindowsAndMessaging::*};
-    let Ok(module) = (unsafe { GetModuleHandleW(None) }) else { return };
-    for (kind, cx, cy) in [(ICON_BIG, SM_CXICON, SM_CYICON), (ICON_SMALL, SM_CXSMICON, SM_CYSMICON)] {
+    let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
+        return;
+    };
+    for (kind, cx, cy) in [
+        (ICON_BIG, SM_CXICON, SM_CYICON),
+        (ICON_SMALL, SM_CXSMICON, SM_CYSMICON),
+    ] {
         let icon = unsafe {
             LoadImageW(
                 Some(module.into()),
@@ -1227,7 +1518,14 @@ pub fn window_icon(hwnd: HWND) {
         };
         // Leaving the handle alive is fine: the window lives until the process exits.
         if let Ok(icon) = icon {
-            unsafe { SendMessageW(hwnd, WM_SETICON, Some(WPARAM(kind as usize)), Some(LPARAM(icon.0 as isize))) };
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(kind as usize)),
+                    Some(LPARAM(icon.0 as isize)),
+                )
+            };
         }
     }
 }
@@ -1246,11 +1544,15 @@ pub struct Watch {
     alive: Arc<AtomicBool>,
 }
 impl Watch {
-    pub fn is_alive(&self) -> bool { self.alive.load(Ordering::Acquire) }
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
 }
 struct WatchLife(Arc<AtomicBool>);
 impl Drop for WatchLife {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 impl Drop for Watch {
     fn drop(&mut self) {
@@ -1262,13 +1564,17 @@ impl Drop for Watch {
 pub fn watch(dir: PathBuf, changed: impl Fn() + Send + 'static) -> Option<Watch> {
     let path = dir;
     let dir = wide(&path).ok()?;
-    let stop = Arc::new(Event(unsafe { CreateEventW(None, true, false, None) }.ok()?));
+    let stop = Arc::new(Event(
+        unsafe { CreateEventW(None, true, false, None) }.ok()?,
+    ));
     let thread_stop = stop.clone();
     let alive = Arc::new(AtomicBool::new(true));
     let life = WatchLife(alive.clone());
     std::thread::spawn(move || {
         let _life = life;
-        if !wsl_running(&path).unwrap_or(false) || unsafe { WaitForSingleObject(thread_stop.0, 0) } == WAIT_OBJECT_0 {
+        if !wsl_running(&path).unwrap_or(false)
+            || unsafe { WaitForSingleObject(thread_stop.0, 0) } == WAIT_OBJECT_0
+        {
             return;
         }
         let filter = FILE_NOTIFY_CHANGE_FILE_NAME
@@ -1331,8 +1637,12 @@ mod tests {
     #[test]
     fn folder_shortcuts_are_inspected_without_executing_arguments() {
         let _ole = Apartment::new().unwrap();
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("enyfile-links-{}-{stamp}", std::process::id()));
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("enyfile-links-{}-{stamp}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         let folder = dir.join("日本語 & folder; $(test)");
         std::fs::create_dir(&folder).unwrap();
@@ -1341,68 +1651,116 @@ mod tests {
         let make_link = |name: &str, target: &Path| {
             let path = dir.join(name);
             unsafe {
-                let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
-                link.SetPath(PCWSTR(wide(target).unwrap().as_ptr())).unwrap();
-                link.SetArguments(w!("/c echo must-not-run > unexpected.txt")).unwrap();
-                link.SetWorkingDirectory(PCWSTR(wide(&dir).unwrap().as_ptr())).unwrap();
-                link.cast::<IPersistFile>().unwrap().Save(PCWSTR(wide(&path).unwrap().as_ptr()), true).unwrap();
+                let link: IShellLinkW =
+                    CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+                link.SetPath(PCWSTR(wide(target).unwrap().as_ptr()))
+                    .unwrap();
+                link.SetArguments(w!("/c echo must-not-run > unexpected.txt"))
+                    .unwrap();
+                link.SetWorkingDirectory(PCWSTR(wide(&dir).unwrap().as_ptr()))
+                    .unwrap();
+                link.cast::<IPersistFile>()
+                    .unwrap()
+                    .Save(PCWSTR(wide(&path).unwrap().as_ptr()), true)
+                    .unwrap();
             }
             path
         };
         let folder_link = make_link("folder.LNK", &folder);
         let before = std::fs::read(&folder_link).unwrap();
-        let target = shortcut_folder(&folder_link).unwrap().expect("folder shortcut target");
+        let target = shortcut_folder(&folder_link)
+            .unwrap()
+            .expect("folder shortcut target");
         // GetPath can expand 8.3 aliases (CI's RUNNER~1 temp path) to long names.
         // Compare the filesystem paths after canonicalization, not their spelling.
-        assert_eq!(std::fs::canonicalize(target).unwrap(), std::fs::canonicalize(&folder).unwrap());
+        assert_eq!(
+            std::fs::canonicalize(target).unwrap(),
+            std::fs::canonicalize(&folder).unwrap()
+        );
         assert_eq!(std::fs::read(&folder_link).unwrap(), before);
         let file_link = make_link("file.lnk", &file);
         assert_eq!(shortcut_folder(&file_link).unwrap(), None);
         std::fs::remove_dir(&folder).unwrap();
-        assert!(shortcut_folder(&folder_link).is_err(), "missing folders must not fall through to execution");
+        assert!(
+            shortcut_folder(&folder_link).is_err(),
+            "missing folders must not fall through to execution"
+        );
         let broken = dir.join("broken.lnk");
         std::fs::write(&broken, "not a shortcut").unwrap();
         assert!(shortcut_folder(&broken).is_err());
         assert!(!dir.join("unexpected.txt").exists());
-        for path in [folder_link, file_link, file, broken] { std::fs::remove_file(path).unwrap(); }
+        for path in [folder_link, file_link, file, broken] {
+            std::fs::remove_file(path).unwrap();
+        }
         std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
     fn shortcut_targets_reject_non_filesystem_names() {
-        for name in ["", "relative", r"C:relative", r"\rooted", "shell:Desktop", "https://example.com", r"\\.\pipe\enyfile", r"\\?\GLOBALROOT\Device\HarddiskVolume1", r"\\?\UNC\.\pipe\enyfile"] {
+        for name in [
+            "",
+            "relative",
+            r"C:relative",
+            r"\rooted",
+            "shell:Desktop",
+            "https://example.com",
+            r"\\.\pipe\enyfile",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+            r"\\?\UNC\.\pipe\enyfile",
+        ] {
             assert!(shortcut_target_folder(Path::new(name)).is_err(), "{name}");
         }
     }
     #[test]
     fn wsl_paths_and_running_names() {
-        for path in [r"\\wsl$\Ubuntu\home\tt", r"\\wsl.localhost\Ubuntu\", r"\\?\UNC\wsl.localhost\Ubuntu\home", r"//WSL.LOCALHOST/Ubuntu/home"] {
+        for path in [
+            r"\\wsl$\Ubuntu\home\tt",
+            r"\\wsl.localhost\Ubuntu\",
+            r"\\?\UNC\wsl.localhost\Ubuntu\home",
+            r"//WSL.LOCALHOST/Ubuntu/home",
+        ] {
             assert_eq!(wsl_distribution(Path::new(path)).as_deref(), Some("Ubuntu"));
         }
-        for path in [r"C:\wsl$\Ubuntu", r"\\server\Ubuntu", r"\\wsl.localhost\", r"\\wsl.localhost.example\Ubuntu"] {
+        for path in [
+            r"C:\wsl$\Ubuntu",
+            r"\\server\Ubuntu",
+            r"\\wsl.localhost\",
+            r"\\wsl.localhost.example\Ubuntu",
+        ] {
             assert_eq!(wsl_distribution(Path::new(path)), None);
         }
         let expected = vec!["Ubuntu", "Debian"];
-        assert_eq!(running_wsl_names(b"Ubuntu\r\nDebian\r\n").unwrap(), expected);
-        let wide: Vec<_> = "\u{feff}Ubuntu\r\nDebian\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(
+            running_wsl_names(b"Ubuntu\r\nDebian\r\n").unwrap(),
+            expected
+        );
+        let wide: Vec<_> = "\u{feff}Ubuntu\r\nDebian\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
         assert_eq!(running_wsl_names(&wide).unwrap(), expected);
         assert!(running_wsl_names(b"").unwrap().is_empty());
         assert!(running_wsl_names(&[0xff, 0xfe, 0]).is_err());
     }
     #[test]
     fn failed_watch_is_not_alive() {
-        let path = std::env::temp_dir().join(format!("enyfile-absent-watch-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("enyfile-absent-watch-{}", std::process::id()));
         assert!(!path.exists());
         let watch = watch(path, || {}).unwrap();
         let started = Instant::now();
         while watch.is_alive() && started.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(!watch.is_alive(), "failed watcher must release its live state");
+        assert!(
+            !watch.is_alive(),
+            "failed watcher must release its live state"
+        );
     }
     #[test]
     fn rename_removes_leading_space() {
-        let root = std::env::temp_dir().join(format!("enyfile-rename-space-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("enyfile-rename-space-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join(" Folder");
         let target = root.join("Folder");
@@ -1417,26 +1775,46 @@ mod tests {
         let preserved = source.join("source.txt").is_file() && target.join("keep.txt").is_file();
         std::fs::remove_dir_all(&root).unwrap();
         assert!(result.is_ok() && renamed, "rename result: {result:?}");
-        assert!(collision.is_err() && preserved, "existing folders must not be replaced");
+        assert!(
+            collision.is_err() && preserved,
+            "existing folders must not be replaced"
+        );
     }
     #[test]
     fn shell_names() {
-        let windows = system_dir().parent().unwrap().to_string_lossy().to_lowercase();
+        let windows = system_dir()
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .to_lowercase();
         for name in ["shell:Windows", "SHELL:windows"] {
             let path = shell_folder(name).unwrap().unwrap();
             assert_eq!(path.to_string_lossy().to_lowercase(), windows, "{name}");
         }
         // An app is not a folder: refused, never started.
-        assert!(shell_folder(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App").is_err());
+        assert!(
+            shell_folder(r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App")
+                .is_err()
+        );
         assert!(shell_folder("shell:NoSuchFolder").is_err());
     }
     #[test]
     fn junction_names() {
-        assert!(is_junction(Path::new(r"D:\ProgramFiles\GodMode.{ED7BA470-8E54-465E-825C-99712043E01C}")));
-        assert!(is_junction(Path::new(r"C:\x\.{ed7ba470-8e54-465e-825c-99712043e01c}")));
-        assert!(!is_junction(Path::new(r"C:\x\GodMode.{ED7BA470-8E54-465E-825C-99712043E01}")));
-        assert!(!is_junction(Path::new(r"C:\x\GodMode.{ED7BA470x8E54-465E-825C-99712043E01C}")));
-        assert!(!is_junction(Path::new(r"C:\x\{ED7BA470-8E54-465E-825C-99712043E01C}")));
+        assert!(is_junction(Path::new(
+            r"D:\ProgramFiles\GodMode.{ED7BA470-8E54-465E-825C-99712043E01C}"
+        )));
+        assert!(is_junction(Path::new(
+            r"C:\x\.{ed7ba470-8e54-465e-825c-99712043e01c}"
+        )));
+        assert!(!is_junction(Path::new(
+            r"C:\x\GodMode.{ED7BA470-8E54-465E-825C-99712043E01}"
+        )));
+        assert!(!is_junction(Path::new(
+            r"C:\x\GodMode.{ED7BA470x8E54-465E-825C-99712043E01C}"
+        )));
+        assert!(!is_junction(Path::new(
+            r"C:\x\{ED7BA470-8E54-465E-825C-99712043E01C}"
+        )));
         assert!(!is_junction(Path::new(r"C:\x\notes.txt")));
     }
     #[test]
@@ -1447,11 +1825,16 @@ mod tests {
         ])
         .unwrap();
         let wide: Vec<u16> = bytes[20..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
             .collect();
         let text = String::from_utf16(&wide).unwrap();
-        assert_eq!(text, "C:\\demo\\日本語_😀.txt\0\\\\server\\share\\a.txt\0\0");
+        assert_eq!(
+            text,
+            "C:\\demo\\日本語_😀.txt\0\\\\server\\share\\a.txt\0\0"
+        );
     }
     /// Audit #6: a CF_HDROP block from another process is checked before DragQueryFileW.
     #[test]
@@ -1476,10 +1859,19 @@ mod tests {
     }
     #[test]
     fn os_path_refuses_names_win32_would_change() {
-        for ok in [r"\\?\C:\a\b.txt", r"\\?\UNC\server\share\a.b", r"C:\plain\victim.", r"\\?\C:\a\console.txt", r"\\?\C:\COM10"] {
+        for ok in [
+            r"\\?\C:\a\b.txt",
+            r"\\?\UNC\server\share\a.b",
+            r"C:\plain\victim.",
+            r"\\?\C:\a\console.txt",
+            r"\\?\C:\COM10",
+        ] {
             assert!(os_path(Path::new(ok)).is_ok(), "{ok}");
         }
-        assert_eq!(os_path(Path::new(r"\\?\UNC\s\share\a")).unwrap(), Path::new(r"\\s\share\a"));
+        assert_eq!(
+            os_path(Path::new(r"\\?\UNC\s\share\a")).unwrap(),
+            Path::new(r"\\s\share\a")
+        );
         for bad in [
             r"\\?\C:\a\victim.",
             r"\\?\C:\a\victim ",
@@ -1492,7 +1884,10 @@ mod tests {
             r"\\?\UNC\server\share\x.",
         ] {
             let error = os_path(Path::new(bad)).unwrap_err();
-            assert!(error.starts_with("Windows の通常のパスでは扱えない名前です"), "{bad}");
+            assert!(
+                error.starts_with("Windows の通常のパスでは扱えない名前です"),
+                "{bad}"
+            );
         }
         assert!(hdrop_bytes(&[PathBuf::from(r"\\?\C:\a\victim.")]).is_err());
     }
@@ -1515,7 +1910,13 @@ mod tests {
         };
         assert!(transfer(&plan).unwrap_err().contains("victim."));
         let copy = crate::paste::Plan {
-            ops: vec![crate::paste::Op { source: dotted.clone(), dir: root.join("out"), name: None, fresh: true, overwrites: None }],
+            ops: vec![crate::paste::Op {
+                source: dotted.clone(),
+                dir: root.join("out"),
+                name: None,
+                fresh: true,
+                overwrites: None,
+            }],
             ..Default::default()
         };
         assert!(transfer(&copy).is_err());
@@ -1537,13 +1938,23 @@ mod tests {
         root
     }
     fn names(dir: &Path) -> Vec<String> {
-        let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
         names.sort();
         names
     }
     fn replace_plan(root: &Path) -> crate::paste::Plan {
         let mut ask = |_: crate::paste::Question| (crate::paste::Answer::Replace, false);
-        crate::paste::plan(&[root.join(r"src\Folder")], &root.join("dst"), false, &mut ask).unwrap().unwrap()
+        crate::paste::plan(
+            &[root.join(r"src\Folder")],
+            &root.join("dst"),
+            false,
+            &mut ask,
+        )
+        .unwrap()
+        .unwrap()
     }
     /// Audit #3: the replaced folder is deleted only after the paste succeeded.
     #[test]
@@ -1560,25 +1971,50 @@ mod tests {
         // A paste that fails gives the replaced folder its name back.
         std::fs::write(root.join(r"src\Folder\new.txt"), "newer").unwrap();
         let mut failing = replace_plan(&root);
-        failing.ops.push(crate::paste::Op { source: root.join("missing"), dir: root.join("dst"), name: None, fresh: false, overwrites: None });
+        failing.ops.push(crate::paste::Op {
+            source: root.join("missing"),
+            dir: root.join("dst"),
+            name: None,
+            fresh: false,
+            overwrites: None,
+        });
         assert!(transfer(&failing).is_err());
         assert_eq!(names(&root.join("dst")), ["Folder"]);
-        assert_eq!(std::fs::read_to_string(root.join(r"dst\Folder\new.txt")).unwrap(), r"src\Folder\new.txt");
+        assert_eq!(
+            std::fs::read_to_string(root.join(r"dst\Folder\new.txt")).unwrap(),
+            r"src\Folder\new.txt"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
     /// Audit #1 after #3: Folder\Folder replaces Folder (contents one level up), taken from
     /// where Folder was set aside; a failure puts everything back.
     #[test]
     fn replace_with_a_folder_inside_it() {
-        let root = tree("nested", &[r"c\Folder\outer.txt", r"c\Folder\Folder\inner.txt", r"m\Folder\outer.txt", r"m\Folder\Folder\inner.txt"]);
+        let root = tree(
+            "nested",
+            &[
+                r"c\Folder\outer.txt",
+                r"c\Folder\Folder\inner.txt",
+                r"m\Folder\outer.txt",
+                r"m\Folder\Folder\inner.txt",
+            ],
+        );
         let _ole = Apartment::new().unwrap();
         let nested_plan = |dir: &str, moved: bool| {
             let source = shell_path(&root.join(dir).join(r"Folder\Folder"));
             let mut ask = |_: crate::paste::Question| (crate::paste::Answer::Replace, false);
-            crate::paste::plan(&[source], &root.join(dir), moved, &mut ask).unwrap().unwrap()
+            crate::paste::plan(&[source], &root.join(dir), moved, &mut ask)
+                .unwrap()
+                .unwrap()
         };
         let mut failing = nested_plan("c", false);
-        failing.ops.push(crate::paste::Op { source: root.join("missing"), dir: root.join("c"), name: None, fresh: false, overwrites: None });
+        failing.ops.push(crate::paste::Op {
+            source: root.join("missing"),
+            dir: root.join("c"),
+            name: None,
+            fresh: false,
+            overwrites: None,
+        });
         assert!(transfer(&failing).is_err());
         assert_eq!(names(&root.join("c")), ["Folder"]);
         assert_eq!(names(&root.join(r"c\Folder")), ["Folder", "outer.txt"]);
@@ -1586,7 +2022,11 @@ mod tests {
             let done = transfer(&nested_plan(dir, moved)).unwrap();
             assert!(!done.aborted && done.kept.is_empty(), "{dir}");
             assert_eq!(names(&root.join(dir)), ["Folder"], "{dir}");
-            assert_eq!(names(&root.join(dir).join("Folder")), ["inner.txt"], "{dir}");
+            assert_eq!(
+                names(&root.join(dir).join("Folder")),
+                ["inner.txt"],
+                "{dir}"
+            );
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1594,11 +2034,26 @@ mod tests {
     /// contents, and nothing is pasted.
     #[test]
     fn replace_stopped_early_changes_nothing() {
-        let root = tree("stopped", &[r"src\A\new-a.txt", r"src\B\new-b.txt", r"dst\A\old-a.txt", r"dst\B\old-b.txt"]);
+        let root = tree(
+            "stopped",
+            &[
+                r"src\A\new-a.txt",
+                r"src\B\new-b.txt",
+                r"dst\A\old-a.txt",
+                r"dst\B\old-b.txt",
+            ],
+        );
         let _ole = Apartment::new().unwrap();
         let plan = || {
             let mut ask = |_: crate::paste::Question| (crate::paste::Answer::Replace, false);
-            crate::paste::plan(&[root.join(r"src\A"), root.join(r"src\B")], &root.join("dst"), false, &mut ask).unwrap().unwrap()
+            crate::paste::plan(
+                &[root.join(r"src\A"), root.join(r"src\B")],
+                &root.join("dst"),
+                false,
+                &mut ask,
+            )
+            .unwrap()
+            .unwrap()
         };
         let unchanged = || {
             assert_eq!(names(&root.join("dst")), ["A", "B"]);
@@ -1610,11 +2065,18 @@ mod tests {
         assert_eq!(first.remove.len(), 2);
         let held = {
             use std::os::windows::fs::OpenOptionsExt;
-            std::fs::File::options().read(true).share_mode(0).open(root.join(r"dst\B\old-b.txt")).unwrap()
+            std::fs::File::options()
+                .read(true)
+                .share_mode(0)
+                .open(root.join(r"dst\B\old-b.txt"))
+                .unwrap()
         };
         let error = transfer(&first).unwrap_err();
         drop(held);
-        assert!(error.contains("退避できません") && !error.contains("残っています"), "{error}");
+        assert!(
+            error.contains("退避できません") && !error.contains("残っています"),
+            "{error}"
+        );
         unchanged();
         // B swapped for another folder after the user answered: refused before any rename.
         let second = plan();
@@ -1623,7 +2085,10 @@ mod tests {
         std::fs::write(root.join(r"dst\B\old-b.txt"), "someone else's").unwrap();
         assert!(transfer(&second).unwrap_err().contains("確認後に変わった"));
         unchanged();
-        assert_eq!(std::fs::read_to_string(root.join(r"dst\B\old-b.txt")).unwrap(), "someone else's");
+        assert_eq!(
+            std::fs::read_to_string(root.join(r"dst\B\old-b.txt")).unwrap(),
+            "someone else's"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
     /// An item the copy engine fails on is noticed even when the operation as a whole is not
@@ -1635,14 +2100,27 @@ mod tests {
         let _ole = Apartment::new().unwrap();
         let held = {
             use std::os::windows::fs::OpenOptionsExt;
-            std::fs::File::options().read(true).share_mode(0).open(root.join(r"src\locked.txt")).unwrap()
+            std::fs::File::options()
+                .read(true)
+                .share_mode(0)
+                .open(root.join(r"src\locked.txt"))
+                .unwrap()
         };
         let missed = Arc::new(AtomicBool::new(false));
         let sink: IFileOperationProgressSink = Missed(missed.clone(), None).into();
-        let op = operation(FILEOPERATION_FLAGS(FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0)).unwrap();
+        let op = operation(FILEOPERATION_FLAGS(
+            FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0,
+        ))
+        .unwrap();
         unsafe {
             op.Advise(&sink).unwrap();
-            op.CopyItem(&item(&root.join("src")).unwrap(), &item(&root.join("dst")).unwrap(), PCWSTR::null(), None).unwrap();
+            op.CopyItem(
+                &item(&root.join("src")).unwrap(),
+                &item(&root.join("dst")).unwrap(),
+                PCWSTR::null(),
+                None,
+            )
+            .unwrap();
             let _ = op.PerformOperations();
         }
         drop(held);
@@ -1654,15 +2132,33 @@ mod tests {
     #[test]
     fn beyond_max_path() {
         let deep = ["long-path-segment-1234567890"; 10].join("\\");
-        let root = tree("long", &[&format!(r"src\Deep\{deep}\日本語_😀.txt"), r"src\Deep\top.txt", r"src\short.txt"]);
+        let root = tree(
+            "long",
+            &[
+                &format!(r"src\Deep\{deep}\日本語_😀.txt"),
+                r"src\Deep\top.txt",
+                r"src\short.txt",
+            ],
+        );
         std::fs::create_dir(root.join("dst")).unwrap();
         let _ole = Apartment::new().unwrap();
         let plan = |moved: bool| {
             let mut ask = |_: crate::paste::Question| unreachable!();
-            crate::paste::plan(&[root.join(r"src\Deep"), root.join(r"src\short.txt")], &root.join("dst"), moved, &mut ask).unwrap().unwrap()
+            crate::paste::plan(
+                &[root.join(r"src\Deep"), root.join(r"src\short.txt")],
+                &root.join("dst"),
+                moved,
+                &mut ask,
+            )
+            .unwrap()
+            .unwrap()
         };
         let copy = plan(false);
-        assert!(beyond_shell(&copy, &[None, None]).unwrap_err().contains("中止"));
+        assert!(
+            beyond_shell(&copy, &[None, None])
+                .unwrap_err()
+                .contains("中止")
+        );
         assert!(transfer(&copy).is_err());
         assert!(names(&root.join("dst")).is_empty());
         let moved = plan(true);
@@ -1678,17 +2174,26 @@ mod tests {
     #[test]
     fn verbatim_forms() {
         assert_eq!(verbatim(Path::new(r"C:\a\b")), Path::new(r"\\?\C:\a\b"));
-        assert_eq!(verbatim(Path::new(r"\\server\share\a")), Path::new(r"\\?\UNC\server\share\a"));
+        assert_eq!(
+            verbatim(Path::new(r"\\server\share\a")),
+            Path::new(r"\\?\UNC\server\share\a")
+        );
         assert_eq!(verbatim(Path::new(r"\\?\C:\a.")), Path::new(r"\\?\C:\a."));
     }
     #[test]
     fn set_aside_and_restore() {
-        let root = tree("aside", &[r"A\a.txt", r"A~enyfile-old\taken.txt", r"B\b.txt"]);
+        let root = tree(
+            "aside",
+            &[r"A\a.txt", r"A~enyfile-old\taken.txt", r"B\b.txt"],
+        );
         let (a, b) = (root.join("A"), root.join("B"));
         // A taken temporary name moves on to the next one.
         let aside = set_aside(&[a.clone(), b.clone()]).unwrap();
         assert_eq!(aside[0].1, root.join("A~enyfile-old-2"));
-        assert_eq!(names(&root), ["A~enyfile-old", "A~enyfile-old-2", "B~enyfile-old"]);
+        assert_eq!(
+            names(&root),
+            ["A~enyfile-old", "A~enyfile-old-2", "B~enyfile-old"]
+        );
         // Once the new item holds the name, the old one stays aside: neither is lost.
         std::fs::create_dir(&b).unwrap();
         assert_eq!(restore(&aside), [root.join("B~enyfile-old")]);
@@ -1702,18 +2207,22 @@ mod tests {
         // set-aside fails and nothing is renamed.
         let hold = || {
             use std::os::windows::fs::OpenOptionsExt;
-            std::fs::File::options().read(true).share_mode(0).open(a.join("a.txt")).unwrap()
+            std::fs::File::options()
+                .read(true)
+                .share_mode(0)
+                .open(a.join("a.txt"))
+                .unwrap()
         };
         let held = hold();
         let release = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
             drop(held);
         });
-        let aside = set_aside(&[a.clone()]).unwrap();
+        let aside = set_aside(std::slice::from_ref(&a)).unwrap();
         release.join().unwrap();
         assert!(restore(&aside).is_empty());
         let held = hold();
-        assert!(set_aside(&[a.clone()]).is_err());
+        assert!(set_aside(std::slice::from_ref(&a)).is_err());
         drop(held);
         assert_eq!(names(&a), ["a.txt"]);
         let _ = std::fs::remove_dir_all(&root);

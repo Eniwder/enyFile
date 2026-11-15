@@ -102,7 +102,13 @@ fn default_extensions() -> Vec<(String, slint::Color)> {
 /// The Windows default for place `index` (desktop, documents, pictures, videos, music).
 pub fn known_folder(index: usize) -> Option<PathBuf> {
     use windows::Win32::{System::Com::CoTaskMemFree, UI::Shell::*};
-    let id = [FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Pictures, FOLDERID_Videos, FOLDERID_Music][index];
+    let id = [
+        FOLDERID_Desktop,
+        FOLDERID_Documents,
+        FOLDERID_Pictures,
+        FOLDERID_Videos,
+        FOLDERID_Music,
+    ][index];
     unsafe {
         let path = SHGetKnownFolderPath(&id, KNOWN_FOLDER_FLAG(0), None).ok()?;
         let result = path.to_string().ok().map(PathBuf::from);
@@ -124,13 +130,32 @@ impl Config {
                     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
                     let aside = file.with_extension(format!("json.broken-{stamp}"));
                     match std::fs::rename(&file, &aside) {
-                        Ok(()) => (json!({}), Some(format!("設定ファイルが壊れていたため {} に退避し、既定の設定で起動しました", aside.display())), false),
-                        Err(e) => (json!({}), Some(format!("設定ファイルが壊れていて退避もできないため（{e}）、この起動中は設定を保存しません")), true),
+                        Ok(()) => (
+                            json!({}),
+                            Some(format!(
+                                "設定ファイルが壊れていたため {} に退避し、既定の設定で起動しました",
+                                aside.display()
+                            )),
+                            false,
+                        ),
+                        Err(e) => (
+                            json!({}),
+                            Some(format!(
+                                "設定ファイルが壊れていて退避もできないため（{e}）、この起動中は設定を保存しません"
+                            )),
+                            true,
+                        ),
                     }
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (json!({}), None, false),
-            Err(e) => (json!({}), Some(format!("設定ファイルを読めないため（{e}）、既定の設定で起動し、この起動中は設定を保存しません")), true),
+            Err(e) => (
+                json!({}),
+                Some(format!(
+                    "設定ファイルを読めないため（{e}）、既定の設定で起動し、この起動中は設定を保存しません"
+                )),
+                true,
+            ),
         };
         let mut config = Self::from_value(file, raw);
         config.notice = notice;
@@ -144,35 +169,63 @@ impl Config {
                 .filter(|s| !s.trim().is_empty())
                 .map(PathBuf::from)
         });
-        let split = raw["split"].as_f64().map_or(0.5, |v| v as f32).clamp(0.15, 0.85);
+        let split = raw["split"]
+            .as_f64()
+            .map_or(0.5, |v| v as f32)
+            .clamp(0.15, 0.85);
         let pair = |key: &str, default: [f32; 2]| -> [f32; 2] {
             let value = |i: usize| raw[key].get(i).and_then(Value::as_f64).map(|v| v as f32);
             match (value(0), value(1)) {
-                (Some(a), Some(b)) if (0.05..=0.95).contains(&a) && (0.05..=0.95).contains(&b) => [a, b],
+                (Some(a), Some(b)) if (0.05..=0.95).contains(&a) && (0.05..=0.95).contains(&b) => {
+                    [a, b]
+                }
                 _ => default,
             }
         };
         let thirds = pair("split3_columns", [1.0 / 3.0, 2.0 / 3.0]);
-        let split3_columns = if thirds[0] < thirds[1] { thirds } else { [1.0 / 3.0, 2.0 / 3.0] };
+        let split3_columns = if thirds[0] < thirds[1] {
+            thirds
+        } else {
+            [1.0 / 3.0, 2.0 / 3.0]
+        };
         let thirds = pair("split3_rows", [1.0 / 3.0, 2.0 / 3.0]);
-        let split3_rows = if thirds[0] < thirds[1] { thirds } else { [1.0 / 3.0, 2.0 / 3.0] };
+        let split3_rows = if thirds[0] < thirds[1] {
+            thirds
+        } else {
+            [1.0 / 3.0, 2.0 / 3.0]
+        };
         let split4 = pair("split4", [0.5, 0.5]);
-        let agent_split = raw["agent_split"].as_f64().map_or(0.42, |v| v as f32).clamp(0.1, 0.85);
+        let agent_split = raw["agent_split"]
+            .as_f64()
+            .map_or(0.42, |v| v as f32)
+            .clamp(0.1, 0.85);
         // Older files stored one flag for both panes.
         let show_hidden = match &raw["show_hidden"] {
             Value::Bool(b) => [*b; 4],
-            Value::Array(a) => [0, 1, 2, 3].map(|i| a.get(i).and_then(Value::as_bool).unwrap_or(false)),
+            Value::Array(a) => {
+                [0, 1, 2, 3].map(|i| a.get(i).and_then(Value::as_bool).unwrap_or(false))
+            }
             _ => [false; 4],
         };
         let panes = raw["panes"].as_u64().map_or(2, |n| n as usize).clamp(2, 4);
         // "show_attributes" is the older single switch for the attribute column.
         let attributes = raw["show_attributes"].as_bool().unwrap_or(true);
-        let columns = COLUMNS.map(|key| raw["columns"][key].as_bool().unwrap_or(if key == "attr" { attributes } else { true }));
+        let columns = COLUMNS.map(|key| {
+            raw["columns"][key]
+                .as_bool()
+                .unwrap_or(if key == "attr" { attributes } else { true })
+        });
         let three_columns = raw["three_columns"].as_bool().unwrap_or(false);
         let start = ["left", "right"].map(|side| {
-            raw["start"][side].as_str().filter(|s| !s.trim().is_empty()).map(PathBuf::from)
+            raw["start"][side]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
         });
-        let opacity = raw["opacity"].as_f64().map_or(1.0, |o| o as f32).clamp(0.3, 1.0);
+        let opacity = raw["opacity"]
+            .as_f64()
+            .map_or(1.0, |o| o as f32)
+            .clamp(0.3, 1.0);
         let bookmarks = raw["bookmarks"]
             .as_array()
             .map(|items| {
@@ -201,7 +254,12 @@ impl Config {
             .map(|rules| {
                 rules
                     .iter()
-                    .filter_map(|r| Some((r["exts"].as_str()?.to_string(), theme::parse(r["color"].as_str()?)?)))
+                    .filter_map(|r| {
+                        Some((
+                            r["exts"].as_str()?.to_string(),
+                            theme::parse(r["color"].as_str()?)?,
+                        ))
+                    })
                     .collect()
             })
             .unwrap_or_else(default_extensions);
@@ -210,31 +268,58 @@ impl Config {
             .filter(|f| !f.trim().is_empty())
             .unwrap_or(theme::DEFAULT_FONT)
             .to_string();
-        let font_size = raw["font"]["size"].as_f64().map_or(theme::DEFAULT_SIZE, |s| s as f32).clamp(8.0, 32.0);
+        let font_size = raw["font"]["size"]
+            .as_f64()
+            .map_or(theme::DEFAULT_SIZE, |s| s as f32)
+            .clamp(8.0, 32.0);
         let intra_pane_move = raw["intra_pane_move"].as_bool().unwrap_or(false);
         let pane_drag_drop = raw["pane_drag_drop"].as_bool().unwrap_or(false);
         let search_links = raw["search_links"].as_bool().unwrap_or(false);
         let drive_dirs = raw["drive_dirs"]
             .as_object()
-            .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), PathBuf::from(v.as_str()?)))).collect())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| Some((k.clone(), PathBuf::from(v.as_str()?))))
+                    .collect()
+            })
             .unwrap_or_default();
         let w = &raw["window"];
         let int = |key: &str| w[key].as_i64().and_then(|v| i32::try_from(v).ok());
-        let size = |key: &str| w[key].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|&v| v >= 100);
+        let size = |key: &str| {
+            w[key]
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|&v| v >= 100)
+        };
         let window = match (int("x"), int("y"), size("width"), size("height")) {
-            (Some(x), Some(y), Some(width), Some(height)) => {
-                Some(Placement { x, y, width, height, maximized: w["maximized"].as_bool().unwrap_or(false) })
-            }
+            (Some(x), Some(y), Some(width), Some(height)) => Some(Placement {
+                x,
+                y,
+                width,
+                height,
+                maximized: w["maximized"].as_bool().unwrap_or(false),
+            }),
             _ => None,
         };
         let agent = &raw["agent"];
         let agent_enabled = agent["cli"].as_str() != Some("none");
-        let agent_path = agent["path"].as_str().filter(|s| !s.trim().is_empty()).map(PathBuf::from);
+        let agent_path = agent["path"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from);
         let agent_panes = agent["panes"].as_bool().unwrap_or(false);
-        let agent_access = agent["access"].as_str().and_then(agent::Access::from_key).unwrap_or(agent::Access::Folder);
+        let agent_access = agent["access"]
+            .as_str()
+            .and_then(agent::Access::from_key)
+            .unwrap_or(agent::Access::Folder);
         let agent_folders = agent["folders"]
             .as_array()
-            .map(|dirs| dirs.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
+            .map(|dirs| {
+                dirs.iter()
+                    .filter_map(Value::as_str)
+                    .map(PathBuf::from)
+                    .collect()
+            })
             .unwrap_or_default();
         let agent_memory_approved = agent["memory"].as_str().map(str::to_string);
         Self {
@@ -278,7 +363,10 @@ impl Config {
         self.file.with_file_name("agent").join("memory.md")
     }
     pub fn default_colors() -> Vec<slint::Color> {
-        theme::BASE.iter().map(|(_, _, d)| theme::parse(d).unwrap()).collect()
+        theme::BASE
+            .iter()
+            .map(|(_, _, d)| theme::parse(d).unwrap())
+            .collect()
     }
     pub fn default_extension_colors() -> Vec<(String, slint::Color)> {
         default_extensions()
@@ -308,8 +396,16 @@ impl Config {
         self.raw["show_hidden"] = json!(self.show_hidden);
         self.raw["panes"] = json!(self.panes);
         self.raw["three_columns"] = json!(self.three_columns);
-        self.raw.as_object_mut().map(|o| o.remove("show_attributes"));
-        self.raw["columns"] = Value::Object(COLUMNS.iter().zip(self.columns).map(|(k, v)| (k.to_string(), json!(v))).collect());
+        self.raw
+            .as_object_mut()
+            .map(|o| o.remove("show_attributes"));
+        self.raw["columns"] = Value::Object(
+            COLUMNS
+                .iter()
+                .zip(self.columns)
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect(),
+        );
         let mut start = serde_json::Map::new();
         for (side, path) in ["left", "right"].iter().zip(&self.start) {
             if let Some(path) = path {
@@ -340,7 +436,12 @@ impl Config {
         self.raw["intra_pane_move"] = json!(self.intra_pane_move);
         self.raw["pane_drag_drop"] = json!(self.pane_drag_drop);
         self.raw["search_links"] = json!(self.search_links);
-        self.raw["drive_dirs"] = Value::Object(self.drive_dirs.iter().map(|(k, v)| (k.clone(), json!(v.to_string_lossy()))).collect());
+        self.raw["drive_dirs"] = Value::Object(
+            self.drive_dirs
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v.to_string_lossy())))
+                .collect(),
+        );
         if let Some(w) = self.window {
             self.raw["window"] = json!({ "x": w.x, "y": w.y, "width": w.width, "height": w.height, "maximized": w.maximized });
         }
@@ -394,12 +495,26 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&file, r#"{ "bookmarks": [ { "name": "途中で切れ"#).unwrap();
         let mut config = Config::load(file.clone());
-        assert!(config.notice.as_deref().is_some_and(|n| n.contains("退避")), "{:?}", config.notice);
-        let aside: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        assert!(aside.iter().any(|n| n.starts_with("config.json.broken-")), "{aside:?}");
+        assert!(
+            config.notice.as_deref().is_some_and(|n| n.contains("退避")),
+            "{:?}",
+            config.notice
+        );
+        let aside: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            aside.iter().any(|n| n.starts_with("config.json.broken-")),
+            "{aside:?}"
+        );
         assert!(!file.exists(), "the broken file is moved, not copied");
         config.save().unwrap();
-        assert!(Config::load(file.clone()).notice.is_none(), "the next start reads the new file");
+        assert!(
+            Config::load(file.clone()).notice.is_none(),
+            "the next start reads the new file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
@@ -415,14 +530,26 @@ mod tests {
         .unwrap();
         let mut config = Config::load(file.clone());
         assert_eq!(config.place(4), Some(PathBuf::from(r"D:\曲")));
-        assert!(config.places[0].is_none() && config.place(0).is_some(), "desktop falls back to the known folder");
-        assert_eq!(config.bookmarks, [Bookmark { name: "作業".into(), path: r"D:\Work".into() }]);
+        assert!(
+            config.places[0].is_none() && config.place(0).is_some(),
+            "desktop falls back to the known folder"
+        );
+        assert_eq!(
+            config.bookmarks,
+            [Bookmark {
+                name: "作業".into(),
+                path: r"D:\Work".into()
+            }]
+        );
         assert_eq!(config.split, 0.5);
         assert!(!config.intra_pane_move);
         config.intra_pane_move = true;
         assert!(!config.pane_drag_drop);
         config.pane_drag_drop = true;
-        config.bookmarks.push(Bookmark { name: "x".into(), path: r"C:\x".into() });
+        config.bookmarks.push(Bookmark {
+            name: "x".into(),
+            path: r"C:\x".into(),
+        });
         config.places[2] = Some(r"E:\写真".into());
         config.split = 0.3;
         config.save().unwrap();
@@ -431,17 +558,30 @@ mod tests {
         assert!(again.pane_drag_drop);
         assert!(again.intra_pane_move);
         assert_eq!(again.raw["theme"], "dark");
-        assert!(again.raw["places"].get("desktop").is_none(), "defaults are not written");
+        assert!(
+            again.raw["places"].get("desktop").is_none(),
+            "defaults are not written"
+        );
         assert_eq!(again.place(2), Some(PathBuf::from(r"E:\写真")));
         assert_eq!(again.place(4), Some(PathBuf::from(r"D:\曲")));
         assert!((again.split - 0.3).abs() < 1e-6);
         assert_eq!(again.window, None);
         let mut config = again;
-        let placement = Placement { x: -1900, y: 40, width: 1200, height: 700, maximized: true };
+        let placement = Placement {
+            x: -1900,
+            y: 40,
+            width: 1200,
+            height: 700,
+            maximized: true,
+        };
         config.window = Some(placement);
         config.save().unwrap();
         assert_eq!(Config::load(file.clone()).window, Some(placement));
-        assert_eq!(config.agent_access, agent::Access::Folder, "the narrowest mode by default");
+        assert_eq!(
+            config.agent_access,
+            agent::Access::Folder,
+            "the narrowest mode by default"
+        );
         assert!(!config.agent_panes, "other panes are read-only by default");
         assert!(config.agent_enabled, "Codex by default");
         config.agent_enabled = false;
@@ -452,9 +592,20 @@ mod tests {
         config.agent_memory_approved = Some("- 常に日本語で\r\n".into());
         config.save().unwrap();
         let again = Config::load(file.clone());
-        assert_eq!((again.agent_access, again.agent_folders.clone(), again.agent_path.clone()), (agent::Access::Extra, vec![PathBuf::from(r"H:\写真")], None));
+        assert_eq!(
+            (
+                again.agent_access,
+                again.agent_folders.clone(),
+                again.agent_path.clone()
+            ),
+            (agent::Access::Extra, vec![PathBuf::from(r"H:\写真")], None)
+        );
         assert!(again.agent_panes);
-        assert_eq!(again.agent_memory_approved.as_deref(), Some("- 常に日本語で\r\n"), "the accepted memory is kept as is");
+        assert_eq!(
+            again.agent_memory_approved.as_deref(),
+            Some("- 常に日本語で\r\n"),
+            "the accepted memory is kept as is"
+        );
         assert!(!again.agent_enabled, "turned off stays off");
         assert_eq!(again.agent_memory(), dir.join("agent").join("memory.md"));
         let _ = std::fs::remove_dir_all(&dir);

@@ -44,14 +44,19 @@ pub fn ident(path: &Path) -> Option<Ident> {
             std::mem::size_of::<FILE_ID_INFO>() as u32,
         );
         let ident = if by_id.is_ok() {
-            Some(Ident { volume: info.VolumeSerialNumber, file: u128::from_le_bytes(info.FileId.Identifier) })
+            Some(Ident {
+                volume: info.VolumeSerialNumber,
+                file: u128::from_le_bytes(info.FileId.Identifier),
+            })
         } else {
             // File systems without 128-bit IDs (FAT): the 64-bit index.
             let mut info = BY_HANDLE_FILE_INFORMATION::default();
-            GetFileInformationByHandle(handle, &mut info).ok().map(|_| Ident {
-                volume: info.dwVolumeSerialNumber as u64,
-                file: ((info.nFileIndexHigh as u128) << 32) | info.nFileIndexLow as u128,
-            })
+            GetFileInformationByHandle(handle, &mut info)
+                .ok()
+                .map(|_| Ident {
+                    volume: info.dwVolumeSerialNumber as u64,
+                    file: ((info.nFileIndexHigh as u128) << 32) | info.nFileIndexLow as u128,
+                })
         };
         let _ = CloseHandle(handle);
         // Some network file systems report no ID at all: not usable for comparing.
@@ -67,7 +72,10 @@ pub fn volume(path: &Path) -> Option<u64> {
 /// Text form for the fallback: no `\\?\` prefix, no trailing separator, lower case.
 fn text(path: &Path) -> String {
     let plain = crate::shell::shell_path(path);
-    plain.to_string_lossy().trim_end_matches('\\').to_lowercase()
+    plain
+        .to_string_lossy()
+        .trim_end_matches('\\')
+        .to_lowercase()
 }
 
 /// Identities looked up once per check (a merge asks about many paths in one folder).
@@ -75,7 +83,10 @@ fn text(path: &Path) -> String {
 pub struct Idents(HashMap<PathBuf, Option<Ident>>);
 impl Idents {
     pub fn get(&mut self, path: &Path) -> Option<Ident> {
-        *self.0.entry(path.to_path_buf()).or_insert_with(|| ident(path))
+        *self
+            .0
+            .entry(path.to_path_buf())
+            .or_insert_with(|| ident(path))
     }
     /// `a` and `b` are the same object (hard links included).
     pub fn same(&mut self, a: &Path, b: &Path) -> bool {
@@ -120,7 +131,10 @@ mod tests {
     struct Fixture(PathBuf);
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("cmd").args(["/c", "rmdir", "/s", "/q"]).arg(&self.0).output();
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "rmdir", "/s", "/q"])
+                .arg(&self.0)
+                .output();
         }
     }
     #[test]
@@ -130,7 +144,12 @@ mod tests {
         std::fs::create_dir_all(root.join(r"Real\Sub")).unwrap();
         std::fs::write(root.join(r"Real\a.txt"), "a").unwrap();
         std::fs::hard_link(root.join(r"Real\a.txt"), root.join("link.txt")).unwrap();
-        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(root.join("J")).arg(root.join("Real")).output().unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(root.join("J"))
+            .arg(root.join("Real"))
+            .output()
+            .unwrap();
         assert!(made.status.success());
         let canonical = std::fs::canonicalize(&root).unwrap();
         let mut ids = Idents::default();
@@ -142,7 +161,12 @@ mod tests {
         assert!(ids.same(&root.join("J"), &root.join("Real")));
         assert!(ids.within(&root.join(r"J\Sub"), &root.join("Real")));
         // A junction to a folder inside: JS is Real\Sub, so it lies within Real.
-        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(root.join("JS")).arg(root.join(r"Real\Sub")).output().unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(root.join("JS"))
+            .arg(root.join(r"Real\Sub"))
+            .output()
+            .unwrap();
         assert!(made.status.success());
         assert!(ids.within(&root.join("JS"), &root.join("Real")));
         assert!(ids.within(&root.join(r"JS\new\deeper"), &root.join("Real")));

@@ -22,8 +22,8 @@ mod shell;
 mod smoke;
 mod theme;
 use listing::{Drive, Entry, Selection};
-use rows::{Positions, RowsModel, Slot, Snapshot, Special};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use rows::{Positions, RowsModel, Slot, Snapshot, Special};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc};
 use std::{
     cell::{Cell, RefCell},
@@ -96,7 +96,13 @@ enum Reply {
     ClipboardFiles(u32, Arc<clipmark::Files>),
     Resumed,
     RecoverRendering(&'static str),
-    Pasted(usize, PathBuf, Positions, Vec<PathBuf>, Result<PasteOutcome, String>),
+    Pasted(
+        usize,
+        PathBuf,
+        Positions,
+        Vec<PathBuf>,
+        Result<PasteOutcome, String>,
+    ),
     Ask(usize, paste::Question, AnswerTx),
     /// A delete's confirmation was answered yes (or there was none).
     Deleting,
@@ -165,7 +171,9 @@ thread_local! {
 /// Hands a worker result to the UI thread; the event loop wakes only when something arrives.
 fn post(reply: Reply) -> bool {
     slint::invoke_from_event_loop(move || {
-        if SESSION_ENDING.get() { return; }
+        if SESSION_ENDING.get() {
+            return;
+        }
         if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
             c.borrow_mut().handle(reply);
         }
@@ -176,14 +184,18 @@ fn post(reply: Reply) -> bool {
 /// Called synchronously from WM_ENDSESSION, not queued: Windows can kill the
 /// process after we return. Do not open dialogs or wait for worker threads.
 fn end_session() {
-    if SESSION_ENDING.replace(true) { return; }
+    if SESSION_ENDING.replace(true) {
+        return;
+    }
     let status = if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
         if let Ok(mut c) = c.try_borrow_mut() {
             c.remember_window();
             let saved = c.config.save();
             c.typing.stop();
             c.agent.clock.stop();
-            if let Some(run) = &c.agent.run { run.cancel(); }
+            if let Some(run) = &c.agent.run {
+                run.cancel();
+            }
             c.stop_props();
             for pane in &mut c.panes {
                 pane.busy.stop();
@@ -192,8 +204,12 @@ fn end_session() {
                 pane.finder = None;
                 pane.worker.cancel();
             }
-            format!("Windows session ending: settings={}; operations={}; confirming={}; background stop requested",
-                saved.map_or_else(|e| format!("save failed ({e})"), |()| "saved".into()), c.operations, c.confirming)
+            format!(
+                "Windows session ending: settings={}; operations={}; confirming={}; background stop requested",
+                saved.map_or_else(|e| format!("save failed ({e})"), |()| "saved".into()),
+                c.operations,
+                c.confirming
+            )
         } else {
             "Windows session ending: controller busy; settings save skipped".into()
         }
@@ -246,26 +262,34 @@ impl Worker {
                         Err(e) => Some(format!("自動更新を見送りました: {e}。F5で再試行できます")),
                     };
                     if let Some(reason) = reason {
-                        if !post(Reply::AutomaticSkipped(pane, job.generation, reason)) { return; }
+                        if !post(Reply::AutomaticSkipped(pane, job.generation, reason)) {
+                            return;
+                        }
                         continue;
                     }
                 }
                 let result = if let Some(source) = job.source {
-                    let rows = source.unfiltered.as_ref().map_or_else(|| source.rows.clone(), |all| all.as_ref().clone());
+                    let rows = source
+                        .unfiltered
+                        .as_ref()
+                        .map_or_else(|| source.rows.clone(), |all| all.as_ref().clone());
                     Ok((source.dir.clone(), rows, source.volume.clone()))
                 } else {
-                    listing::read(&job.path, job.show_hidden)
-                        .map(|(dir, rows)| {
-                            let volume = listing::volume(&dir).map(Arc::new);
-                            (dir, rows, volume)
-                        })
+                    listing::read(&job.path, job.show_hidden).map(|(dir, rows)| {
+                        let volume = listing::volume(&dir).map(Arc::new);
+                        (dir, rows, volume)
+                    })
                 };
                 let result = result.map(|(dir, mut rows, volume)| {
                     listing::sort(&mut rows, job.column, job.descending);
                     let Some(filter) = &job.filter else {
                         return Arc::new(Snapshot::new(dir, rows, volume));
                     };
-                    let shown = rows.iter().filter(|e| filter.matches_entry(e)).cloned().collect();
+                    let shown = rows
+                        .iter()
+                        .filter(|e| filter.matches_entry(e))
+                        .cloned()
+                        .collect();
                     let mut snapshot = Snapshot::new(dir, shown, volume);
                     snapshot.unfiltered = Some(Arc::new(rows));
                     Arc::new(snapshot)
@@ -319,7 +343,9 @@ impl Worker {
                     let (lock, cv) = &*worker;
                     let waiting = lock.lock().unwrap();
                     let waiting = cv
-                        .wait_timeout_while(waiting, icons::RETRY, |m| m.pending.is_none() && !m.closed)
+                        .wait_timeout_while(waiting, icons::RETRY, |m| {
+                            m.pending.is_none() && !m.closed
+                        })
                         .unwrap()
                         .0;
                     if waiting.pending.is_some() || waiting.closed {
@@ -360,6 +386,8 @@ impl Drop for Worker {
         cv.notify_one();
     }
 }
+type PaintState = (usize, Option<usize>, Option<Special>, usize);
+
 struct Pane {
     model: Rc<RowsModel>,
     worker: Worker,
@@ -388,7 +416,7 @@ struct Pane {
     /// Ctrl+Alt+Shift+F: the list shows search results instead of the folder.
     found: Option<Found>,
     /// Where the cursor was at the last paint (listing, cursor, ".." / drive / gap, page).
-    painted: Cell<Option<(usize, Option<usize>, Option<Special>, usize)>>,
+    painted: Cell<Option<PaintState>>,
 }
 struct Session {
     id: u64,
@@ -499,7 +527,9 @@ fn drive_of(path: &Path) -> Option<String> {
     let plain = shell::shell_path(path);
     let mut chars = plain.to_str()?.chars();
     match (chars.next(), chars.next()) {
-        (Some(letter), Some(':')) if letter.is_ascii_alphabetic() => Some(format!("{}:", letter.to_ascii_uppercase())),
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic() => {
+            Some(format!("{}:", letter.to_ascii_uppercase()))
+        }
         _ => None,
     }
 }
@@ -522,13 +552,17 @@ impl Controller {
     fn set_clipboard_marks(&self, files: Arc<clipmark::Files>) {
         for pane in &self.panes {
             *pane.model.clipboard.borrow_mut() = files.clone();
-            for row in 0..pane.model.row_count() { pane.model.notify.row_changed(row); }
+            for row in 0..pane.model.row_count() {
+                pane.model.notify.row_changed(row);
+            }
         }
     }
     fn sync_clipboard_marks(&mut self) {
         if self.clipboard_sequence != Some(shell::clipboard_sequence()) {
             // Clear stale marks immediately, even if the new clipboard owner is busy.
-            if self.clipboard_sequence.take().is_some() { self.set_clipboard_marks(Arc::default()); }
+            if self.clipboard_sequence.take().is_some() {
+                self.set_clipboard_marks(Arc::default());
+            }
             let _ = self.clipboard_reader.try_send(());
         }
     }
@@ -600,7 +634,9 @@ impl Controller {
             set(self.ui.clone(), false);
         } else if !timer.running() {
             let ui = self.ui.clone();
-            timer.start(slint::TimerMode::SingleShot, BUSY_DELAY, move || set(ui.clone(), true));
+            timer.start(slint::TimerMode::SingleShot, BUSY_DELAY, move || {
+                set(ui.clone(), true)
+            });
         }
     }
     fn set_path(&self, p: usize, path: String) {
@@ -616,11 +652,13 @@ impl Controller {
     }
     fn arm_listing_timeout(&self, p: usize) {
         let generation = self.panes[p].generation;
-        self.panes[p].deadline.start(slint::TimerMode::SingleShot, LISTING_TIMEOUT, move || {
-            if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
-                c.borrow_mut().listing_timed_out(p, generation);
-            }
-        });
+        self.panes[p]
+            .deadline
+            .start(slint::TimerMode::SingleShot, LISTING_TIMEOUT, move || {
+                if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+                    c.borrow_mut().listing_timed_out(p, generation);
+                }
+            });
     }
     fn listing_timed_out(&mut self, p: usize, generation: u64) {
         let pane = &mut self.panes[p];
@@ -634,7 +672,11 @@ impl Controller {
         pane.deadline.stop();
         pane.worker.cancel();
         self.busy(p, false);
-        recovery::record(format!("listing timeout: pane={}, generation={generation}, last_folder={}", p + 1, shown(&self.data(p).dir)));
+        recovery::record(format!(
+            "listing timeout: pane={}, generation={generation}, last_folder={}",
+            p + 1,
+            shown(&self.data(p).dir)
+        ));
         self.fail("フォルダの応答がありません。接続を確認して F5 で再試行するか、別のフォルダを開いてください");
     }
     /// Panes shown by the current layout.
@@ -654,7 +696,11 @@ impl Controller {
         if self.active >= self.config.panes {
             self.active(0);
         }
-        if self.compare.as_ref().is_some_and(|c| c.panes[1] >= self.config.panes) {
+        if self
+            .compare
+            .as_ref()
+            .is_some_and(|c| c.panes[1] >= self.config.panes)
+        {
             self.end_compare(None);
         }
         if let Some(ui) = self.ui.upgrade() {
@@ -681,7 +727,13 @@ impl Controller {
     fn sync_columns(&self) {
         if let Some(ui) = self.ui.upgrade() {
             let [size, date, time, attr, kind] = self.config.columns;
-            ui.set_columns(Columns { size, date, time, attr, kind });
+            ui.set_columns(Columns {
+                size,
+                date,
+                time,
+                attr,
+                kind,
+            });
         }
     }
     /// Selected entries, or the entry under the cursor when nothing is selected.
@@ -692,14 +744,24 @@ impl Controller {
         }
         let data = self.data(p);
         let current = self.panes[p].model.selection.borrow().current;
-        current.and_then(|i| data.rows.get(i)).map(|e| vec![e.path.as_ref().clone()]).unwrap_or_default()
+        current
+            .and_then(|i| data.rows.get(i))
+            .map(|e| vec![e.path.as_ref().clone()])
+            .unwrap_or_default()
     }
     /// Edit > 絶対パスのコピー / ファイル名のコピー: one per line.
     fn copy_text(&mut self, p: usize, names: bool) {
         let lines: Vec<String> = self
             .targets(p)
             .iter()
-            .map(|path| if names { path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()) } else { display(path) })
+            .map(|path| {
+                if names {
+                    path.file_name()
+                        .map_or(String::new(), |n| n.to_string_lossy().into_owned())
+                } else {
+                    display(path)
+                }
+            })
             .collect();
         if lines.is_empty() {
             self.message("項目が選択されていません");
@@ -713,7 +775,11 @@ impl Controller {
             .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
             .and_then(|h| shell::set_clipboard_text(h, &text));
         match result {
-            Ok(()) => self.message(format!("{}件の{}をコピーしました", lines.len(), if names { "ファイル名" } else { "パス" })),
+            Ok(()) => self.message(format!(
+                "{}件の{}をコピーしました",
+                lines.len(),
+                if names { "ファイル名" } else { "パス" }
+            )),
             Err(e) => self.fail(e),
         }
     }
@@ -734,10 +800,17 @@ impl Controller {
     fn select_same_extension(&mut self, p: usize) {
         let data = self.data(p);
         let model = self.panes[p].model.clone();
-        let Some(current) = model.selection.borrow().current.filter(|_| model.special.get().is_none()) else {
+        let Some(current) = model
+            .selection
+            .borrow()
+            .current
+            .filter(|_| model.special.get().is_none())
+        else {
             return;
         };
-        let Some(entry) = data.rows.get(current).filter(|e| !e.directory) else { return };
+        let Some(entry) = data.rows.get(current).filter(|e| !e.directory) else {
+            return;
+        };
         let ext = entry.ext.to_lowercase();
         let paths: Vec<_> = data
             .rows
@@ -751,7 +824,11 @@ impl Controller {
         selection.anchor = Some(current);
         *model.selection.borrow_mut() = selection;
         self.repaint(p);
-        let label = if ext.is_empty() { "拡張子なし".to_string() } else { format!(".{ext}") };
+        let label = if ext.is_empty() {
+            "拡張子なし".to_string()
+        } else {
+            format!(".{ext}")
+        };
         self.message(format!("{label} を{count}件選択"));
     }
     /// The find bar for pane `p`, in `Finding::mode`.
@@ -763,12 +840,23 @@ impl Controller {
         }
         let origin = self.panes[p].model.selection.borrow().current.unwrap_or(0);
         let text = match mode {
-            2 => self.panes[p].filter.as_ref().map_or(String::new(), |(text, _)| text.clone()),
-            3 => self.panes[p].found.as_ref().map_or_else(|| self.tree_search.clone(), |f| f.text.clone()),
+            2 => self.panes[p]
+                .filter
+                .as_ref()
+                .map_or(String::new(), |(text, _)| text.clone()),
+            3 => self.panes[p]
+                .found
+                .as_ref()
+                .map_or_else(|| self.tree_search.clone(), |f| f.text.clone()),
             _ => self.search.clone(),
         };
         let filter = self.panes[p].filter.as_ref().map(|(text, _)| text.clone());
-        self.finding = Some(Finding { pane: p, mode, origin, filter });
+        self.finding = Some(Finding {
+            pane: p,
+            mode,
+            origin,
+            filter,
+        });
         // The walk starts now, so the first keys find a good part of the tree read.
         if mode == 3 {
             self.session(p, false);
@@ -790,14 +878,30 @@ impl Controller {
             self.apply_filter(pane, text);
             return;
         }
-        let Some(Finding { pane, mode: 1, origin, .. }) = self.finding else { return };
-        let Some(pattern) = listing::Pattern::new(text) else { return };
+        let Some(Finding {
+            pane,
+            mode: 1,
+            origin,
+            ..
+        }) = self.finding
+        else {
+            return;
+        };
+        let Some(pattern) = listing::Pattern::new(text) else {
+            return;
+        };
         self.search = text.trim().to_string();
         let found = self.find(pane, &pattern, origin, true);
-        self.message(if found { String::new() } else { format!("見つかりません: {}", text.trim()) });
+        self.message(if found {
+            String::new()
+        } else {
+            format!("見つかりません: {}", text.trim())
+        });
     }
     fn find_done(&mut self, ok: bool, text: &str) {
-        let Some(finding) = self.finding.take() else { return };
+        let Some(finding) = self.finding.take() else {
+            return;
+        };
         if let Some(ui) = self.ui.upgrade() {
             ui.set_find_mode(0);
             ui.invoke_focus_pane(finding.pane as i32);
@@ -830,14 +934,23 @@ impl Controller {
         }
         if listing::Pattern::new(text).is_some() {
             self.search = text.trim().to_string();
-            if self.ui.upgrade().is_some_and(|ui| ui.get_message().is_empty()) {
-                self.message(format!("検索: {}（Ctrl+G で次へ、Ctrl+Shift+G で前へ）", self.search));
+            if self
+                .ui
+                .upgrade()
+                .is_some_and(|ui| ui.get_message().is_empty())
+            {
+                self.message(format!(
+                    "検索: {}（Ctrl+G で次へ、Ctrl+Shift+G で前へ）",
+                    self.search
+                ));
             }
         }
     }
     /// Ctrl+G in the search bar: further typing then refines from the new match.
     fn find_next_typing(&mut self, forward: bool) {
-        let Some(Finding { pane, mode: 1, .. }) = self.finding else { return };
+        let Some(Finding { pane, mode: 1, .. }) = self.finding else {
+            return;
+        };
         self.find_next(pane, forward);
         let current = self.panes[pane].model.selection.borrow().current;
         if let (Some(finding), Some(current)) = (&mut self.finding, current) {
@@ -855,7 +968,11 @@ impl Controller {
             return;
         }
         let model = &self.panes[p].model;
-        let current = model.selection.borrow().current.filter(|_| model.special.get().is_none());
+        let current = model
+            .selection
+            .borrow()
+            .current
+            .filter(|_| model.special.get().is_none());
         let start = match current {
             Some(i) if forward => i + 1,
             Some(i) => i + count - 1,
@@ -871,14 +988,23 @@ impl Controller {
         let data = self.data(p);
         let count = data.rows.len();
         let Some(index) = (0..count)
-            .map(|step| if forward { (start + step) % count } else { (start + count - step) % count })
+            .map(|step| {
+                if forward {
+                    (start + step) % count
+                } else {
+                    (start + count - step) % count
+                }
+            })
             .find(|&i| pattern.matches(&data.rows[i].name_fold))
         else {
             return false;
         };
         let model = &self.panes[p].model;
         model.special.set(None);
-        model.selection.borrow_mut().select(&data.rows, index, false, false, false);
+        model
+            .selection
+            .borrow_mut()
+            .select(&data.rows, index, false, false, false);
         self.reveal(p, index);
         self.repaint(p);
         true
@@ -887,7 +1013,11 @@ impl Controller {
     /// entry also reveals "..", so Home shows the top of the list).
     fn reveal(&self, p: usize, index: usize) {
         let model = &self.panes[p].model;
-        let row = if index == 0 && model.compare.borrow().is_none() { 0 } else { model.entry_row(index) };
+        let row = if index == 0 && model.compare.borrow().is_none() {
+            0
+        } else {
+            model.entry_row(index)
+        };
         self.reveal_row(p, row);
     }
     fn reveal_row(&self, p: usize, row: usize) {
@@ -912,7 +1042,11 @@ impl Controller {
         let model = &self.panes[p].model;
         match model.special.get() {
             Some(special) => model.special_row(special),
-            None => model.selection.borrow().current.map_or(0, |i| model.entry_row(i)),
+            None => model
+                .selection
+                .borrow()
+                .current
+                .map_or(0, |i| model.entry_row(i)),
         }
     }
     /// Mouse wheel: one page per notch, the cursor moves along.
@@ -920,11 +1054,22 @@ impl Controller {
     fn page_step(&mut self, p: usize, forward: bool) {
         self.active(p);
         let model = &self.panes[p].model;
-        let (page, rows, cursor) = (model.page_size.get().max(1), model.total(), self.cursor_row(p));
-        if rows == 0 || (!forward && cursor < page) || (forward && cursor / page == (rows - 1) / page) {
+        let (page, rows, cursor) = (
+            model.page_size.get().max(1),
+            model.total(),
+            self.cursor_row(p),
+        );
+        if rows == 0
+            || (!forward && cursor < page)
+            || (forward && cursor / page == (rows - 1) / page)
+        {
             return;
         }
-        let key = if forward { slint::platform::Key::PageDown } else { slint::platform::Key::PageUp };
+        let key = if forward {
+            slint::platform::Key::PageDown
+        } else {
+            slint::platform::Key::PageUp
+        };
         let mut event = slint::language::KeyEvent::default();
         event.text = key.into();
         self.key(p, event);
@@ -948,7 +1093,12 @@ impl Controller {
         let data = self.data(p);
         let volume = data.volume.as_ref().filter(|_| !self.demo);
         let folders = data.rows.iter().filter(|e| e.directory).count();
-        let total: u64 = data.rows.iter().filter(|e| !e.directory).map(|e| e.size).sum();
+        let total: u64 = data
+            .rows
+            .iter()
+            .filter(|e| !e.directory)
+            .map(|e| e.size)
+            .sum();
         let selected = self.panes[p].model.selection.borrow().count();
         let (widest_name, widest_kind) = self.panes[p].model.widest();
         PaneInfo {
@@ -958,14 +1108,33 @@ impl Controller {
             files: (data.rows.len() - folders).to_string().into(),
             total: listing::format_size(total).into(),
             volume: volume.map_or(String::new(), |v| v.label.clone()).into(),
-            free: volume.map_or(String::new(), |v| listing::format_size(v.free)).into(),
-            selected: if selected > 0 { selected.to_string() } else { String::new() }.into(),
-            filter: self.panes[p].filter.as_ref().map_or(String::new(), |(text, _)| text.clone()).into(),
-            search: self.panes[p].found.as_ref().map_or(String::new(), |f| f.text.clone()).into(),
+            free: volume
+                .map_or(String::new(), |v| listing::format_size(v.free))
+                .into(),
+            selected: if selected > 0 {
+                selected.to_string()
+            } else {
+                String::new()
+            }
+            .into(),
+            filter: self.panes[p]
+                .filter
+                .as_ref()
+                .map_or(String::new(), |(text, _)| text.clone())
+                .into(),
+            search: self.panes[p]
+                .found
+                .as_ref()
+                .map_or(String::new(), |f| f.text.clone())
+                .into(),
             compare: match self.compare.as_ref().filter(|c| c.panes.contains(&p)) {
                 Some(c) => {
                     let [old, new, differ, same] = c.counts;
-                    let only = if c.only_diff { "（差分のみ）" } else { "" };
+                    let only = if c.only_diff {
+                        "（差分のみ）"
+                    } else {
+                        ""
+                    };
                     format!("-{old} +{new} ≠{differ} ={same}{only}")
                 }
                 None => String::new(),
@@ -973,15 +1142,30 @@ impl Controller {
             .into(),
             page: {
                 let (page, pages) = self.panes[p].model.pages();
-                if pages > 1 { format!("{page}/{pages}") } else { String::new() }.into()
+                if pages > 1 {
+                    format!("{page}/{pages}")
+                } else {
+                    String::new()
+                }
+                .into()
             },
         }
     }
     fn repaint(&self, p: usize) {
         self.paint(p);
         // Comparing, the other pane's cursor and page follow the active one.
-        let Some(c) = self.compare.as_ref().filter(|c| p == self.active && c.panes.contains(&p)) else { return };
-        let other = if c.panes[0] == p { c.panes[1] } else { c.panes[0] };
+        let Some(c) = self
+            .compare
+            .as_ref()
+            .filter(|c| p == self.active && c.panes.contains(&p))
+        else {
+            return;
+        };
+        let other = if c.panes[0] == p {
+            c.panes[1]
+        } else {
+            c.panes[0]
+        };
         let row = self.cursor_row(p);
         let model = &self.panes[other].model;
         match model.slot(row) {
@@ -1001,7 +1185,10 @@ impl Controller {
     fn paint(&self, p: usize) {
         let model = &self.panes[p].model;
         if model.special.get().is_none() {
-            model.selection.borrow_mut().select_current_if_empty(&model.data.borrow().rows);
+            model
+                .selection
+                .borrow_mut()
+                .select_current_if_empty(&model.data.borrow().rows);
         }
         if let Some(ui) = self.ui.upgrade() {
             // Update the rows of the page in place; a reset would destroy mouse/double-click state.
@@ -1032,7 +1219,10 @@ impl Controller {
         let automatic = matches!(mode, Mode::Automatic);
         let show_hidden = self.config.show_hidden[p];
         let pane = &mut self.panes[p];
-        if matches!(mode, Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_)) {
+        if matches!(
+            mode,
+            Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_)
+        ) {
             pane.navigation += 1;
         }
         pane.fallback = None;
@@ -1067,12 +1257,21 @@ impl Controller {
         let text = text.trim().trim_matches('"');
         // shell:Desktop and the like: the Shell resolves them, off the UI thread (a known
         // folder can be redirected to the network).
-        if text.get(..6).is_some_and(|s| s.eq_ignore_ascii_case("shell:")) {
+        if text
+            .get(..6)
+            .is_some_and(|s| s.eq_ignore_ascii_case("shell:"))
+        {
             self.panes[p].fallback = None;
             self.panes[p].navigation += 1;
             let navigation = self.panes[p].navigation;
             let name = text.to_string();
-            std::thread::spawn(move || post(Reply::ShellFolder(p, navigation, shell::shell_folder(&name))));
+            std::thread::spawn(move || {
+                post(Reply::ShellFolder(
+                    p,
+                    navigation,
+                    shell::shell_folder(&name),
+                ))
+            });
             return;
         }
         let path = match pathinput::expand(text) {
@@ -1106,7 +1305,11 @@ impl Controller {
             // In search results ".." and F5 go back to the folder and search again.
             2 if self.panes[p].found.is_some() => self.close_found(p),
             3 if self.panes[p].found.is_some() => {
-                let text = self.panes[p].found.as_ref().map(|f| f.text.clone()).unwrap_or_default();
+                let text = self.panes[p]
+                    .found
+                    .as_ref()
+                    .map(|f| f.text.clone())
+                    .unwrap_or_default();
                 self.search_tree(p, &text);
             }
             2 => {
@@ -1183,7 +1386,9 @@ impl Controller {
     /// Sets the filter of pane `p` without a message; the same text again keeps the rows.
     fn apply_filter(&mut self, p: usize, text: &str) {
         let filter = listing::Pattern::new(text).map(|f| (text.trim().to_string(), f));
-        if filter.as_ref().map(|(text, _)| text) == self.panes[p].filter.as_ref().map(|(text, _)| text) {
+        if filter.as_ref().map(|(text, _)| text)
+            == self.panes[p].filter.as_ref().map(|(text, _)| text)
+        {
             return;
         }
         self.panes[p].filter = filter;
@@ -1204,16 +1409,30 @@ impl Controller {
         if root.as_os_str().is_empty() {
             return false;
         }
-        if !fresh && self.panes[p].finder.as_ref().is_some_and(|s| s.root == root) {
+        if !fresh
+            && self.panes[p]
+                .finder
+                .as_ref()
+                .is_some_and(|s| s.root == root)
+        {
             return true;
         }
         self.searches += 1;
         let id = self.searches;
         let (show_hidden, follow) = (self.config.show_hidden[p], self.config.search_links);
-        let finder = finder::Finder::start(root.clone(), show_hidden, follow, self.index_limit, move |event| {
-            post(Reply::Finder(p, id, event))
+        let finder = finder::Finder::start(
+            root.clone(),
+            show_hidden,
+            follow,
+            self.index_limit,
+            move |event| post(Reply::Finder(p, id, event)),
+        );
+        self.panes[p].finder = Some(Session {
+            id,
+            finder,
+            root,
+            overflow: false,
         });
-        self.panes[p].finder = Some(Session { id, finder, root, overflow: false });
         true
     }
     /// Walks the tree again (F5, Alt+Z) and searches `text`.
@@ -1239,14 +1458,18 @@ impl Controller {
             return;
         }
         let text = text.to_string();
-        self.typing.start(slint::TimerMode::SingleShot, TYPING, move || {
-            if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
-                let mut c = c.borrow_mut();
-                if c.finding.as_ref().is_some_and(|f| f.pane == p && f.mode == 3) {
-                    c.query(p, &text);
+        self.typing
+            .start(slint::TimerMode::SingleShot, TYPING, move || {
+                if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+                    let mut c = c.borrow_mut();
+                    if c.finding
+                        .as_ref()
+                        .is_some_and(|f| f.pane == p && f.mode == 3)
+                    {
+                        c.query(p, &text);
+                    }
                 }
-            }
-        });
+            });
     }
     /// Shows what matches `text` below the folder in pane `p`; empty text goes back.
     fn query(&mut self, p: usize, text: &str) {
@@ -1258,7 +1481,11 @@ impl Controller {
         if self.panes[p].found.as_ref().is_some_and(|f| f.text == text) {
             return;
         }
-        if self.panes[p].pending.as_ref().is_some_and(|m| !matches!(m, Mode::Sort)) {
+        if self.panes[p]
+            .pending
+            .as_ref()
+            .is_some_and(|m| !matches!(m, Mode::Sort))
+        {
             self.message("フォルダの読み込み中です");
             return;
         }
@@ -1306,10 +1533,16 @@ impl Controller {
     /// Leaves the search results for the folder as it was (Esc, "..", Backspace).
     fn close_found(&mut self, p: usize) {
         // The walk stays while the bar is open: the next keys search it again.
-        if !self.finding.as_ref().is_some_and(|f| f.pane == p && f.mode == 3) {
+        if !self
+            .finding
+            .as_ref()
+            .is_some_and(|f| f.pane == p && f.mode == 3)
+        {
             self.panes[p].finder = None;
         }
-        let Some(found) = self.panes[p].found.take() else { return };
+        let Some(found) = self.panes[p].found.take() else {
+            return;
+        };
         if found.running {
             self.message("検索を中止しました");
         }
@@ -1317,7 +1550,9 @@ impl Controller {
     }
     fn found(&mut self, p: usize, id: u64, batch: Vec<Entry>, done: Option<finder::Completion>) {
         let pane = &mut self.panes[p];
-        let Some(found) = pane.found.as_mut().filter(|f| f.id == id) else { return };
+        let Some(found) = pane.found.as_mut().filter(|f| f.id == id) else {
+            return;
+        };
         found.backlog.extend(batch);
         if done.is_some() {
             found.running = false;
@@ -1330,7 +1565,9 @@ impl Controller {
     /// Adds the results that came in to the list; once the query is answered, sorts them.
     fn flush_found(&mut self, p: usize) {
         let pane = &mut self.panes[p];
-        let Some(found) = pane.found.as_mut() else { return };
+        let Some(found) = pane.found.as_mut() else {
+            return;
+        };
         let batch = std::mem::take(&mut found.backlog);
         let finished = found.finished.take();
         let (text, running, root) = (found.text.clone(), found.running, found.root.clone());
@@ -1342,15 +1579,26 @@ impl Controller {
         let filter = pane.filter.as_ref().map(|(_, f)| f);
         if replace {
             let (rows, unfiltered) = match filter {
-                Some(filter) => (batch.iter().filter(|e| filter.matches_entry(e)).cloned().collect(), Some(Arc::new(batch))),
+                Some(filter) => (
+                    batch
+                        .iter()
+                        .filter(|e| filter.matches_entry(e))
+                        .cloned()
+                        .collect(),
+                    Some(Arc::new(batch)),
+                ),
                 None => (batch, None),
             };
             let volume = model.data.borrow().volume.clone();
             let mut snapshot = Snapshot::new(root, rows, volume);
             snapshot.unfiltered = unfiltered;
-            let mut selection = Selection::default();
-            selection.current = (!snapshot.rows.is_empty()).then_some(0);
-            model.special.set((snapshot.rows.is_empty() && snapshot.offset() == 1).then_some(Special::Parent));
+            let selection = Selection {
+                current: (!snapshot.rows.is_empty()).then_some(0),
+                ..Default::default()
+            };
+            model.special.set(
+                (snapshot.rows.is_empty() && snapshot.offset() == 1).then_some(Special::Parent),
+            );
             *model.selection.borrow_mut() = selection;
             *model.data.borrow_mut() = Arc::new(snapshot);
             model.page_start.set(0);
@@ -1361,7 +1609,11 @@ impl Controller {
                 let snapshot = Arc::make_mut(&mut data);
                 let shown: Vec<Entry> = match (&mut snapshot.unfiltered, filter) {
                     (Some(all), Some(filter)) => {
-                        let shown = batch.iter().filter(|e| filter.matches_entry(e)).cloned().collect();
+                        let shown = batch
+                            .iter()
+                            .filter(|e| filter.matches_entry(e))
+                            .cloned()
+                            .collect();
                         Arc::make_mut(all).extend(batch);
                         shown
                     }
@@ -1388,12 +1640,18 @@ impl Controller {
             Some(completion) => {
                 let count = self.data(p).rows.len();
                 let message = if completion.limited {
-                    format!("検索: {text} … {}件で打ち切りました（Esc で戻る）", finder::RESULT_LIMIT)
+                    format!(
+                        "検索: {text} … {}件で打ち切りました（Esc で戻る）",
+                        finder::RESULT_LIMIT
+                    )
                 } else {
                     format!("検索: {text} … {count}件（Esc で戻る）")
                 };
                 if completion.unreadable > 0 {
-                    self.fail(format!("{message}（{}フォルダを取得できないため結果は不完全です）", completion.unreadable));
+                    self.fail(format!(
+                        "{message}（{}フォルダを取得できないため結果は不完全です）",
+                        completion.unreadable
+                    ));
                 } else {
                     self.message(message);
                 }
@@ -1419,18 +1677,33 @@ impl Controller {
     /// The active pane with the one active before it; the lower pane number is the old side.
     fn start_compare(&mut self) {
         let a = self.active;
-        let b = if self.previous != a && self.previous < self.visible() { self.previous } else { (a + 1) % self.visible() };
+        let b = if self.previous != a && self.previous < self.visible() {
+            self.previous
+        } else {
+            (a + 1) % self.visible()
+        };
         let panes = [a.min(b), a.max(b)];
         if panes.iter().any(|&p| self.panes[p].found.is_some()) {
             self.message("検索結果は比較できません");
             return;
         }
-        if panes.iter().any(|&p| self.panes[p].pending.as_ref().is_some_and(|m| !matches!(m, Mode::Sort))) {
+        if panes.iter().any(|&p| {
+            self.panes[p]
+                .pending
+                .as_ref()
+                .is_some_and(|m| !matches!(m, Mode::Sort))
+        }) {
             self.message("フォルダの読み込み中です");
             return;
         }
         let sort = panes.map(|p| (self.panes[p].column, self.panes[p].descending));
-        self.compare = Some(Comparing { panes, only_diff: false, base: panes.map(|p| self.data(p)), sort, counts: [0; 4] });
+        self.compare = Some(Comparing {
+            panes,
+            only_diff: false,
+            base: panes.map(|p| self.data(p)),
+            sort,
+            counts: [0; 4],
+        });
         // Both sides by name, so the rows line up; the reply of the sort compares.
         for p in panes {
             if (self.panes[p].column, self.panes[p].descending) != (0, false) {
@@ -1443,7 +1716,9 @@ impl Controller {
         self.message("比較中（Ctrl+Shift+D で差分のみ、Esc で終了）");
     }
     fn compare_side(&self, p: usize) -> Option<usize> {
-        self.compare.as_ref().and_then(|c| c.panes.iter().position(|&q| q == p))
+        self.compare
+            .as_ref()
+            .and_then(|c| c.panes.iter().position(|&q| q == p))
     }
     /// Lines up the two listings again (after any reload of either side).
     fn recompare(&mut self) {
@@ -1459,10 +1734,20 @@ impl Controller {
         let model = &self.panes[c.panes[side]].model;
         let old_row = match model.special.get() {
             Some(special) => model.special_row(special),
-            None => model.selection.borrow().current.map_or(0, |i| model.entry_row(i)),
+            None => model
+                .selection
+                .borrow()
+                .current
+                .map_or(0, |i| model.entry_row(i)),
         };
         let focus = (model.special.get().is_none())
-            .then(|| model.selection.borrow().current.and_then(|i| model.data.borrow().rows.get(i).map(|e| e.path.clone())))
+            .then(|| {
+                model
+                    .selection
+                    .borrow()
+                    .current
+                    .and_then(|i| model.data.borrow().rows.get(i).map(|e| e.path.clone()))
+            })
             .flatten();
         for (s, rows) in shown.into_iter().enumerate() {
             let p = c.panes[s];
@@ -1470,12 +1755,26 @@ impl Controller {
             let snapshot = Snapshot::new(base.dir.clone(), rows, base.volume.clone());
             let model = &self.panes[p].model;
             let old = model.selection.borrow().clone();
-            *model.selection.borrow_mut() = Selection::only(snapshot.rows.iter().filter(|e| old.contains(&e.path)).map(|e| e.path.clone()));
+            *model.selection.borrow_mut() = Selection::only(
+                snapshot
+                    .rows
+                    .iter()
+                    .filter(|e| old.contains(&e.path))
+                    .map(|e| e.path.clone()),
+            );
             *model.data.borrow_mut() = Arc::new(snapshot);
             *model.compare.borrow_mut() = Some((aligned.clone(), s));
         }
         let row = focus
-            .and_then(|path| self.panes[c.panes[side]].model.data.borrow().positions.get(&path).copied())
+            .and_then(|path| {
+                self.panes[c.panes[side]]
+                    .model
+                    .data
+                    .borrow()
+                    .positions
+                    .get(&path)
+                    .copied()
+            })
             .and_then(|i| aligned.row_of(side, i))
             .unwrap_or(old_row)
             .min(aligned.pairs.len().saturating_sub(1));
@@ -1505,7 +1804,13 @@ impl Controller {
                 continue;
             }
             let current = (model.special.get().is_none())
-                .then(|| model.selection.borrow().current.and_then(|i| model.data.borrow().rows.get(i).map(|e| e.path.clone())))
+                .then(|| {
+                    model
+                        .selection
+                        .borrow()
+                        .current
+                        .and_then(|i| model.data.borrow().rows.get(i).map(|e| e.path.clone()))
+                })
                 .flatten();
             let base = c.base[s].clone();
             {
@@ -1515,7 +1820,9 @@ impl Controller {
                     .or_else(|| (!base.rows.is_empty()).then_some(0));
                 selection.anchor = None;
             }
-            model.special.set((base.rows.is_empty() && base.offset() == 1).then_some(Special::Parent));
+            model
+                .special
+                .set((base.rows.is_empty() && base.offset() == 1).then_some(Special::Parent));
             *model.data.borrow_mut() = base;
             model.page_start.set(0);
             model.notify.reset();
@@ -1533,7 +1840,9 @@ impl Controller {
     fn crumb(&mut self, p: usize, i: usize) {
         self.active(p);
         let crumbs = Self::crumbs(&self.data(p).dir);
-        let Some((_, target)) = crumbs.get(i) else { return };
+        let Some((_, target)) = crumbs.get(i) else {
+            return;
+        };
         let focus = crumbs.get(i + 1).map(|(_, path)| Arc::new(path.clone()));
         self.navigate(p, target.clone(), Mode::New(focus));
     }
@@ -1543,7 +1852,9 @@ impl Controller {
     fn home(&mut self) {
         let p = self.active;
         let side = p % 2;
-        let start = self.config.start[side].clone().map_or_else(|| default_start(side).map_err(|e| e.to_string()), Ok);
+        let start = self.config.start[side]
+            .clone()
+            .map_or_else(|| default_start(side).map_err(|e| e.to_string()), Ok);
         match start {
             Ok(path) => self.navigate(p, path, Mode::New(None)),
             Err(e) => self.fail(e),
@@ -1558,10 +1869,17 @@ impl Controller {
     /// The panel header: the CLI, what the agent may write, and the run's state.
     fn sync_agent(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let panes = if self.config.agent_panes { " + ほかのペイン" } else { "" };
+        let panes = if self.config.agent_panes {
+            " + ほかのペイン"
+        } else {
+            ""
+        };
         let access = match self.config.agent_access {
             agent::Access::Folder => format!("書き込み: 表示中のフォルダ以下{panes} · ネット遮断"),
-            agent::Access::Extra => format!("書き込み: 表示中のフォルダ以下{panes} + 追加{}件 · ネット遮断", self.config.agent_folders.len()),
+            agent::Access::Extra => format!(
+                "書き込み: 表示中のフォルダ以下{panes} + 追加{}件 · ネット遮断",
+                self.config.agent_folders.len()
+            ),
             agent::Access::Full => "制限なし（サンドボックス解除）".to_string(),
         };
         let cli = match &self.agent.version {
@@ -1572,7 +1890,10 @@ impl Controller {
         ui.set_agent_cli(cli.into());
         // Closed panel: the history line shows that a run goes on.
         let badge = match &self.agent.run {
-            Some(_) if !ui.get_agent_open() => format!("エージェント実行中{}秒", self.agent.started.elapsed().as_secs()),
+            Some(_) if !ui.get_agent_open() => format!(
+                "エージェント実行中{}秒",
+                self.agent.started.elapsed().as_secs()
+            ),
             _ => String::new(),
         };
         ui.set_agent_badge(badge.into());
@@ -1580,7 +1901,11 @@ impl Controller {
         ui.set_agent_danger(self.config.agent_access == agent::Access::Full);
         ui.set_agent_running(self.agent.run.is_some());
         let status = match &self.agent.run {
-            Some(_) => format!("{}秒  {}", self.agent.started.elapsed().as_secs(), self.agent.status),
+            Some(_) => format!(
+                "{}秒  {}",
+                self.agent.started.elapsed().as_secs(),
+                self.agent.status
+            ),
             None => self.agent.status.clone(),
         };
         ui.set_agent_status(status.into());
@@ -1597,11 +1922,17 @@ impl Controller {
     fn agent_push(&self, kind: i32, text: String) {
         let lines = &self.agent.lines;
         let mut bytes = lines.iter().map(|line| line.text.len()).sum::<usize>();
-        while lines.row_count() > 0 && (lines.row_count() >= AGENT_LINES || bytes.saturating_add(text.len()) > AGENT_LOG_BYTES) {
+        while lines.row_count() > 0
+            && (lines.row_count() >= AGENT_LINES
+                || bytes.saturating_add(text.len()) > AGENT_LOG_BYTES)
+        {
             bytes -= lines.row_data(0).unwrap().text.len();
             lines.remove(0);
         }
-        lines.push(AgentLine { kind, text: text.trim_end().into() });
+        lines.push(AgentLine {
+            kind,
+            text: text.trim_end().into(),
+        });
     }
     /// Ctrl+I, the File menu or a double-click on the history line. Nothing when turned off.
     fn open_agent(&mut self) {
@@ -1690,9 +2021,20 @@ impl Controller {
         };
         // Nothing selected: the cursor item, as the context menu does.
         let cursor = self.selected_paths(p).is_empty();
-        let selection: Vec<PathBuf> = self.targets(p).iter().map(|p| shell::shell_path(p)).collect();
+        let selection: Vec<PathBuf> = self
+            .targets(p)
+            .iter()
+            .map(|p| shell::shell_path(p))
+            .collect();
         let passed = match (cursor, selection.first()) {
-            (true, Some(item)) => format!("カーソル: {}", listing::visible(&item.file_name().map_or_else(|| display(item), |n| n.to_string_lossy().into_owned()))),
+            (true, Some(item)) => format!(
+                "カーソル: {}",
+                listing::visible(
+                    &item
+                        .file_name()
+                        .map_or_else(|| display(item), |n| n.to_string_lossy().into_owned())
+                )
+            ),
             (true, None) => "選択なし".to_string(),
             (false, _) => format!("選択{}件", selection.len()),
         };
@@ -1700,14 +2042,21 @@ impl Controller {
         let mut panes: Vec<PathBuf> = Vec::new();
         for q in (0..self.visible()).filter(|&q| q != p) {
             let dir = self.data(q).dir.clone();
-            if let Some(dir) = shell::os_path(&dir).ok().filter(|d| !d.as_os_str().is_empty() && *d != cwd) {
-                if !panes.contains(&dir) {
-                    panes.push(dir);
-                }
+            if let Some(dir) = shell::os_path(&dir)
+                .ok()
+                .filter(|d| !d.as_os_str().is_empty() && *d != cwd)
+                && !panes.contains(&dir)
+            {
+                panes.push(dir);
             }
         }
-        let panes_writable = self.config.agent_panes && self.config.agent_access != agent::Access::Full;
-        let others = if panes_writable && !panes.is_empty() { format!("  ·  ほかのペイン{}件にも書き込み可", panes.len()) } else { String::new() };
+        let panes_writable =
+            self.config.agent_panes && self.config.agent_access != agent::Access::Full;
+        let others = if panes_writable && !panes.is_empty() {
+            format!("  ·  ほかのペイン{}件にも書き込み可", panes.len())
+        } else {
+            String::new()
+        };
         self.agent_push(1, format!("{}  ·  {passed}{others}", shown(&cwd)));
         self.agent_push(0, format!("› {text}"));
         if self.agent.history.last().is_none_or(|last| last != text) {
@@ -1744,20 +2093,26 @@ impl Controller {
                     if let Some(c) = controller {
                         c.borrow_mut().handle(Reply::Agent(id, event));
                         true
-                    } else { false }
+                    } else {
+                        false
+                    }
                 });
                 let _ = tx.send(accepted);
-            }).is_ok() && rx.recv().unwrap_or(false)
+            })
+            .is_ok()
+                && rx.recv().unwrap_or(false)
         }));
         self.agent.started = Instant::now();
         self.agent.status = "起動中…".into();
-        self.agent.clock.start(slint::TimerMode::Repeated, Duration::from_secs(1), || {
-            if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
-                if let Ok(c) = c.try_borrow() {
+        self.agent
+            .clock
+            .start(slint::TimerMode::Repeated, Duration::from_secs(1), || {
+                if let Some(c) = CONTROLLER.with(|c| c.borrow().clone())
+                    && let Ok(c) = c.try_borrow()
+                {
                     c.sync_agent();
                 }
-            }
-        });
+            });
         self.sync_agent();
         true
     }
@@ -1782,7 +2137,12 @@ impl Controller {
     }
     /// コピー: the whole log as shown, one line per row.
     fn agent_copy(&self) {
-        let lines: Vec<String> = self.agent.lines.iter().map(|line| line.text.to_string()).collect();
+        let lines: Vec<String> = self
+            .agent
+            .lines
+            .iter()
+            .map(|line| line.text.to_string())
+            .collect();
         if lines.is_empty() {
             self.message("コピーする会話がありません");
             return;
@@ -1824,7 +2184,10 @@ impl Controller {
                         let first = error.lines().next().unwrap_or_default().to_string();
                         let lower = error.to_lowercase();
                         self.agent_push(3, error);
-                        if ["login", "log in", "sign in", "unauthorized", "401", "auth"].iter().any(|w| lower.contains(w)) {
+                        if ["login", "log in", "sign in", "unauthorized", "401", "auth"]
+                            .iter()
+                            .any(|w| lower.contains(w))
+                        {
                             self.agent_push(4, "サインインが必要かもしれません。ターミナルで codex login を実行してください".into());
                         }
                         self.agent.status = "エラー".into();
@@ -1841,7 +2204,11 @@ impl Controller {
     /// The memory file no longer holds the accepted text: show what changed.
     fn memory_changed(&mut self, text: String) {
         let Some(ui) = self.ui.upgrade() else { return };
-        let approved = self.config.agent_memory_approved.clone().unwrap_or_default();
+        let approved = self
+            .config
+            .agent_memory_approved
+            .clone()
+            .unwrap_or_default();
         let diff = agent::memory_diff(&approved, &text);
         if diff.is_empty() {
             // Only line ends: nothing anyone could be told to do.
@@ -1860,7 +2227,10 @@ impl Controller {
                     3 => "⋯".to_string(),
                     _ => format!("  {text}"),
                 };
-                AgentLine { kind, text: text.into() }
+                AgentLine {
+                    kind,
+                    text: text.into(),
+                }
             })
             .collect();
         self.agent.memory = Some(text);
@@ -1872,7 +2242,9 @@ impl Controller {
     }
     /// 0 採用, 1 元に戻す, 2 あとで (the next request asks again).
     fn memory_answer(&mut self, code: i32) {
-        let Some(text) = self.agent.memory.take() else { return };
+        let Some(text) = self.agent.memory.take() else {
+            return;
+        };
         match code {
             0 => {
                 self.config.agent_memory_approved = Some(text);
@@ -1883,8 +2255,16 @@ impl Controller {
             }
             1 => {
                 let file = self.config.agent_memory();
-                let approved = self.config.agent_memory_approved.clone().unwrap_or_default();
-                std::thread::spawn(move || post(Reply::MemoryRestored(std::fs::write(&file, approved).map_err(|e| e.to_string()))));
+                let approved = self
+                    .config
+                    .agent_memory_approved
+                    .clone()
+                    .unwrap_or_default();
+                std::thread::spawn(move || {
+                    post(Reply::MemoryRestored(
+                        std::fs::write(&file, approved).map_err(|e| e.to_string()),
+                    ))
+                });
             }
             _ => self.message("メモリの変更は保留中です。次の依頼の前にもう一度確認します"),
         }
@@ -1915,7 +2295,9 @@ impl Controller {
     }
     fn resumed(&mut self) {
         self.render_rebuild.request("system resume");
-        recovery::record("system resumed; rearming folder watches and refreshing visible panes".into());
+        recovery::record(
+            "system resumed; rearming folder watches and refreshing visible panes".into(),
+        );
         let visible = self.visible();
         for pane in self.panes.iter_mut().take(visible) {
             // A remote watch handle can outlive the connection it watched.
@@ -1926,7 +2308,8 @@ impl Controller {
             ui.window().request_redraw();
             use slint::winit_030::WinitWindowAccessor;
             // Bypass Slint's pending-redraw coalescing and frame throttle once.
-            ui.window().with_winit_window(|window| window.request_redraw());
+            ui.window()
+                .with_winit_window(|window| window.request_redraw());
         }
     }
     fn handle(&mut self, reply: Reply) {
@@ -1938,7 +2321,9 @@ impl Controller {
                 }
             }
             Reply::AutomaticSkipped(p, generation, reason) => {
-                if self.panes[p].generation != generation { return; }
+                if self.panes[p].generation != generation {
+                    return;
+                }
                 let pane = &mut self.panes[p];
                 pane.pending = None;
                 pane.stale = false;
@@ -1955,7 +2340,10 @@ impl Controller {
             }
             Reply::Listing(p, generation, result) => self.complete(p, generation, result),
             Reply::Finder(p, session, event) => {
-                let Some(current) = self.panes[p].finder.as_mut().filter(|s| s.id == session) else { return };
+                let Some(current) = self.panes[p].finder.as_mut().filter(|s| s.id == session)
+                else {
+                    return;
+                };
                 match event {
                     finder::Event::Found(id, batch, done) => self.found(p, id, batch, done),
                     finder::Event::Overflow => {
@@ -1994,7 +2382,11 @@ impl Controller {
                         } else if outcome.missed {
                             format!("{verb}できなかった項目があります → {}", shown(&dir))
                         } else if outcome.inside > 0 {
-                            format!("フォルダをその中へは貼り付けられないため{}件をスキップしました → {}", outcome.inside, shown(&dir))
+                            format!(
+                                "フォルダをその中へは貼り付けられないため{}件をスキップしました → {}",
+                                outcome.inside,
+                                shown(&dir)
+                            )
                         } else if outcome.skipped {
                             format!("{verb}しました（一部スキップ） → {}", shown(&dir))
                         } else {
@@ -2004,7 +2396,10 @@ impl Controller {
                     }
                     Err(e) => self.fail(format!("貼り付けできません: {e}")),
                 }
-                if self.data(p).dir == dir && self.panes[p].pending.is_none() && self.panes[p].found.is_none() {
+                if self.data(p).dir == dir
+                    && self.panes[p].pending.is_none()
+                    && self.panes[p].found.is_none()
+                {
                     self.navigate(p, dir, Mode::Pasted(before, Arc::new(targets)));
                 }
                 // The moved items' source folder.
@@ -2034,14 +2429,21 @@ impl Controller {
                     ctxmenu::Outcome::Paste(dir) => self.paste_into(p, Some(dir)),
                     ctxmenu::Outcome::Rename(path) => self.open_name(p, NameKind::Rename(path)),
                     ctxmenu::Outcome::Done => self.refresh_shown(None),
-                    ctxmenu::Outcome::Failed(e) => self.fail(format!("メニューを実行できません: {e}")),
+                    ctxmenu::Outcome::Failed(e) => {
+                        self.fail(format!("メニューを実行できません: {e}"))
+                    }
                 }
             }
             Reply::Made(p, dir, _before, result) => match result {
                 Ok(path) => {
                     self.message(format!("完了: {}", shown(&path)));
                     if self.data(p).dir == dir
-                        && self.panes[p].pending.as_ref().is_none_or(|mode| matches!(mode, Mode::Refresh | Mode::Automatic | Mode::Sort | Mode::Made(_)))
+                        && self.panes[p].pending.as_ref().is_none_or(|mode| {
+                            matches!(
+                                mode,
+                                Mode::Refresh | Mode::Automatic | Mode::Sort | Mode::Made(_)
+                            )
+                        })
                         && self.panes[p].found.is_none()
                     {
                         self.navigate(p, dir, Mode::Made(Arc::new(path)));
@@ -2049,7 +2451,9 @@ impl Controller {
                 }
                 Err(e) => self.fail(format!("できませんでした: {e}")),
             },
-            Reply::Picked(i, path) if i >= BOOKMARK_FOLDER => self.bookmark_picked(i - BOOKMARK_FOLDER, &path),
+            Reply::Picked(i, path) if i >= BOOKMARK_FOLDER => {
+                self.bookmark_picked(i - BOOKMARK_FOLDER, &path)
+            }
             Reply::Picked(i, path) => {
                 if !self.ui.upgrade().is_some_and(|ui| ui.get_settings_open()) {
                     return;
@@ -2092,7 +2496,7 @@ impl Controller {
                     self.fail(format!("開けません: {e}"));
                 }
             }
-            Reply::ShellFolder(p, navigation, _) if self.panes[p].navigation != navigation => {},
+            Reply::ShellFolder(p, navigation, _) if self.panes[p].navigation != navigation => {}
             Reply::ShellFolder(p, _, result) => match result {
                 Ok(Some(path)) => self.navigate(p, path, Mode::New(None)),
                 Ok(None) => {}
@@ -2111,7 +2515,10 @@ impl Controller {
         self.panes[p].deadline.stop();
         let mode = self.panes[p].pending.take().unwrap_or(Mode::Refresh);
         let reloaded = !matches!(&mode, Mode::Sort);
-        let focus_list = matches!(&mode, Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_));
+        let focus_list = matches!(
+            &mode,
+            Mode::New(_) | Mode::Back | Mode::Forward | Mode::Return(_)
+        );
         // Opened with no item to show: the cursor starts on "..".
         let entered = matches!(&mode, Mode::New(None));
         let made = matches!(&mode, Mode::Made(_));
@@ -2129,7 +2536,11 @@ impl Controller {
             }
         };
         if std::mem::take(&mut self.panes[p].wsl_paused) {
-            self.message(if shell::wsl_distribution(&data.dir).is_some() { "WSLに再接続しました" } else { "" });
+            self.message(if shell::wsl_distribution(&data.dir).is_some() {
+                "WSLに再接続しました"
+            } else {
+                ""
+            });
         }
         if focus_list {
             // The job for an opened folder ran without the filter.
@@ -2144,7 +2555,11 @@ impl Controller {
             model.compare.borrow().is_none()
                 && previous.dir == data.dir
                 && previous.rows.len() == data.rows.len()
-                && previous.rows.iter().zip(&data.rows).all(|(a, b)| a.path == b.path)
+                && previous
+                    .rows
+                    .iter()
+                    .zip(&data.rows)
+                    .all(|(a, b)| a.path == b.path)
         };
         // Comparing: this pane shows its plain list until `recompare` lines it up again.
         *self.panes[p].model.compare.borrow_mut() = None;
@@ -2154,11 +2569,15 @@ impl Controller {
         if changed && self.panes[p].found.is_none() {
             // Shift+letter returns to the folder (and cursor) last shown on that drive.
             if let Some(drive) = drive_of(&old.path) {
-                self.config.drive_dirs.insert(drive.clone(), old.path.clone());
+                self.config
+                    .drive_dirs
+                    .insert(drive.clone(), old.path.clone());
                 self.drive_cursors.insert(drive, old.current.clone());
             }
             if let Some(drive) = drive_of(&data.dir) {
-                self.config.drive_dirs.insert(drive.clone(), data.dir.clone());
+                self.config
+                    .drive_dirs
+                    .insert(drive.clone(), data.dir.clone());
                 self.drive_cursors.remove(&drive);
             }
         }
@@ -2239,7 +2658,10 @@ impl Controller {
             .retain(|p| data.positions.contains_key(p));
         selection.deferred = None;
         selection.selected_count = if selection.all {
-            data.rows.iter().filter(|e| selection.contains(&e.path)).count()
+            data.rows
+                .iter()
+                .filter(|e| selection.contains(&e.path))
+                .count()
         } else {
             selection.exceptions.len()
         };
@@ -2262,7 +2684,11 @@ impl Controller {
         if special.is_none() {
             selection.select_current_if_empty(&data.rows);
         }
-        let reveal = if special.is_some() { None } else { selection.current };
+        let reveal = if special.is_some() {
+            None
+        } else {
+            selection.current
+        };
         let pane = &mut self.panes[p];
         pane.model.special.set(special);
         *pane.model.selection.borrow_mut() = selection;
@@ -2280,7 +2706,8 @@ impl Controller {
         if pane.forward.len() > 64 {
             pane.forward.remove(0);
         }
-        if changed || !pane.watch.as_ref().is_some_and(shell::Watch::is_alive)
+        if changed
+            || !pane.watch.as_ref().is_some_and(shell::Watch::is_alive)
             || (reloaded && shell::wsl_distribution(&data.dir).is_some())
         {
             let dir = data.dir.clone();
@@ -2291,8 +2718,10 @@ impl Controller {
         let stale = std::mem::take(&mut pane.stale);
         self.set_path(p, display(&data.dir));
         if let Some(ui) = self.ui.upgrade() {
-            let crumbs: Vec<slint::SharedString> =
-                Self::crumbs(&data.dir).into_iter().map(|(label, _)| label.into()).collect();
+            let crumbs: Vec<slint::SharedString> = Self::crumbs(&data.dir)
+                .into_iter()
+                .map(|(label, _)| label.into())
+                .collect();
             let crumbs = ModelRc::new(slint::VecModel::from(crumbs));
             match p {
                 0 => ui.set_p0_crumbs(crumbs),
@@ -2358,8 +2787,12 @@ impl Controller {
                         self.repaint(p);
                         if kind == 3 {
                             let target = match special {
-                                Special::Drive(i) => ctxmenu::Target::Items(vec![self.drives[i].root.clone()]),
-                                Special::Parent | Special::Gap(_) => ctxmenu::Target::Background(data.dir.clone()),
+                                Special::Drive(i) => {
+                                    ctxmenu::Target::Items(vec![self.drives[i].root.clone()])
+                                }
+                                Special::Parent | Special::Gap(_) => {
+                                    ctxmenu::Target::Background(data.dir.clone())
+                                }
                             };
                             self.show_menu(p, target, shift, None);
                         }
@@ -2417,7 +2850,9 @@ impl Controller {
             return;
         }
         let Some(ui) = self.ui.upgrade() else { return };
-        let (Some(hwnd), false) = (hwnd(&ui), paths.is_empty()) else { return };
+        let (Some(hwnd), false) = (hwnd(&ui), paths.is_empty()) else {
+            return;
+        };
         let ui = ui.as_weak();
         let result = dnd::defer(hwnd, move || {
             let _origin = dnd::Origin::new(p);
@@ -2428,23 +2863,32 @@ impl Controller {
             let scale = ui.window().scale_factor();
             let position = slint::LogicalPosition::new(x as f32 / scale, y as f32 / scale);
             let button = slint::platform::PointerEventButton::Left;
-            ui.window().dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
             if let Err(e) = result {
                 ui.set_message(format!("ドラッグできません: {e}").into());
                 ui.set_message_error(true);
             }
         });
-        if let Err(error) = result { self.fail(format!("ドラッグを開始できません: {error}")); }
+        if let Err(error) = result {
+            self.fail(format!("ドラッグを開始できません: {error}"));
+        }
     }
     /// Drive buttons and Shift+letter share the remembered folder and cursor.
     fn open_drive(&mut self, p: usize, root: PathBuf) {
         let drive = drive_of(&root);
         // The last folder is shared across panes, even when this pane already
         // shows the same drive (possibly at a different folder).
-        let last = drive.as_ref().and_then(|drive| self.config.drive_dirs.get(drive).cloned());
+        let last = drive
+            .as_ref()
+            .and_then(|drive| self.config.drive_dirs.get(drive).cloned());
         match last {
             Some(dir) => {
-                let cursor = drive.as_ref().and_then(|drive| self.drive_cursors.get(drive)).cloned().flatten();
+                let cursor = drive
+                    .as_ref()
+                    .and_then(|drive| self.drive_cursors.get(drive))
+                    .cloned()
+                    .flatten();
                 self.navigate(p, dir, Mode::New(cursor));
                 self.panes[p].fallback = Some(root);
             }
@@ -2464,11 +2908,26 @@ impl Controller {
             Special::Gap(_) => {}
         }
     }
-    fn show_menu(&mut self, p: usize, target: ctxmenu::Target, extended: bool, verb: Option<&'static str>) {
-        let owner = self.ui.upgrade().and_then(|ui| hwnd(&ui)).map_or(0, |h| h.0 as isize);
+    fn show_menu(
+        &mut self,
+        p: usize,
+        target: ctxmenu::Target,
+        extended: bool,
+        verb: Option<&'static str>,
+    ) {
+        let owner = self
+            .ui
+            .upgrade()
+            .and_then(|ui| hwnd(&ui))
+            .map_or(0, |h| h.0 as isize);
         self.menu_pane = p;
         match &self.menus {
-            Some(menus) => menus.show(ctxmenu::Request { target, owner, extended, verb }),
+            Some(menus) => menus.show(ctxmenu::Request {
+                target,
+                owner,
+                extended,
+                verb,
+            }),
             None => self.fail("コンテキストメニューを開けません"),
         }
     }
@@ -2485,10 +2944,12 @@ impl Controller {
     fn windows_properties(&mut self, p: usize) {
         let data = self.data(p);
         let target = match self.panes[p].model.special.get() {
-            Some(Special::Drive(i)) if self.selected_paths(p).is_empty() => match self.drives.get(i) {
-                Some(drive) => ctxmenu::Target::Items(vec![drive.root.clone()]),
-                None => return,
-            },
+            Some(Special::Drive(i)) if self.selected_paths(p).is_empty() => {
+                match self.drives.get(i) {
+                    Some(drive) => ctxmenu::Target::Items(vec![drive.root.clone()]),
+                    None => return,
+                }
+            }
             _ => match self.targets(p) {
                 items if items.is_empty() => ctxmenu::Target::Background(data.dir.clone()),
                 items => ctxmenu::Target::Items(items),
@@ -2524,15 +2985,24 @@ impl Controller {
             // The folder goes in as the working folder, never as text Windows Terminal would
             // parse (";" separates its commands).
             let result = match terminal {
-                Some(wt) => std::process::Command::new(wt).args(["-d", "."]).current_dir(&dir).spawn(),
-                // By full path: a bare name is looked up next to enyfile.exe first.
-                None => std::process::Command::new(shell::system_dir().join(r"WindowsPowerShell\v1.0\powershell.exe"))
-                    .arg("-NoLogo")
+                Some(wt) => std::process::Command::new(wt)
+                    .args(["-d", "."])
                     .current_dir(&dir)
-                    .creation_flags(CREATE_NEW_CONSOLE)
                     .spawn(),
+                // By full path: a bare name is looked up next to enyfile.exe first.
+                None => std::process::Command::new(
+                    shell::system_dir().join(r"WindowsPowerShell\v1.0\powershell.exe"),
+                )
+                .arg("-NoLogo")
+                .current_dir(&dir)
+                .creation_flags(CREATE_NEW_CONSOLE)
+                .spawn(),
             };
-            post(Reply::Opened(result.map(drop).map_err(|e| format!("ターミナルを起動できません: {e}"))));
+            post(Reply::Opened(
+                result
+                    .map(drop)
+                    .map_err(|e| format!("ターミナルを起動できません: {e}")),
+            ));
         });
     }
     /// An Explorer window on the folder shown.
@@ -2559,7 +3029,9 @@ impl Controller {
         }
         // Search results come from many folders: rename only, in the item's own folder.
         let dir = match &kind {
-            NameKind::Rename(path) => path.parent().map_or_else(|| data.dir.clone(), Path::to_path_buf),
+            NameKind::Rename(path) => path
+                .parent()
+                .map_or_else(|| data.dir.clone(), Path::to_path_buf),
             _ if self.panes[p].found.is_some() => {
                 self.message("検索結果では作成できません（Esc で戻る）");
                 return;
@@ -2581,12 +3053,24 @@ impl Controller {
         };
         let (title, initial, folder) = match &kind {
             NameKind::Rename(path) => {
-                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 taken.remove(&name.to_lowercase());
-                let folder = data.rows.iter().find(|entry| entry.path.as_ref() == path).is_some_and(|entry| entry.directory);
+                let folder = data
+                    .rows
+                    .iter()
+                    .find(|entry| entry.path.as_ref() == path)
+                    .is_some_and(|entry| entry.directory);
                 ("名前の変更", name, folder)
             }
-            NameKind::NewFile => ("新規ファイル", unique("新しいテキスト ドキュメント.txt", false, &taken), false),
+            NameKind::NewFile => (
+                "新規ファイル",
+                unique("新しいテキスト ドキュメント.txt", false, &taken),
+                false,
+            ),
             NameKind::NewFolder => ("新規フォルダ", unique("新しいフォルダ", true, &taken), true),
         };
         let stem = paste::stem_len(&initial, folder);
@@ -2616,7 +3100,9 @@ impl Controller {
         if ok && !self.name_error(&name).is_empty() {
             return;
         }
-        let Some(naming) = self.naming.take() else { return };
+        let Some(naming) = self.naming.take() else {
+            return;
+        };
         if let Some(ui) = self.ui.upgrade() {
             ui.set_name_open(false);
             ui.invoke_focus_pane(naming.pane as i32);
@@ -2625,17 +3111,25 @@ impl Controller {
         if !ok {
             return;
         }
-        let Naming { pane, dir, kind, before, .. } = naming;
-        if let NameKind::Rename(old) = &kind {
-            if old.file_name().is_some_and(|n| n == name.as_str()) {
-                return;
-            }
+        let Naming {
+            pane,
+            dir,
+            kind,
+            before,
+            ..
+        } = naming;
+        if let NameKind::Rename(old) = &kind
+            && old.file_name().is_some_and(|n| n == name.as_str())
+        {
+            return;
         }
         std::thread::spawn(move || {
             let target = dir.join(&name);
             let result = match kind {
                 NameKind::Rename(old) => shell::rename(&old, &name).map(|_| target),
-                NameKind::NewFolder => std::fs::create_dir(&target).map(|_| target).map_err(|e| e.to_string()),
+                NameKind::NewFolder => std::fs::create_dir(&target)
+                    .map(|_| target)
+                    .map_err(|e| e.to_string()),
                 NameKind::NewFile => std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -2653,10 +3147,10 @@ impl Controller {
         for pane in &self.panes {
             let model = &pane.model;
             *model.drives.borrow_mut() = drives.clone();
-            if let Some(Special::Drive(i)) = model.special.get() {
-                if i >= drives.len() {
-                    model.special.set(None);
-                }
+            if let Some(Special::Drive(i)) = model.special.get()
+                && i >= drives.len()
+            {
+                model.special.set(None);
             }
             // Compared panes show no drive list.
             if model.compare.borrow().is_some() {
@@ -2686,7 +3180,11 @@ impl Controller {
             ui.set_active_hidden(self.config.show_hidden[self.active]);
         }
         let side = if p == 0 { "左" } else { "右" };
-        let state = if self.config.show_hidden[p] { "表示" } else { "非表示" };
+        let state = if self.config.show_hidden[p] {
+            "表示"
+        } else {
+            "非表示"
+        };
         self.message(format!("隠しファイルを{state}（{side}ペイン）"));
         if let Some(text) = self.panes[p].found.as_ref().map(|f| f.text.clone()) {
             self.search_tree(p, &text);
@@ -2831,8 +3329,12 @@ impl Controller {
             } else {
                 format!("{} バイト", m.size)
             };
-            let date = chrono::DateTime::<chrono::Local>::from(m.modified).format("%Y-%m-%d %H:%M:%S");
-            format!("{kind}  ·  {date}{}", if newer { "  （新しい）" } else { "" })
+            let date =
+                chrono::DateTime::<chrono::Local>::from(m.modified).format("%Y-%m-%d %H:%M:%S");
+            format!(
+                "{kind}  ·  {date}{}",
+                if newer { "  （新しい）" } else { "" }
+            )
         };
         let name = listing::visible(&q.target.file_name().unwrap().to_string_lossy()).into_owned();
         let info = AskInfo {
@@ -2844,7 +3346,12 @@ impl Controller {
             stem: paste::stem_len(&q.auto_name, q.from.directory) as i32,
             existing_path: shown(&q.target).into(),
             existing_detail: detail(&q.to, q.to.modified > q.from.modified).into(),
-            incoming_label: if q.moved { "移動する項目:" } else { "コピーする項目:" }.into(),
+            incoming_label: if q.moved {
+                "移動する項目:"
+            } else {
+                "コピーする項目:"
+            }
+            .into(),
             incoming_path: shown(&q.source).into(),
             incoming_detail: detail(&q.from, q.from.modified > q.to.modified).into(),
             rename: q.auto_name.clone().into(),
@@ -2866,7 +3373,9 @@ impl Controller {
     }
     fn answer(&mut self, code: i32, name: String, all: bool) {
         use paste::{Answer, Kind};
-        let Some((_, q, _)) = self.asking.front() else { return };
+        let Some((_, q, _)) = self.asking.front() else {
+            return;
+        };
         let answer = match (code, q.kind) {
             (0, Kind::File) => Answer::Overwrite,
             (1, Kind::File) => Answer::Newer,
@@ -2887,10 +3396,28 @@ impl Controller {
             self.message("項目が選択されていません");
             return;
         }
-        let panes: Vec<_> = self.panes.iter().enumerate().map(|(i, pane)| {
-            format!("pane={} folder={:?} pending={} watch={} search={}", i + 1, pane.model.data.borrow().dir, pane.pending.is_some(), pane.watch.as_ref().is_some_and(shell::Watch::is_alive), pane.found.is_some())
-        }).collect();
-        recovery::record(format!("delete: UI request; pane={} operations={} confirming={}; {}", p + 1, self.operations, self.confirming, panes.join("; ")));
+        let panes: Vec<_> = self
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(i, pane)| {
+                format!(
+                    "pane={} folder={:?} pending={} watch={} search={}",
+                    i + 1,
+                    pane.model.data.borrow().dir,
+                    pane.pending.is_some(),
+                    pane.watch.as_ref().is_some_and(shell::Watch::is_alive),
+                    pane.found.is_some()
+                )
+            })
+            .collect();
+        recovery::record(format!(
+            "delete: UI request; pane={} operations={} confirming={}; {}",
+            p + 1,
+            self.operations,
+            self.confirming,
+            panes.join("; ")
+        ));
         self.operations += 1;
         self.confirming += 1;
         std::thread::spawn(move || {
@@ -2934,7 +3461,20 @@ impl Controller {
         }
         // Shift+F1..F12: the bookmarks from the top (the menu shows each one's key).
         if shift && !ctrl && !alt {
-            let keys = [Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12];
+            let keys = [
+                Key::F1,
+                Key::F2,
+                Key::F3,
+                Key::F4,
+                Key::F5,
+                Key::F6,
+                Key::F7,
+                Key::F8,
+                Key::F9,
+                Key::F10,
+                Key::F11,
+                Key::F12,
+            ];
             if let Some(i) = keys.into_iter().position(is) {
                 self.open_bookmark(i);
                 return true;
@@ -3175,10 +3715,12 @@ impl Controller {
                     let mut selection = model.selection.borrow_mut();
                     // Leaving "..", a drive or a gap: the range starts at the first entry
                     // in the direction of the move, not where an earlier range started.
-                    if shift && special.is_some() {
-                        if let Some(Slot::Entry(first)) = model.entry_toward(cursor, row).and_then(|r| model.slot(r)) {
-                            selection.anchor = Some(first);
-                        }
+                    if shift
+                        && special.is_some()
+                        && let Some(Slot::Entry(first)) =
+                            model.entry_toward(cursor, row).and_then(|r| model.slot(r))
+                    {
+                        selection.anchor = Some(first);
                     }
                     model.special.set(None);
                     selection.select(&data.rows, index, ctrl, shift, false);
@@ -3218,9 +3760,19 @@ impl Controller {
             return true;
         }
         // Shift+letter: that drive, when it exists (otherwise the letter searches names).
-        if shift && !ctrl && !alt && letter.len() == 1 && letter.chars().all(|c| c.is_ascii_alphabetic()) {
+        if shift
+            && !ctrl
+            && !alt
+            && letter.len() == 1
+            && letter.chars().all(|c| c.is_ascii_alphabetic())
+        {
             let prefix = format!("{}:", letter.to_uppercase());
-            if let Some(root) = self.drives.iter().find(|d| d.root.to_string_lossy().starts_with(&prefix)).map(|d| d.root.clone()) {
+            if let Some(root) = self
+                .drives
+                .iter()
+                .find(|d| d.root.to_string_lossy().starts_with(&prefix))
+                .map(|d| d.root.clone())
+            {
                 self.open_drive(p, root);
                 return true;
             }
@@ -3271,7 +3823,10 @@ type AnswerTx = mpsc::SyncSender<(paste::Answer, bool)>;
 /// Paste worker: read the clipboard, plan (asking the UI about each conflict), then run.
 fn paste_job(p: usize, dir: PathBuf, before: Positions) {
     let ole = shell::Apartment::new();
-    let result = ole.as_ref().map_err(Clone::clone).and_then(|_| run_paste(p, &dir));
+    let result = ole
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|_| run_paste(p, &dir));
     let (targets, result) = match result {
         Ok((targets, outcome)) => (targets, Ok(outcome)),
         Err(e) => (Vec::new(), Err(e)),
@@ -3281,13 +3836,25 @@ fn paste_job(p: usize, dir: PathBuf, before: Positions) {
 fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), String> {
     let clip = shell::read_clip()?;
     let moved = clip.moved;
-    let done = |aborted| (Vec::new(), PasteOutcome { moved, aborted, ..Default::default() });
+    let done = |aborted| {
+        (
+            Vec::new(),
+            PasteOutcome {
+                moved,
+                aborted,
+                ..Default::default()
+            },
+        )
+    };
     let Some(paths) = clip.paths else {
         // Shell items without paths: the Windows copy engine resolves conflicts itself.
         return shell::paste_shell_items(dir, moved).map(done);
     };
     let mut ids = pathid::Idents::default();
-    let same_folder = !paths.is_empty() && paths.iter().all(|path| path.parent().is_some_and(|d| ids.same(d, dir)));
+    let same_folder = !paths.is_empty()
+        && paths
+            .iter()
+            .all(|path| path.parent().is_some_and(|d| ids.same(d, dir)));
     if same_folder {
         if moved {
             return Err("切り取った項目は既にこのフォルダにあります".into());
@@ -3303,18 +3870,34 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
         rx.recv().unwrap_or((paste::Answer::Cancel, false))
     };
     let Some(plan) = paste::plan(&paths, dir, moved, &mut ask)? else {
-        let cancelled = PasteOutcome { moved, cancelled: true, ..Default::default() };
+        let cancelled = PasteOutcome {
+            moved,
+            cancelled: true,
+            ..Default::default()
+        };
         return Ok((Vec::new(), cancelled));
     };
     // `transfer` verifies the plan against the disk right before it changes anything.
-    let shell::Transferred { aborted, missed, kept } = shell::transfer(&plan)?;
+    let shell::Transferred {
+        aborted,
+        missed,
+        kept,
+    } = shell::transfer(&plan)?;
     if moved && !aborted {
         plan.remove_emptied();
         if !plan.skipped && !missed {
             shell::finish_cut(&paths);
         }
     }
-    let outcome = PasteOutcome { moved, aborted, missed, skipped: plan.skipped, cancelled: false, inside: plan.inside, kept };
+    let outcome = PasteOutcome {
+        moved,
+        aborted,
+        missed,
+        skipped: plan.skipped,
+        cancelled: false,
+        inside: plan.inside,
+        kept,
+    };
     Ok((plan.targets, outcome))
 }
 
@@ -3345,7 +3928,8 @@ fn config_file(smoke_root: Option<&Path>) -> PathBuf {
 /// (the exe lives in `app\target\<profile>`), never a system or user folder.
 /// Created with a few sample files on first use.
 fn sandbox() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let app = app_dir().ok_or("app フォルダが見つかりません。開くフォルダを引数で指定してください")?;
+    let app =
+        app_dir().ok_or("app フォルダが見つかりません。開くフォルダを引数で指定してください")?;
     let root = app.join("data").join("sandbox");
     if !root.join("left").is_dir() {
         std::fs::create_dir_all(root.join("left").join("フォルダ A"))?;
@@ -3373,8 +3957,14 @@ fn link_example(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let start = dir.join("検索の起点");
     std::fs::create_dir_all(start.join("ふつうのフォルダ"))?;
     std::fs::create_dir_all(dir.join("起点の外"))?;
-    std::fs::write(start.join("ふつうのフォルダ").join("資料 1.txt"), "検索の起点の中")?;
-    std::fs::write(dir.join("起点の外").join("資料 2.txt"), "リンク先（検索の起点の外）")?;
+    std::fs::write(
+        start.join("ふつうのフォルダ").join("資料 1.txt"),
+        "検索の起点の中",
+    )?;
+    std::fs::write(
+        dir.join("起点の外").join("資料 2.txt"),
+        "リンク先（検索の起点の外）",
+    )?;
     std::fs::write(
         dir.join("説明.txt"),
         "「検索の起点」を開いて Ctrl+Alt+Shift+F で「資料」を検索する。\r\n\
@@ -3382,12 +3972,19 @@ fn link_example(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
          オン: 「起点の外へのリンク」を通って 資料 2.txt も見つかる。\r\n\
          「起点へ戻るリンク」は走査済みの範囲を指すので、どちらでも中に入らない（循環しない）。\r\n",
     )?;
-    for (link, target) in [("起点の外へのリンク", dir.join("起点の外")), ("起点へ戻るリンク", start.clone())] {
+    for (link, target) in [
+        ("起点の外へのリンク", dir.join("起点の外")),
+        ("起点へ戻るリンク", start.clone()),
+    ] {
         // Junctions need no administrator rights, unlike symbolic links. No console flash.
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut mklink = std::process::Command::new("cmd");
-        mklink.args(["/c", "mklink", "/J"]).arg(start.join(link)).arg(target).creation_flags(CREATE_NO_WINDOW);
+        mklink
+            .args(["/c", "mklink", "/J"])
+            .arg(start.join(link))
+            .arg(target)
+            .creation_flags(CREATE_NO_WINDOW);
         mklink.output()?;
     }
     Ok(())
@@ -3398,7 +3995,9 @@ fn default_start(side: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if app_dir().is_some() {
         return Ok(sandbox()?.join(["left", "right"][side]));
     }
-    config::known_folder(side).ok_or_else(|| "既定のフォルダが見つかりません。開くフォルダを引数で指定してください".into())
+    config::known_folder(side).ok_or_else(|| {
+        "既定のフォルダが見つかりません。開くフォルダを引数で指定してください".into()
+    })
 }
 
 /// A panic (on any thread) is appended to `crash.log` beside the settings: released builds
@@ -3415,7 +4014,11 @@ fn crash_log(file: PathBuf) {
             thread.name().unwrap_or("?"),
             std::backtrace::Backtrace::force_capture(),
         );
-        if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+        if let Ok(mut log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)
+        {
             let _ = log.write_all(entry.as_bytes());
         }
         default(info);
@@ -3434,7 +4037,10 @@ fn rebuild_rendering(
     let position = ui.window().position();
     let size = ui.window().size();
     let maximized = ui.window().is_maximized();
-    recovery::checkpoint(format!("render recovery: begin; reason={reason}; hwnd={old:?}; {}", activity.borrow().status()));
+    recovery::checkpoint(format!(
+        "render recovery: begin; reason={reason}; hwnd={old:?}; {}",
+        activity.borrow().status()
+    ));
     ui.invoke_dismiss_menu();
     // Revoke against the old HWND before Windows can reuse its numeric value.
     let old_registration = registration.borrow_mut().take();
@@ -3447,12 +4053,18 @@ fn rebuild_rendering(
         ui.window().set_maximized(maximized);
         ui.show()
     });
-    recovery::checkpoint(format!("render recovery: hide/show returned; elapsed_ms={} old={old:?} new={:?} result={result:?}", started.elapsed().as_millis(), hwnd(ui)));
+    recovery::checkpoint(format!(
+        "render recovery: hide/show returned; elapsed_ms={} old={old:?} new={:?} result={result:?}",
+        started.elapsed().as_millis(),
+        hwnd(ui)
+    ));
     if let Err(error) = result {
         // A failed re-show must not silently strand the UI hidden.
         let retry = ui.show();
         recovery::checkpoint(format!("render recovery: retry show; result={retry:?}"));
-        if retry.is_err() { let _ = slint::quit_event_loop(); }
+        if retry.is_err() {
+            let _ = slint::quit_event_loop();
+        }
         ui.set_message(format!("描画の再初期化に失敗しました: {error}").into());
         ui.set_message_error(true);
     } else {
@@ -3465,22 +4077,28 @@ fn rebuild_rendering(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Must be set before any worker threads start. On Windows ordinary hide/show
     // retains the GL context; this Slint 1.18.1 switch forces suspend/recreation.
-    unsafe { std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1"); }
+    unsafe {
+        std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1");
+    }
     // First, before anything loads a DLL by name (the graphics stack, the Shell).
     shell::harden_dll_search();
     let args: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     let smoke = args.iter().position(|a| a.as_os_str() == "--smoke");
     let network_smoke = args.iter().position(|a| a.as_os_str() == "--network-smoke");
-    let render_smoke = args.iter().position(|a| a.as_os_str() == "--render-recovery-smoke");
+    let render_smoke = args
+        .iter()
+        .position(|a| a.as_os_str() == "--render-recovery-smoke");
     if let Some(i) = render_smoke {
-        let root = args.get(i + 1).ok_or("--render-recovery-smoke <test-root>")?;
+        let root = args
+            .get(i + 1)
+            .ok_or("--render-recovery-smoke <test-root>")?;
         std::fs::create_dir_all(root.join("left"))?;
         std::fs::create_dir_all(root.join("right"))?;
     }
-    if let Some(i) = network_smoke {
-        if args.get(i + 2).is_none() {
-            return Err("--network-smoke <local-test-root> <remote-test-folder>".into());
-        }
+    if let Some(i) = network_smoke
+        && args.get(i + 2).is_none()
+    {
+        return Err("--network-smoke <local-test-root> <remote-test-folder>".into());
     }
     // `--demo <root> <frames>`: records the README animation (demo.rs) in a fresh `<root>`.
     let demo = args.iter().position(|a| a.as_os_str() == "--demo");
@@ -3488,7 +4106,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let root = args.get(i + 1).ok_or("--demo <root> <frames>")?;
         demo::prepare(root)?;
     }
-    let own_root = smoke.or(demo).or(network_smoke).or(render_smoke).map(|i| args[i + 1].as_path());
+    let own_root = smoke
+        .or(demo)
+        .or(network_smoke)
+        .or(render_smoke)
+        .map(|i| args[i + 1].as_path());
     crash_log(config_file(own_root).with_file_name("crash.log"));
     let config = config::Config::load(config_file(own_root));
     let (left, right) = match smoke {
@@ -3501,7 +4123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (args[i + 1].join("local"), args[i + 2].clone())
         }
         None if demo.is_some() => demo::start_folders(own_root.unwrap()),
-        None if render_smoke.is_some() => (own_root.unwrap().join("left"), own_root.unwrap().join("right")),
+        None if render_smoke.is_some() => (
+            own_root.unwrap().join("left"),
+            own_root.unwrap().join("right"),
+        ),
         // No arguments: the configured start folders, else the development sandbox.
         None if args.is_empty() => {
             // Developing: the sandbox (and its samples) is there even with start folders set.
@@ -3509,8 +4134,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = sandbox();
             }
             let [start_left, start_right] = config.start.clone();
-            let left = match start_left { Some(p) => p, None => default_start(0)? };
-            let right = match start_right { Some(p) => p, None => default_start(1)? };
+            let left = match start_left {
+                Some(p) => p,
+                None => default_start(0)?,
+            };
+            let right = match start_right {
+                Some(p) => p,
+                None => default_start(1)?,
+            };
             (left, right)
         }
         None => (args[0].clone(), args.get(1).unwrap_or(&args[0]).clone()),
@@ -3646,12 +4277,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // After the menu popup has closed: closing it takes the focus back from the dialog.
         ui.on_bookmark_edit(move |i| {
             let c = c.clone();
-            slint::Timer::single_shot(Duration::ZERO, move || c.borrow_mut().edit_bookmark(i as usize));
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                c.borrow_mut().edit_bookmark(i as usize)
+            });
         });
     }
     {
         let c = controller.clone();
-        ui.on_bookmark_edited(move |i, path, text| c.borrow_mut().bookmark_edited(i as usize, path, &text));
+        ui.on_bookmark_edited(move |i, path, text| {
+            c.borrow_mut().bookmark_edited(i as usize, path, &text)
+        });
     }
     {
         let c = controller.clone();
@@ -3663,7 +4298,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
-        ui.on_bookmark_move(move |i, down, follow| c.borrow_mut().move_bookmark(i as usize, down, follow));
+        ui.on_bookmark_move(move |i, down, follow| {
+            c.borrow_mut().move_bookmark(i as usize, down, follow)
+        });
     }
     {
         let c = controller.clone();
@@ -3736,7 +4373,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
-        ui.on_agent_recall(move |older, current| c.borrow_mut().agent_recall(older, &current).into());
+        ui.on_agent_recall(move |older, current| {
+            c.borrow_mut().agent_recall(older, &current).into()
+        });
     }
     {
         let c = controller.clone();
@@ -3769,7 +4408,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
-        ui.on_color_ext(move |i, exts, color| c.borrow_mut().color_ext(i as usize, exts.as_str(), color));
+        ui.on_color_ext(move |i, exts, color| {
+            c.borrow_mut().color_ext(i as usize, exts.as_str(), color)
+        });
     }
     {
         let c = controller.clone();
@@ -3793,18 +4434,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rendering_activity = activity.clone();
         match ui.window().set_rendering_notifier(move |state, _| {
             match state {
-                slint::RenderingState::BeforeRendering => rendering_activity.borrow_mut().rendering_started(),
+                slint::RenderingState::BeforeRendering => {
+                    rendering_activity.borrow_mut().rendering_started()
+                }
                 // This is before swap/presentation, not proof that pixels reached the screen.
                 slint::RenderingState::AfterRendering => rendering_activity.borrow_mut().frame(),
-                slint::RenderingState::RenderingSetup | slint::RenderingState::RenderingTeardown => {
-                    if matches!(state, slint::RenderingState::RenderingSetup) { rendering_activity.borrow_mut().rendering_setup(); }
+                slint::RenderingState::RenderingSetup
+                | slint::RenderingState::RenderingTeardown => {
+                    if matches!(state, slint::RenderingState::RenderingSetup) {
+                        rendering_activity.borrow_mut().rendering_setup();
+                    }
                     recovery::record(format!("rendering lifecycle: {state:?}"));
                 }
                 _ => {}
             }
         }) {
             Ok(()) => activity.borrow_mut().observe_rendering(),
-            Err(error) => recovery::record(format!("rendering notifier unavailable: {error}; observing redraw events only")),
+            Err(error) => recovery::record(format!(
+                "rendering notifier unavailable: {error}; observing redraw events only"
+            )),
         }
     }
     {
@@ -3813,19 +4461,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let activity = activity.clone();
         let weak = ui.as_weak();
         ui.window().on_winit_window_event(move |_, event| {
-            if matches!(event, winit::event::WindowEvent::Focused(_) | winit::event::WindowEvent::Occluded(_)) {
-                recovery::record(format!("native window state: {event:?}; {}", activity.borrow().status()));
+            if matches!(
+                event,
+                winit::event::WindowEvent::Focused(_) | winit::event::WindowEvent::Occluded(_)
+            ) {
+                recovery::record(format!(
+                    "native window state: {event:?}; {}",
+                    activity.borrow().status()
+                ));
             }
             match event {
                 winit::event::WindowEvent::RedrawRequested => activity.borrow_mut().redraw_event(),
                 winit::event::WindowEvent::MouseInput { .. }
                 | winit::event::WindowEvent::MouseWheel { .. }
-                | winit::event::WindowEvent::KeyboardInput { .. } => activity.borrow_mut().input(Instant::now()),
+                | winit::event::WindowEvent::KeyboardInput { .. } => {
+                    activity.borrow_mut().input(Instant::now())
+                }
                 _ => {}
             }
             if matches!(event, winit::event::WindowEvent::Focused(true)) {
                 if let Some(ui) = weak.upgrade() {
-                    ui.window().with_winit_window(|window| window.request_redraw());
+                    ui.window()
+                        .with_winit_window(|window| window.request_redraw());
                 }
                 let c = c.clone();
                 slint::Timer::single_shot(Duration::ZERO, move || {
@@ -3877,7 +4534,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 44 => c.windows_properties(p),
                 // Virtual, so Explorer shows it.
                 45 => {
-                    std::thread::spawn(|| post(Reply::Opened(shell::explore(Path::new("shell:RecycleBinFolder")))));
+                    std::thread::spawn(|| {
+                        post(Reply::Opened(shell::explore(Path::new(
+                            "shell:RecycleBinFolder",
+                        ))))
+                    });
                 }
                 _ => {}
             }
@@ -3897,7 +4558,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
-        ui.on_page_resized(move |p, size| c.borrow_mut().page_resized(p as usize, size.max(1) as usize));
+        ui.on_page_resized(move |p, size| {
+            c.borrow_mut()
+                .page_resized(p as usize, size.max(1) as usize)
+        });
     }
     {
         let c = controller.clone();
@@ -3987,9 +4651,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set before show, so the window opens in place instead of jumping there.
     if demo.is_some() {
         ui.window().set_size(demo::SIZE);
-    } else if let Some(w) = controller.borrow().config.window.filter(|w| shell::on_screen(w.x, w.y, w.width)) {
-        ui.window().set_position(slint::PhysicalPosition::new(w.x, w.y));
-        ui.window().set_size(slint::PhysicalSize::new(w.width, w.height));
+    } else if let Some(w) = controller
+        .borrow()
+        .config
+        .window
+        .filter(|w| shell::on_screen(w.x, w.y, w.width))
+    {
+        ui.window()
+            .set_position(slint::PhysicalPosition::new(w.x, w.y));
+        ui.window()
+            .set_size(slint::PhysicalSize::new(w.width, w.height));
         ui.window().set_maximized(w.maximized);
     }
     ui.show()?;
@@ -4113,14 +4784,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-    let _smoke = smoke.map(|i| smoke::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
-    let _network_smoke = network_smoke.map(|i| network_smoke::start(controller.clone(), args[i + 1].clone(), args[i + 2].clone()));
-    let _demo = demo.map(|i| demo::start(controller.clone(), args[i + 1].clone(), args.get(i + 2).cloned()));
-    let _render_check = render_smoke.map(|i| rendercheck::start(controller.clone(), activity.clone(), attached_window.clone(), args[i + 1].clone()));
+    let _smoke = smoke.map(|i| {
+        smoke::start(
+            controller.clone(),
+            args[i + 1].clone(),
+            args.get(i + 2).cloned(),
+        )
+    });
+    let _network_smoke = network_smoke.map(|i| {
+        network_smoke::start(controller.clone(), args[i + 1].clone(), args[i + 2].clone())
+    });
+    let _demo = demo.map(|i| {
+        demo::start(
+            controller.clone(),
+            args[i + 1].clone(),
+            args.get(i + 2).cloned(),
+        )
+    });
+    let _render_check = render_smoke.map(|i| {
+        rendercheck::start(
+            controller.clone(),
+            activity.clone(),
+            attached_window.clone(),
+            args[i + 1].clone(),
+        )
+    });
     // hide/show recovery temporarily leaves no native window. Only a real close
     // request (above) or session shutdown should terminate the application.
     slint::run_event_loop_until_quit()?;
-    recovery::checkpoint(format!("UI event loop exited; Windows session ending={}", SESSION_ENDING.get()));
+    recovery::checkpoint(format!(
+        "UI event loop exited; Windows session ending={}",
+        SESSION_ENDING.get()
+    ));
     CONTROLLER.with(|c| c.borrow_mut().take());
     Ok(())
 }
@@ -4135,20 +4830,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         link_example(&dir).unwrap();
         let start = dir.join("検索の起点");
-        for (follow, expected) in [(false, vec!["資料 1.txt"]), (true, vec!["資料 1.txt", "資料 2.txt"])] {
+        for (follow, expected) in [
+            (false, vec!["資料 1.txt"]),
+            (true, vec!["資料 1.txt", "資料 2.txt"]),
+        ] {
             let (tx, rx) = mpsc::channel();
-            let finder = finder::Finder::start(start.clone(), false, follow, finder::INDEX_LIMIT, move |event| tx.send(event).is_ok());
+            let finder = finder::Finder::start(
+                start.clone(),
+                false,
+                follow,
+                finder::INDEX_LIMIT,
+                move |event| tx.send(event).is_ok(),
+            );
             finder.query(1, listing::Pattern::new("資料").unwrap());
             let mut found = Vec::new();
             loop {
-                match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
-                    finder::Event::Found(1, batch, done) => {
-                        found.extend(batch.into_iter().map(|e| e.name.to_string()));
-                        if done.is_some() {
-                            break;
-                        }
+                if let finder::Event::Found(1, batch, done) =
+                    rx.recv_timeout(Duration::from_secs(10)).unwrap()
+                {
+                    found.extend(batch.into_iter().map(|e| e.name.to_string()));
+                    if done.is_some() {
+                        break;
                     }
-                    _ => {}
                 }
             }
             found.sort();

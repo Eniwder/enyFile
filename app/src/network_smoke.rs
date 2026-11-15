@@ -12,10 +12,10 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, remote: PathBuf) -> slin
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
         ticks += 1;
         let command = root.join("command.json");
-        if let Ok(bytes) = std::fs::read(&command) {
-            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let (Some(id), Some(action)) = (value["id"].as_u64(), value["action"].as_str()) {
-                    if id > acknowledged {
+        if let Ok(bytes) = std::fs::read(&command)
+            && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && let (Some(id), Some(action)) = (value["id"].as_u64(), value["action"].as_str())
+                    && id > acknowledged {
                         match action {
                             "refresh" => c.borrow_mut().command(1, 3),
                             "automatic" => c.borrow_mut().refresh_shown(None),
@@ -53,9 +53,6 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, remote: PathBuf) -> slin
                         }
                         acknowledged = id;
                     }
-                }
-            }
-        }
         let state = {
             let c = c.borrow();
             let panes: Vec<_> = c.panes.iter().take(2).map(|pane| {

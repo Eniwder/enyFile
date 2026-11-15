@@ -21,8 +21,17 @@ impl Controller {
             ui.set_settings_pane_drag_drop(self.config.pane_drag_drop);
             ui.set_settings_search_links(self.config.search_links);
             ui.set_settings_agent_cli(if self.config.agent_enabled { 0 } else { 1 });
-            ui.set_settings_agent_path(self.config.agent_path.as_ref().map_or(String::new(), |p| display(p)).into());
-            let access = agent::Access::ALL.iter().position(|a| *a == self.config.agent_access).unwrap_or(0);
+            ui.set_settings_agent_path(
+                self.config
+                    .agent_path
+                    .as_ref()
+                    .map_or(String::new(), |p| display(p))
+                    .into(),
+            );
+            let access = agent::Access::ALL
+                .iter()
+                .position(|a| *a == self.config.agent_access)
+                .unwrap_or(0);
             ui.set_settings_agent_access(access as i32);
             ui.set_settings_agent_panes(self.config.agent_panes);
             ui.set_settings_agent_memory(display(&self.config.agent_memory()).into());
@@ -36,7 +45,10 @@ impl Controller {
             std::thread::spawn(|| {
                 post(Reply::AgentFound(match agent::locate(None) {
                     Ok(program) => format!("空欄: 自動で検出（{}）", display(&program)),
-                    Err(_) => "空欄: 自動で検出（今は見つかりません。codex.exe の場所を入力できます）".into(),
+                    Err(_) => {
+                        "空欄: 自動で検出（今は見つかりません。codex.exe の場所を入力できます）"
+                            .into()
+                    }
                 }));
             });
         }
@@ -48,17 +60,30 @@ impl Controller {
     }
     /// Rebuilds the rows, so edited fields show new values (browse / reset).
     pub(super) fn settings_rows(&self) {
-        let labels = ["デスクトップ", "ドキュメント", "画像", "動画", "音楽", "起動時の左", "起動時の右"];
+        let labels = [
+            "デスクトップ",
+            "ドキュメント",
+            "画像",
+            "動画",
+            "音楽",
+            "起動時の左",
+            "起動時の右",
+        ];
         let sandbox = sandbox_dir();
         let rows: Vec<PlaceRow> = (0..7)
             .map(|i| PlaceRow {
                 label: labels[i].into(),
-                value: self.settings[i].as_ref().map_or(String::new(), |p| display(p)).into(),
+                value: self.settings[i]
+                    .as_ref()
+                    .map_or(String::new(), |p| display(p))
+                    .into(),
                 fallback: match (i, &sandbox) {
                     (5, Some(d)) => display(&d.join("left")),
                     (6, Some(d)) => display(&d.join("right")),
                     // Released builds start at the Desktop / Documents (see `default_start`).
-                    (5 | 6, None) => config::known_folder(i - 5).map_or(String::new(), |p| display(&p)),
+                    (5 | 6, None) => {
+                        config::known_folder(i - 5).map_or(String::new(), |p| display(&p))
+                    }
                     _ => config::known_folder(i).map_or(String::new(), |p| display(&p)),
                 }
                 .into(),
@@ -78,7 +103,9 @@ impl Controller {
     }
     /// The Windows folder picker runs on its own thread so the window keeps responding.
     pub(super) fn setting_browse(&mut self, i: usize) {
-        let start = self.settings[i].clone().or_else(|| if i < 5 { config::known_folder(i) } else { None });
+        let start = self.settings[i]
+            .clone()
+            .or_else(|| if i < 5 { config::known_folder(i) } else { None });
         std::thread::spawn(move || {
             if let Some(path) = shell::pick_folder(start.as_deref()) {
                 post(Reply::Picked(i, path));
@@ -87,8 +114,11 @@ impl Controller {
     }
     pub(super) fn font_filter(&self, query: &str) {
         if let Some(ui) = self.ui.upgrade() {
-            let fonts: Vec<slint::SharedString> = theme::filter_fonts(&theme::font_families(), query)
-                .into_iter().map(Into::into).collect();
+            let fonts: Vec<slint::SharedString> =
+                theme::filter_fonts(&theme::font_families(), query)
+                    .into_iter()
+                    .map(Into::into)
+                    .collect();
             ui.set_fonts(ModelRc::new(slint::VecModel::from(fonts)));
         }
     }
@@ -172,7 +202,11 @@ impl Controller {
     }
     /// `i` out of range adds a rule.
     pub(super) fn color_ext(&mut self, i: usize, exts: &str, color: slint::Color) {
-        let exts = theme::split_extensions(exts).iter().map(|e| e.to_uppercase()).collect::<Vec<_>>().join(";");
+        let exts = theme::split_extensions(exts)
+            .iter()
+            .map(|e| e.to_uppercase())
+            .collect::<Vec<_>>()
+            .join(";");
         if exts.is_empty() {
             self.message("拡張子を入力してください");
             return;
@@ -291,12 +325,21 @@ impl Controller {
         }
         let placement = if window.is_maximized() {
             match self.config.window {
-                Some(previous) => config::Placement { maximized: true, ..previous },
+                Some(previous) => config::Placement {
+                    maximized: true,
+                    ..previous
+                },
                 None => return,
             }
         } else {
             let (position, size) = (window.position(), window.size());
-            config::Placement { x: position.x, y: position.y, width: size.width, height: size.height, maximized: false }
+            config::Placement {
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+                maximized: false,
+            }
         };
         if self.config.window != Some(placement) {
             self.config.window = Some(placement);
@@ -334,7 +377,9 @@ impl Controller {
     }
     /// Adds the active pane's folder; it can be renamed or reordered in the edit dialog.
     pub(super) fn add_bookmark(&mut self) {
-        let Some(bookmark) = self.current_bookmark() else { return };
+        let Some(bookmark) = self.current_bookmark() else {
+            return;
+        };
         self.message(format!("ブックマークに追加: {}", bookmark.name));
         self.config.bookmarks.push(bookmark);
         self.save_config();
@@ -360,7 +405,10 @@ impl Controller {
         let rows: Vec<BookmarkRow> = self
             .bookmark_draft
             .iter()
-            .map(|(name, path)| BookmarkRow { name: name.clone().into(), path: path.clone().into() })
+            .map(|(name, path)| BookmarkRow {
+                name: name.clone().into(),
+                path: path.clone().into(),
+            })
             .collect();
         ui.set_bookmark_focus_row(if focus < rows.len() { focus as i32 } else { -1 });
         ui.set_bookmark_focus_path(path);
@@ -385,7 +433,11 @@ impl Controller {
         });
     }
     pub(super) fn bookmark_picked(&mut self, i: usize, path: &Path) {
-        if !self.ui.upgrade().is_some_and(|ui| ui.get_bookmark_editing()) {
+        if !self
+            .ui
+            .upgrade()
+            .is_some_and(|ui| ui.get_bookmark_editing())
+        {
             return;
         }
         if let Some((_, p)) = self.bookmark_draft.get_mut(i) {
@@ -394,7 +446,9 @@ impl Controller {
         }
     }
     pub(super) fn bookmark_add_current(&mut self) {
-        let Some(b) = self.current_bookmark() else { return };
+        let Some(b) = self.current_bookmark() else {
+            return;
+        };
         self.bookmark_draft.push((b.name, display(&b.path)));
         self.bookmark_rows(self.bookmark_draft.len() - 1, false);
     }
@@ -423,7 +477,10 @@ impl Controller {
                     self.bookmark_rows(i, path);
                     return;
                 }
-                bookmarks.push(config::Bookmark { name: name.into(), path: path.into() });
+                bookmarks.push(config::Bookmark {
+                    name: name.into(),
+                    path: path.into(),
+                });
             }
             self.config.bookmarks = bookmarks;
             self.save_config();
@@ -438,7 +495,11 @@ impl Controller {
     }
     pub(super) fn settings_agent_rows(&self) {
         if let Some(ui) = self.ui.upgrade() {
-            let rows: Vec<slint::SharedString> = self.settings_agent_folders.iter().map(|d| display(d).into()).collect();
+            let rows: Vec<slint::SharedString> = self
+                .settings_agent_folders
+                .iter()
+                .map(|d| display(d).into())
+                .collect();
             ui.set_settings_agent_folders(ModelRc::new(slint::VecModel::from(rows)));
         }
     }
@@ -460,7 +521,9 @@ impl Controller {
     pub(super) fn agent_memory_open(&self) {
         let file = self.config.agent_memory();
         std::thread::spawn(move || {
-            let result = agent::ensure_memory(&file).map_err(|e| e.to_string()).and_then(|()| shell::open(&file));
+            let result = agent::ensure_memory(&file)
+                .map_err(|e| e.to_string())
+                .and_then(|()| shell::open(&file));
             post(Reply::Opened(result));
         });
     }

@@ -2,7 +2,12 @@
 use super::*;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 
-pub fn start(c: Rc<RefCell<Controller>>, activity: Rc<RefCell<recovery::Activity>>, attached: Rc<Cell<Option<HWND>>>, root: PathBuf) -> slint::Timer {
+pub fn start(
+    c: Rc<RefCell<Controller>>,
+    activity: Rc<RefCell<recovery::Activity>>,
+    attached: Rc<Cell<Option<HWND>>>,
+    root: PathBuf,
+) -> slint::Timer {
     let timer = slint::Timer::default();
     let started = Instant::now();
     let mut stage = 0;

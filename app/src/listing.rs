@@ -3,9 +3,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    ffi::OsString,
     sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
@@ -59,7 +59,10 @@ pub struct Raw {
 pub fn scan(dir: &Path, show_hidden: bool) -> Result<Vec<Raw>, String> {
     scan_entries(fs::read_dir(dir).map_err(|e| e.to_string())?, show_hidden)
 }
-fn scan_entries(entries: impl Iterator<Item = std::io::Result<fs::DirEntry>>, show_hidden: bool) -> Result<Vec<Raw>, String> {
+fn scan_entries(
+    entries: impl Iterator<Item = std::io::Result<fs::DirEntry>>,
+    show_hidden: bool,
+) -> Result<Vec<Raw>, String> {
     let mut rows = Vec::new();
     for entry in entries {
         // An entry can vanish between enumeration and stat; skip it rather than fail the folder.
@@ -79,7 +82,10 @@ fn scan_entries(entries: impl Iterator<Item = std::io::Result<fs::DirEntry>>, sh
     Ok(rows)
 }
 fn entries(dir: &Path, show_hidden: bool) -> Result<Vec<Entry>, String> {
-    Ok(scan(dir, show_hidden)?.into_iter().map(|raw| entry(dir, raw)).collect())
+    Ok(scan(dir, show_hidden)?
+        .into_iter()
+        .map(|raw| entry(dir, raw))
+        .collect())
 }
 /// The list entry for `raw` in `dir`. Call on a thread with COM initialized.
 pub fn entry(dir: &Path, raw: Raw) -> Entry {
@@ -87,13 +93,17 @@ pub fn entry(dir: &Path, raw: Raw) -> Entry {
     let wide_name = raw.name.encode_wide().chain(Some(0)).collect();
     let directory = raw.directory;
     let (stem, ext) = match name.rfind('.') {
-        Some(dot) if dot > 0 && !directory => (name[..dot].to_string(), name[dot + 1..].to_string()),
+        Some(dot) if dot > 0 && !directory => {
+            (name[..dot].to_string(), name[dot + 1..].to_string())
+        }
         _ => (name.clone(), String::new()),
     };
     let type_icon = crate::icons::type_key(&ext, directory);
     crate::icons::ensure_type(&type_icon, directory);
     let path = Arc::new(dir.join(&raw.name));
-    let icon = if (!directory && crate::icons::per_file(&ext)) || (directory && crate::shell::is_junction(&path)) {
+    let icon = if (!directory && crate::icons::per_file(&ext))
+        || (directory && crate::shell::is_junction(&path))
+    {
         path.to_string_lossy().as_ref().into()
     } else {
         type_icon.clone()
@@ -118,15 +128,23 @@ pub fn entry(dir: &Path, raw: Raw) -> Entry {
 
 /// Type names by extension, looked up once (by extension only, no disk access).
 fn type_name(ext: &str, directory: bool) -> Arc<str> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, bool), Arc<str>>>> = OnceLock::new();
+    type TypeNames = HashMap<(String, bool), Arc<str>>;
+    static CACHE: OnceLock<Mutex<TypeNames>> = OnceLock::new();
     let key = (ext.to_lowercase(), directory);
     let cache = CACHE.get_or_init(Default::default);
     if let Some(name) = cache.lock().unwrap().get(&key) {
         return name.clone();
     }
-    let probe: Vec<u16> = format!("x.{}", key.0).encode_utf16().chain(Some(0)).collect();
+    let probe: Vec<u16> = format!("x.{}", key.0)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
     let mut info = SHFILEINFOW::default();
-    let attributes = if directory { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+    let attributes = if directory {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
     let ok = unsafe {
         SHGetFileInfoW(
             PCWSTR(probe.as_ptr()),
@@ -211,7 +229,11 @@ pub fn visible(text: &str) -> std::borrow::Cow<'_, str> {
     let hidden = |c: char| {
         c.is_control()
             || mark(c).is_some()
-            || matches!(c, '\u{200B}' | '\u{2028}' | '\u{2029}' | '\u{2060}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}')
+            || matches!(
+                c,
+                '\u{200B}' | '\u{2028}' | '\u{2029}' | '\u{2060}' | '\u{FEFF}' | '\u{E0000}'
+                    ..='\u{E007F}'
+            )
     };
     if !text.chars().any(hidden) {
         return text.into();
@@ -241,14 +263,27 @@ pub fn volume(dir: &Path) -> Option<Volume> {
     unsafe { GetDiskFreeSpaceExW(PCWSTR(root.as_ptr()), Some(&mut free), None, None) }.ok()?;
     let mut name = [0u16; 261];
     let _ = unsafe {
-        GetVolumeInformationW(PCWSTR(root.as_ptr()), Some(&mut name), None, None, None, None)
+        GetVolumeInformationW(
+            PCWSTR(root.as_ptr()),
+            Some(&mut name),
+            None,
+            None,
+            None,
+            None,
+        )
     };
-    let text = |w: &[u16]| String::from_utf16_lossy(&w[..w.iter().position(|&c| c == 0).unwrap_or(w.len())]);
+    let text = |w: &[u16]| {
+        String::from_utf16_lossy(&w[..w.iter().position(|&c| c == 0).unwrap_or(w.len())])
+    };
     let root = text(&root);
     let root = root.trim_start_matches(r"\\?\").trim_end_matches('\\');
     let name = text(&name);
     Some(Volume {
-        label: if name.is_empty() { root.to_string() } else { format!("{name} ({root})") },
+        label: if name.is_empty() {
+            root.to_string()
+        } else {
+            format!("{name} ({root})")
+        },
         free,
     })
 }
@@ -286,16 +321,28 @@ pub fn drives() -> Vec<Drive> {
             };
             let n = info.szDisplayName.iter().position(|&c| c == 0).unwrap_or(0);
             let display = String::from_utf16_lossy(&info.szDisplayName[..n]);
-            let label = display.replace(&format!("({letter})"), "").trim().to_string();
+            let label = display
+                .replace(&format!("({letter})"), "")
+                .trim()
+                .to_string();
             let (mut free, mut total) = (0u64, 0u64);
             let _ = unsafe {
-                GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut free), Some(&mut total), None)
+                GetDiskFreeSpaceExW(
+                    PCWSTR(wide.as_ptr()),
+                    Some(&mut free),
+                    Some(&mut total),
+                    None,
+                )
             };
             let icon: Arc<str> = format!("<drive {letter}>").into();
             crate::icons::ensure_path(&icon, Path::new(&root_text));
             Drive {
                 root: PathBuf::from(&root_text),
-                name: if label.is_empty() { letter.clone() } else { format!("{letter} {label}") },
+                name: if label.is_empty() {
+                    letter.clone()
+                } else {
+                    format!("{letter} {label}")
+                },
                 free,
                 total,
                 icon,
@@ -305,9 +352,10 @@ pub fn drives() -> Vec<Drive> {
 }
 /// Explorer's name order (natural, case ignored), folders first.
 pub fn name_order(a: &Entry, b: &Entry) -> std::cmp::Ordering {
-    b.directory
-        .cmp(&a.directory)
-        .then_with(|| unsafe { StrCmpLogicalW(PCWSTR(a.wide_name.as_ptr()), PCWSTR(b.wide_name.as_ptr())) }.cmp(&0))
+    b.directory.cmp(&a.directory).then_with(|| {
+        unsafe { StrCmpLogicalW(PCWSTR(a.wide_name.as_ptr()), PCWSTR(b.wide_name.as_ptr())) }
+            .cmp(&0)
+    })
 }
 pub fn sort(rows: &mut [Entry], column: usize, descending: bool) {
     rows.sort_by(|a, b| {
@@ -319,7 +367,11 @@ pub fn sort(rows: &mut [Entry], column: usize, descending: bool) {
         let order = match column {
             1 => a.size.cmp(&b.size).then_with(name),
             2 => a.modified.cmp(&b.modified).then_with(name),
-            3 => a.ext.to_lowercase().cmp(&b.ext.to_lowercase()).then_with(name),
+            3 => a
+                .ext
+                .to_lowercase()
+                .cmp(&b.ext.to_lowercase())
+                .then_with(name),
             _ => name(),
         };
         if descending { order.reverse() } else { order }
@@ -340,9 +392,17 @@ impl Pattern {
             .filter(|p| !p.is_empty())
             .map(|p| {
                 let p = p.to_lowercase().replace('/', "\\");
-                let p = if p.contains(['*', '?']) { p } else { format!("*{p}*") };
+                let p = if p.contains(['*', '?']) {
+                    p
+                } else {
+                    format!("*{p}*")
+                };
                 let path = p.contains('\\');
-                let p = if path && !p.starts_with(['*', '\\']) { format!("*\\{p}") } else { p };
+                let p = if path && !p.starts_with(['*', '\\']) {
+                    format!("*\\{p}")
+                } else {
+                    p
+                };
                 (p.chars().collect(), path)
             })
             .collect();
@@ -364,7 +424,11 @@ impl Pattern {
             if !is_path {
                 return wildcard(p, &name);
             }
-            let path = path.get_or_insert_with(|| format!("\\{location_fold}{name_fold}").chars().collect::<Vec<_>>());
+            let path = path.get_or_insert_with(|| {
+                format!("\\{location_fold}{name_fold}")
+                    .chars()
+                    .collect::<Vec<_>>()
+            });
             wildcard(p, path)
         })
     }
@@ -434,11 +498,11 @@ impl Selection {
     }
     /// Keep the cursor actionable after refresh or removal clears the selection.
     pub fn select_current_if_empty(&mut self, rows: &[Entry]) {
-        if self.count() == 0 {
-            if let Some(index) = self.current.filter(|&i| i < rows.len()) {
-                self.set(rows[index].path.clone(), true);
-                self.anchor = Some(index);
-            }
+        if self.count() == 0
+            && let Some(index) = self.current.filter(|&i| i < rows.len())
+        {
+            self.set(rows[index].path.clone(), true);
+            self.anchor = Some(index);
         }
     }
     pub fn clear(&mut self) {
@@ -526,7 +590,10 @@ mod tests {
         let mut calls = 0;
         let entries = std::iter::from_fn(|| {
             calls += 1;
-            Some(Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "enumeration disconnected")))
+            Some(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "enumeration disconnected",
+            )))
         });
         assert!(super::scan_entries(entries, false).is_err());
         assert_eq!(calls, 1);
@@ -620,7 +687,10 @@ mod tests {
         assert_eq!(format_attributes(0x10), "____");
         let today = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
         let at = |d: u32| {
-            let t = NaiveDate::from_ymd_opt(2026, 10, d).unwrap().and_hms_opt(9, 5, 0).unwrap();
+            let t = NaiveDate::from_ymd_opt(2026, 10, d)
+                .unwrap()
+                .and_hms_opt(9, 5, 0)
+                .unwrap();
             SystemTime::from(t.and_local_timezone(Local).unwrap())
         };
         assert_eq!(format_date(at(19), today), ("今日".into(), "09:05".into()));
@@ -681,8 +751,12 @@ mod tests {
     }
     #[test]
     fn simplified_chinese_name_survives_directory_scan() {
-        let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("enyfile-unicode-{}-{stamp}", std::process::id()));
+        let stamp = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("enyfile-unicode-{}-{stamp}", std::process::id()));
         fs::create_dir(&dir).unwrap();
         let path = dir.join("01高难度");
         fs::create_dir(&path).unwrap();

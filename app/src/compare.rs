@@ -44,15 +44,33 @@ pub fn align(old: &[Entry], new: &[Entry], only_diff: bool) -> (Aligned, [Vec<En
             }
             (Some(a), Some(b)) if listing::name_order(a, b) == Ordering::Greater => {
                 j += 1;
-                ([None, Some(b)], Diff { kind: 1, ..Diff::default() })
+                (
+                    [None, Some(b)],
+                    Diff {
+                        kind: 1,
+                        ..Diff::default()
+                    },
+                )
             }
             (Some(a), _) => {
                 i += 1;
-                ([Some(a), None], Diff { kind: 2, ..Diff::default() })
+                (
+                    [Some(a), None],
+                    Diff {
+                        kind: 2,
+                        ..Diff::default()
+                    },
+                )
             }
             (None, Some(b)) => {
                 j += 1;
-                ([None, Some(b)], Diff { kind: 1, ..Diff::default() })
+                (
+                    [None, Some(b)],
+                    Diff {
+                        kind: 1,
+                        ..Diff::default()
+                    },
+                )
             }
             (None, None) => break,
         };
@@ -84,11 +102,19 @@ pub fn align(old: &[Entry], new: &[Entry], only_diff: bool) -> (Aligned, [Vec<En
 /// Size (files only), modified time (2 s apart counts as the same: FAT keeps even seconds)
 /// and the A R H S attributes.
 fn differ(a: &Entry, b: &Entry) -> Diff {
-    let apart = a.modified.duration_since(b.modified).unwrap_or_else(|e| e.duration());
+    let apart = a
+        .modified
+        .duration_since(b.modified)
+        .unwrap_or_else(|e| e.duration());
     let size = !a.directory && a.size != b.size;
     let time = apart > Duration::from_secs(2);
     let attr = (a.attributes ^ b.attributes) & 0x27 != 0;
-    Diff { kind: if size || time || attr { 3 } else { 0 }, size, time, attr }
+    Diff {
+        kind: if size || time || attr { 3 } else { 0 },
+        size,
+        time,
+        attr,
+    }
 }
 
 #[cfg(test)]
@@ -115,26 +141,60 @@ mod tests {
     }
     #[test]
     fn rows_line_up_by_name() {
-        let old = [entry("docs", true, 0, 0), entry("a.txt", false, 1, 100), entry("b.txt", false, 5, 100), entry("file2", false, 1, 100)];
-        let new = [entry("lib", true, 0, 0), entry("A.TXT", false, 1, 101), entry("b.txt", false, 6, 100), entry("file10", false, 1, 100)];
+        let old = [
+            entry("docs", true, 0, 0),
+            entry("a.txt", false, 1, 100),
+            entry("b.txt", false, 5, 100),
+            entry("file2", false, 1, 100),
+        ];
+        let new = [
+            entry("lib", true, 0, 0),
+            entry("A.TXT", false, 1, 101),
+            entry("b.txt", false, 6, 100),
+            entry("file10", false, 1, 100),
+        ];
         let (aligned, shown) = align(&old, &new, false);
         let names = |side: usize| -> Vec<String> {
-            aligned.pairs.iter().map(|p| p[side].map_or("".into(), |i| shown[side][i].name.clone())).collect()
+            aligned
+                .pairs
+                .iter()
+                .map(|p| p[side].map_or("".into(), |i| shown[side][i].name.clone()))
+                .collect()
         };
         assert_eq!(names(0), ["docs", "", "a.txt", "b.txt", "file2", ""]);
         assert_eq!(names(1), ["", "lib", "A.TXT", "b.txt", "", "file10"]);
         let kinds: Vec<i32> = aligned.diffs.iter().map(|d| d.kind).collect();
-        assert_eq!(kinds, [2, 1, 0, 3, 2, 1], "a.txt: 1 s apart and a different case are the same");
-        assert_eq!(aligned.diffs[3], Diff { kind: 3, size: true, time: false, attr: false });
+        assert_eq!(
+            kinds,
+            [2, 1, 0, 3, 2, 1],
+            "a.txt: 1 s apart and a different case are the same"
+        );
+        assert_eq!(
+            aligned.diffs[3],
+            Diff {
+                kind: 3,
+                size: true,
+                time: false,
+                attr: false
+            }
+        );
         assert_eq!(aligned.counts, [2, 2, 1, 1]);
-        assert_eq!(aligned.row_of(1, 1), Some(2), "A.TXT is the second entry shown on the right, row 2");
+        assert_eq!(
+            aligned.row_of(1, 1),
+            Some(2),
+            "A.TXT is the second entry shown on the right, row 2"
+        );
         let (only, shown) = align(&old, &new, true);
         assert_eq!(only.pairs.len(), 5);
         assert!(shown[0].iter().all(|e| e.name != "a.txt"));
     }
     #[test]
     fn a_folder_and_a_file_of_one_name_are_two_rows() {
-        let (aligned, _) = align(&[entry("data", true, 0, 0)], &[entry("data", false, 1, 0)], false);
+        let (aligned, _) = align(
+            &[entry("data", true, 0, 0)],
+            &[entry("data", false, 1, 0)],
+            false,
+        );
         let kinds: Vec<i32> = aligned.diffs.iter().map(|d| d.kind).collect();
         assert_eq!(kinds, [2, 1]);
         assert_eq!(aligned.pairs, [[Some(0), None], [None, Some(0)]]);
@@ -160,12 +220,43 @@ mod tests {
             with(entry("n", false, 1, 100), 0xA0),
         ];
         let (aligned, shown) = align(&old, &new, false);
-        let diff = |name: &str| aligned.diffs[aligned.pairs.iter().position(|p| shown[0][p[0].unwrap()].name == name).unwrap()];
+        let diff = |name: &str| {
+            aligned.diffs[aligned
+                .pairs
+                .iter()
+                .position(|p| shown[0][p[0].unwrap()].name == name)
+                .unwrap()]
+        };
         assert_eq!(diff("dir").kind, 0, "folder sizes are not compared");
-        assert_eq!(diff("t2").kind, 0, "2 s apart (either way) is the same time");
-        assert_eq!(diff("t3"), Diff { kind: 3, size: false, time: true, attr: false });
-        assert_eq!(diff("r"), Diff { kind: 3, size: false, time: false, attr: true }, "read-only differs");
-        assert_eq!(diff("n").kind, 0, "attributes other than A R H S are ignored");
+        assert_eq!(
+            diff("t2").kind,
+            0,
+            "2 s apart (either way) is the same time"
+        );
+        assert_eq!(
+            diff("t3"),
+            Diff {
+                kind: 3,
+                size: false,
+                time: true,
+                attr: false
+            }
+        );
+        assert_eq!(
+            diff("r"),
+            Diff {
+                kind: 3,
+                size: false,
+                time: false,
+                attr: true
+            },
+            "read-only differs"
+        );
+        assert_eq!(
+            diff("n").kind,
+            0,
+            "attributes other than A R H S are ignored"
+        );
     }
     #[test]
     fn one_side_empty() {

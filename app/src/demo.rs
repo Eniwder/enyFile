@@ -9,13 +9,19 @@ use slint::platform::{Key, WindowEvent};
 use std::{io::Write, time::SystemTime};
 
 /// Window size of the recording (physical pixels; `Demo.ps1` sets the scale factor to 1).
-pub const SIZE: slint::PhysicalSize = slint::PhysicalSize { width: 1200, height: 700 };
+pub const SIZE: slint::PhysicalSize = slint::PhysicalSize {
+    width: 1200,
+    height: 700,
+};
 /// Present in a demo root, so `prepare` only ever clears a folder it made itself.
 const MARKER: &str = "enyfile-demo.txt";
 
 /// Shown as a date, never as "today", so the frames are the same on any day.
 fn at(day: u32, hour: u32, minute: u32) -> SystemTime {
-    let time = chrono::NaiveDate::from_ymd_opt(2026, 9, day).unwrap().and_hms_opt(hour, minute, 0).unwrap();
+    let time = chrono::NaiveDate::from_ymd_opt(2026, 9, day)
+        .unwrap()
+        .and_hms_opt(hour, minute, 0)
+        .unwrap();
     SystemTime::from(time.and_local_timezone(chrono::Local).unwrap())
 }
 /// (path, size, (day, hour, minute)). Projects and Backup are alike except where the
@@ -49,10 +55,21 @@ fn files() -> Vec<(String, u64, (u32, u32, u32))> {
         ("Projects/todo.md".to_string(), 640, (18, 9, 15)),
         ("Backup/old-notes.txt".to_string(), 2_048, (2, 18, 30)),
     ]);
-    for (name, size, day) in [("IMG_0412.jpg", 3_210_000, 6), ("IMG_0413.jpg", 2_980_000, 6), ("IMG_0420.png", 1_120_000, 7), ("panorama.jpg", 8_400_000, 7), ("screen.png", 412_000, 13)] {
+    for (name, size, day) in [
+        ("IMG_0412.jpg", 3_210_000, 6),
+        ("IMG_0413.jpg", 2_980_000, 6),
+        ("IMG_0420.png", 1_120_000, 7),
+        ("panorama.jpg", 8_400_000, 7),
+        ("screen.png", 412_000, 13),
+    ] {
         out.push((format!("Photos/{name}"), size, (day, 15, 20)));
     }
-    for (name, size, day) in [("01 Intro.flac", 18_200_000, 1), ("02 Morning.mp3", 6_300_000, 1), ("03 Rain.mp3", 7_100_000, 1), ("playlist.m3u", 410, 2)] {
+    for (name, size, day) in [
+        ("01 Intro.flac", 18_200_000, 1),
+        ("02 Morning.mp3", 6_300_000, 1),
+        ("03 Rain.mp3", 7_100_000, 1),
+        ("playlist.m3u", 410, 2),
+    ] {
         out.push((format!("Music/{name}"), size, (day, 20, 0)));
     }
     out
@@ -62,12 +79,19 @@ pub fn prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if root.exists() {
         let empty = std::fs::read_dir(root)?.next().is_none();
         if !empty && !root.join(MARKER).exists() {
-            return Err(format!("{} is not a demo folder ({MARKER} is missing)", root.display()).into());
+            return Err(format!(
+                "{} is not a demo folder ({MARKER} is missing)",
+                root.display()
+            )
+            .into());
         }
         std::fs::remove_dir_all(root)?;
     }
     std::fs::create_dir_all(root)?;
-    std::fs::write(root.join(MARKER), "Made by enyfile --demo; cleared on every run.")?;
+    std::fs::write(
+        root.join(MARKER),
+        "Made by enyfile --demo; cleared on every run.",
+    )?;
     let files = files();
     for (path, size, _) in &files {
         let path = root.join(path);
@@ -84,13 +108,21 @@ pub fn prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     for (path, _, (day, hour, minute)) in &files {
         use std::os::windows::fs::FileTimesExt;
         // Created as well: the properties dialog shows it.
-        let times = std::fs::FileTimes::new().set_modified(at(*day, *hour, *minute)).set_created(at(*day, *hour, *minute));
-        std::fs::File::options().write(true).open(root.join(path))?.set_times(times)?;
+        let times = std::fs::FileTimes::new()
+            .set_modified(at(*day, *hour, *minute))
+            .set_created(at(*day, *hour, *minute));
+        std::fs::File::options()
+            .write(true)
+            .open(root.join(path))?
+            .set_times(times)?;
     }
     // Folders last (writing files touched them): one time, so the comparison shows no
     // folder differences.
     use std::os::windows::fs::OpenOptionsExt;
-    let mut folders: Vec<PathBuf> = files.iter().filter_map(|(p, _, _)| Path::new(p).parent().map(Path::to_path_buf)).collect();
+    let mut folders: Vec<PathBuf> = files
+        .iter()
+        .filter_map(|(p, _, _)| Path::new(p).parent().map(Path::to_path_buf))
+        .collect();
     folders.sort();
     folders.dedup();
     for folder in folders.iter().rev() {
@@ -140,7 +172,10 @@ fn light_colors() -> Vec<slint::Color> {
     theme::BASE
         .iter()
         .map(|(key, _, default)| {
-            let hex = light.iter().find(|(k, _)| k == key).map_or(*default, |(_, v)| v);
+            let hex = light
+                .iter()
+                .find(|(k, _)| k == key)
+                .map_or(*default, |(_, v)| v);
             theme::parse(hex).unwrap()
         })
         .collect()
@@ -150,7 +185,10 @@ fn light_extensions() -> Vec<(String, slint::Color)> {
         let f = |v: u8| (v as f32 * 0.6) as u8;
         slint::Color::from_rgb_u8(f(c.red()), f(c.green()), f(c.blue()))
     };
-    config::Config::default_extension_colors().into_iter().map(|(e, c)| (e, darker(c))).collect()
+    config::Config::default_extension_colors()
+        .into_iter()
+        .map(|(e, c)| (e, darker(c)))
+        .collect()
 }
 
 /// Answers like `codex exec --json` (UTF-8 through chcp 65001): one command that takes a
@@ -212,8 +250,10 @@ impl Script {
     }
 }
 fn press(ui: &App, text: slint::SharedString) {
-    ui.window().dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
-    ui.window().dispatch_event(WindowEvent::KeyReleased { text });
+    ui.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    ui.window()
+        .dispatch_event(WindowEvent::KeyReleased { text });
 }
 fn key_event(spec: &str) -> slint::language::KeyEvent {
     let mut event = slint::language::KeyEvent::default();
@@ -286,7 +326,10 @@ fn script(root: &Path) -> Script {
     s.key("Esc", 1300);
 
     // Comparing the two folders.
-    s.caption("Ctrl+Shift+D", "左右のフォルダを比較（- 左だけ / + 右だけ / 黄 違うところ）");
+    s.caption(
+        "Ctrl+Shift+D",
+        "左右のフォルダを比較（- 左だけ / + 右だけ / 黄 違うところ）",
+    );
     s.key("Ctrl+Shift+D", 3200);
     s.caption("↓", "カーソルは左右で連動");
     s.key("Down", 420);
@@ -327,7 +370,11 @@ fn script(root: &Path) -> Script {
     s.key("Ctrl+Shift+2", 1400);
 
     // The agent, with a stand-in for Codex that answers the same way (no model is asked).
-    let (fake, photos, projects) = (root.join("fake-codex.cmd"), root.join("Photos"), root.join("Projects"));
+    let (fake, photos, projects) = (
+        root.join("fake-codex.cmd"),
+        root.join("Photos"),
+        root.join("Projects"),
+    );
     s.act(move |_, c| {
         let _ = std::fs::write(&fake, FAKE_CODEX);
         let mut c = c.borrow_mut();
@@ -345,7 +392,10 @@ fn script(root: &Path) -> Script {
     s.caption("", "現在のフォルダと選択を渡し、サンドボックスの中で実行");
     s.show(1800);
     s.0.push(Step::Wait(2600));
-    s.caption("", "終わると一覧を更新。続けて指示すると同じ会話の続きになる");
+    s.caption(
+        "",
+        "終わると一覧を更新。続けて指示すると同じ会話の続きになる",
+    );
     s.show(3200);
     s.caption("Esc", "パネルを閉じる");
     s.window_key(Key::Escape, 1000);
@@ -423,17 +473,22 @@ impl Recorder {
     fn record(&mut self, ui: &App, ms: u32) -> Result<(), String> {
         let shot = ui.window().take_snapshot().map_err(|e| e.to_string())?;
         let (w, h) = (shot.width(), shot.height());
-        let rgb: Vec<u8> = shot.as_slice().iter().flat_map(|p| [p.r, p.g, p.b]).collect();
+        let rgb: Vec<u8> = shot
+            .as_slice()
+            .iter()
+            .flat_map(|p| [p.r, p.g, p.b])
+            .collect();
         // An unchanged state only lengthens the frame before it.
-        if rgb == self.last {
-            if let Some(frame) = self.frames.last_mut() {
-                frame.1 += ms;
-                return Ok(());
-            }
+        if rgb == self.last
+            && let Some(frame) = self.frames.last_mut()
+        {
+            frame.1 += ms;
+            return Ok(());
         }
         let name = format!("f{:04}.ppm", self.frames.len() + 1);
         let mut file = std::fs::File::create(self.out.join(&name)).map_err(|e| e.to_string())?;
-        file.write_all(format!("P6\n{w} {h}\n255\n").as_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(format!("P6\n{w} {h}\n255\n").as_bytes())
+            .map_err(|e| e.to_string())?;
         file.write_all(&rgb).map_err(|e| e.to_string())?;
         self.frames.push((name, ms));
         self.last = rgb;
@@ -458,49 +513,59 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, out: Option<PathBuf>) ->
     let _ = std::fs::remove_dir_all(&out);
     let _ = std::fs::create_dir_all(&out);
     let steps = RefCell::new(script(&root).0.into_iter().collect::<VecDeque<_>>());
-    let recorder = RefCell::new(Recorder { out: out.clone(), frames: Vec::new(), last: Vec::new() });
+    let recorder = RefCell::new(Recorder {
+        out: out.clone(),
+        frames: Vec::new(),
+        last: Vec::new(),
+    });
     let waiting = Cell::new(None::<Instant>);
     let started = Instant::now();
     let timer = slint::Timer::default();
-    timer.start(slint::TimerMode::Repeated, Duration::from_millis(40), move || {
-        let fail = |e: String| {
-            let _ = std::fs::write(out.join("demo-error.txt"), e);
-            let _ = slint::quit_event_loop();
-        };
-        if started.elapsed() > Duration::from_secs(180) {
-            return fail("timeout".into());
-        }
-        let Some(ui) = c.borrow().ui.upgrade() else { return };
-        let Some(step) = steps.borrow_mut().pop_front() else {
-            if let Err(e) = recorder.borrow().finish() {
-                return fail(e);
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(40),
+        move || {
+            let fail = |e: String| {
+                let _ = std::fs::write(out.join("demo-error.txt"), e);
+                let _ = slint::quit_event_loop();
+            };
+            if started.elapsed() > Duration::from_secs(180) {
+                return fail("timeout".into());
             }
-            let _ = slint::quit_event_loop();
-            return;
-        };
-        match step {
-            Step::Do(act) => act(&ui, &c),
-            Step::Wait(ms) => {
-                let since = waiting.get().unwrap_or_else(Instant::now);
-                waiting.set(Some(since));
-                if since.elapsed() < Duration::from_millis(ms as u64) {
-                    steps.borrow_mut().push_front(Step::Wait(ms));
-                } else {
-                    waiting.set(None);
+            let Some(ui) = c.borrow().ui.upgrade() else {
+                return;
+            };
+            let Some(step) = steps.borrow_mut().pop_front() else {
+                if let Err(e) = recorder.borrow().finish() {
+                    return fail(e);
+                }
+                let _ = slint::quit_event_loop();
+                return;
+            };
+            match step {
+                Step::Do(act) => act(&ui, &c),
+                Step::Wait(ms) => {
+                    let since = waiting.get().unwrap_or_else(Instant::now);
+                    waiting.set(Some(since));
+                    if since.elapsed() < Duration::from_millis(ms as u64) {
+                        steps.borrow_mut().push_front(Step::Wait(ms));
+                    } else {
+                        waiting.set(None);
+                    }
+                }
+                Step::Show(ms) => {
+                    let busy = {
+                        let c = c.borrow();
+                        c.operations > 0 || c.panes.iter().any(|p| p.pending.is_some() || p.stale)
+                    };
+                    if busy {
+                        steps.borrow_mut().push_front(Step::Show(ms));
+                    } else if let Err(e) = recorder.borrow_mut().record(&ui, ms) {
+                        fail(e);
+                    }
                 }
             }
-            Step::Show(ms) => {
-                let busy = {
-                    let c = c.borrow();
-                    c.operations > 0 || c.panes.iter().any(|p| p.pending.is_some() || p.stale)
-                };
-                if busy {
-                    steps.borrow_mut().push_front(Step::Show(ms));
-                } else if let Err(e) = recorder.borrow_mut().record(&ui, ms) {
-                    fail(e);
-                }
-            }
-        }
-    });
+        },
+    );
     timer
 }

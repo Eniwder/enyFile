@@ -2,7 +2,11 @@
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering}, mpsc::{self, SyncSender}},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, SyncSender},
+    },
     time::{Duration, Instant},
 };
 
@@ -37,7 +41,10 @@ impl Activity {
         self.waiting = None;
         self.retries = 0;
         if let Some(started) = self.rebuild_started.take() {
-            record(format!("render recovery: first rendered frame; elapsed_ms={} (before display presentation)", started.elapsed().as_millis()));
+            record(format!(
+                "render recovery: first rendered frame; elapsed_ms={} (before display presentation)",
+                started.elapsed().as_millis()
+            ));
         }
     }
     pub fn observe_rendering(&mut self) {
@@ -54,7 +61,10 @@ impl Activity {
         self.render_starts += 1;
     }
     pub fn retry_redraw(&mut self, now: Instant) -> bool {
-        if self.waiting.is_some_and(|since| now.duration_since(since) >= Duration::from_secs(2)) {
+        if self
+            .waiting
+            .is_some_and(|since| now.duration_since(since) >= Duration::from_secs(2))
+        {
             self.waiting = Some(now);
             self.retries += 1;
             true
@@ -63,10 +73,22 @@ impl Activity {
         }
     }
     pub fn status(&self) -> String {
-        format!("native-inputs={} redraw-events={} render-starts={} render-ends={} rendering-notifier={} awaiting-frame={}", self.inputs, self.redraws, self.render_starts, self.frames, self.rendering_notifier, self.waiting.is_some())
+        format!(
+            "native-inputs={} redraw-events={} render-starts={} render-ends={} rendering-notifier={} awaiting-frame={}",
+            self.inputs,
+            self.redraws,
+            self.render_starts,
+            self.frames,
+            self.rendering_notifier,
+            self.waiting.is_some()
+        )
     }
-    pub fn rebuild_needed(&self) -> bool { self.retries >= 2 }
-    pub fn rendering_setup(&mut self) { self.graphics_generations += 1; }
+    pub fn rebuild_needed(&self) -> bool {
+        self.retries >= 2
+    }
+    pub fn rendering_setup(&mut self) {
+        self.graphics_generations += 1;
+    }
     pub fn begin_rebuild(&mut self, now: Instant) {
         self.rebuild_started = Some(now);
         self.waiting = None;
@@ -81,11 +103,22 @@ pub struct RebuildSchedule {
     last: Option<Instant>,
 }
 impl RebuildSchedule {
-    pub fn request(&mut self, reason: &'static str) { self.pending.get_or_insert(reason); }
+    pub fn request(&mut self, reason: &'static str) {
+        self.pending.get_or_insert(reason);
+    }
     pub fn take_ready(&mut self, now: Instant, safe: bool) -> Option<&'static str> {
-        if !safe { return None; }
-        if self.last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(30)) {
-            if let Some(reason) = self.pending.take() { record(format!("render recovery suppressed during 30s cooldown: {reason}")); }
+        if !safe {
+            return None;
+        }
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(30))
+        {
+            if let Some(reason) = self.pending.take() {
+                record(format!(
+                    "render recovery suppressed during 30s cooldown: {reason}"
+                ));
+            }
             return None;
         }
         let reason = self.pending.take()?;
@@ -129,7 +162,10 @@ pub fn start(path: PathBuf) -> Monitor {
         let mut context = String::from("UI heartbeat not received yet");
         let mut stalled = false;
         let mut last_status = Instant::now();
-        append(&path, &format!("UI monitor started; exe={:?}", std::env::current_exe()));
+        append(
+            &path,
+            &format!("UI monitor started; exe={:?}", std::env::current_exe()),
+        );
         while !stopped.load(Ordering::Relaxed) {
             match rx.recv_timeout(Duration::from_secs(15)) {
                 Ok(Event::Heartbeat(next)) => {
@@ -151,7 +187,12 @@ pub fn start(path: PathBuf) -> Monitor {
                 Err(mpsc::RecvTimeoutError::Timeout) if !stalled => {
                     // Sleep also pauses the heartbeat. This is evidence of a gap, not
                     // proof that the UI deadlocked, and is labelled accordingly.
-                    append(&path, &format!("UI heartbeat missing for 15s (UI stall or system sleep); last state: {context}"));
+                    append(
+                        &path,
+                        &format!(
+                            "UI heartbeat missing for 15s (UI stall or system sleep); last state: {context}"
+                        ),
+                    );
                     stalled = true;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -169,8 +210,18 @@ fn append(path: &Path, note: &str) {
         // Bound disk usage; only this observer writes these files.
         let _ = std::fs::rename(path, path.with_extension("previous.log"));
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "[{}] enyFile {} pid={}: {note}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), env!("CARGO_PKG_VERSION"), std::process::id());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(
+            file,
+            "[{}] enyFile {} pid={}: {note}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            env!("CARGO_PKG_VERSION"),
+            std::process::id()
+        );
     }
 }
 
@@ -186,11 +237,23 @@ mod tests {
         assert_eq!(schedule.take_ready(now, true), Some("display on"));
         schedule.request("watchdog");
         schedule.request("display on");
-        assert_eq!(schedule.take_ready(now + Duration::from_secs(29), true), None);
-        assert_eq!(schedule.take_ready(now + Duration::from_secs(30), true), None);
+        assert_eq!(
+            schedule.take_ready(now + Duration::from_secs(29), true),
+            None
+        );
+        assert_eq!(
+            schedule.take_ready(now + Duration::from_secs(30), true),
+            None
+        );
         schedule.request("manual");
-        assert_eq!(schedule.take_ready(now + Duration::from_secs(30), true), Some("manual"));
-        assert_eq!(schedule.take_ready(now + Duration::from_secs(60), true), None);
+        assert_eq!(
+            schedule.take_ready(now + Duration::from_secs(30), true),
+            Some("manual")
+        );
+        assert_eq!(
+            schedule.take_ready(now + Duration::from_secs(60), true),
+            None
+        );
     }
 
     #[test]

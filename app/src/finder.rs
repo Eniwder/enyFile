@@ -35,16 +35,24 @@ pub enum Event {
     Icons,
 }
 
+type QueryControl = Arc<(Mutex<Option<(u64, Pattern)>>, Condvar)>;
+
 /// The walk runs until the finder is dropped (another folder, search closed).
 pub struct Finder {
-    control: Arc<(Mutex<Option<(u64, Pattern)>>, Condvar)>,
+    control: QueryControl,
     stop: Arc<AtomicBool>,
 }
 impl Finder {
     /// Reparse-point folders (junctions, symbolic links) are listed but entered only with
     /// `follow`, and then only when their target is outside everything walked so far:
     /// that rules out cycles and walking the same tree twice.
-    pub fn start(root: PathBuf, show_hidden: bool, follow: bool, limit: usize, send: impl Fn(Event) -> bool + Send + 'static) -> Self {
+    pub fn start(
+        root: PathBuf,
+        show_hidden: bool,
+        follow: bool,
+        limit: usize,
+        send: impl Fn(Event) -> bool + Send + 'static,
+    ) -> Self {
         let control = Arc::new((Mutex::new(None), Condvar::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let walk = Walk {
@@ -124,7 +132,7 @@ struct Walk {
     show_hidden: bool,
     follow: bool,
     limit: usize,
-    control: Arc<(Mutex<Option<(u64, Pattern)>>, Condvar)>,
+    control: QueryControl,
     stop: Arc<AtomicBool>,
     send: Box<dyn Fn(Event) -> bool + Send>,
     /// Breadth first, so shallow matches come first.
@@ -153,7 +161,16 @@ impl Walk {
                 return;
             }
             if let Some((id, pattern)) = self.control.0.lock().unwrap().take() {
-                self.query = Some(Query { id, pattern, pos: 0, count: 0, batch: Vec::new(), sent: None, done: false, icons: Vec::new() });
+                self.query = Some(Query {
+                    id,
+                    pattern,
+                    pos: 0,
+                    count: 0,
+                    batch: Vec::new(),
+                    sent: None,
+                    done: false,
+                    icons: Vec::new(),
+                });
                 if self.overflow {
                     self.unreadable = 0;
                     self.queue = VecDeque::from([self.root.clone()]);
@@ -161,7 +178,12 @@ impl Walk {
                 }
             }
             let open = self.query.as_ref().is_some_and(|q| !q.done);
-            let alive = if open && self.query.as_ref().is_some_and(|q| q.pos < self.items.len()) {
+            let alive = if open
+                && self
+                    .query
+                    .as_ref()
+                    .is_some_and(|q| q.pos < self.items.len())
+            {
                 self.scan()
             } else if !self.queue.is_empty() && (open || !self.overflow) {
                 let dir = self.queue.pop_front().unwrap();
@@ -172,7 +194,12 @@ impl Walk {
                 // Everything walked and answered: wait for the next query.
                 let (lock, cv) = &*self.control;
                 let waiting = lock.lock().unwrap();
-                drop(cv.wait_while(waiting, |q| q.is_none() && !self.stop.load(Ordering::Relaxed)).unwrap());
+                drop(
+                    cv.wait_while(waiting, |q| {
+                        q.is_none() && !self.stop.load(Ordering::Relaxed)
+                    })
+                    .unwrap(),
+                );
                 true
             };
             if !alive {
@@ -182,7 +209,9 @@ impl Walk {
     }
     /// Matches the next part of the kept items against the query.
     fn scan(&mut self) -> bool {
-        let Some(q) = self.query.as_mut() else { return true };
+        let Some(q) = self.query.as_mut() else {
+            return true;
+        };
         let end = (q.pos + 8192).min(self.items.len());
         for item in &self.items[q.pos..end] {
             let dir = &self.dirs[item.dir as usize];
@@ -220,24 +249,31 @@ impl Walk {
             let path = dir.join(&raw.name);
             if raw.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 {
                 self.queue.push_back(path);
-            } else if self.follow {
-                if let Ok(target) = std::fs::canonicalize(&path) {
-                    if !self.walked.iter().any(|w| target.starts_with(w)) {
-                        self.walked.push(target);
-                        self.queue.push_back(path);
-                    }
-                }
+            } else if self.follow
+                && let Ok(target) = std::fs::canonicalize(&path)
+                && !self.walked.iter().any(|w| target.starts_with(w))
+            {
+                self.walked.push(target);
+                self.queue.push_back(path);
             }
         }
         let location = match dir.strip_prefix(&self.root) {
             Ok(rel) if !rel.as_os_str().is_empty() => format!("{}\\", rel.display()),
             _ => String::new(),
         };
-        let dir = Dir { fold: location.to_lowercase(), path: dir, location };
+        let dir = Dir {
+            fold: location.to_lowercase(),
+            path: dir,
+            location,
+        };
         if self.overflow {
-            let Some(q) = self.query.as_mut() else { return true };
+            let Some(q) = self.query.as_mut() else {
+                return true;
+            };
             for raw in rows {
-                if q.pattern.matches_in(&dir.fold, &raw.name.to_string_lossy().to_lowercase()) {
+                if q.pattern
+                    .matches_in(&dir.fold, &raw.name.to_string_lossy().to_lowercase())
+                {
                     q.push(located(listing::entry(&dir.path, raw), &dir.location));
                     if q.count >= RESULT_LIMIT {
                         return self.finish(true);
@@ -265,7 +301,11 @@ impl Walk {
     /// Too many items to keep: the query being answered gets the kept ones first, then
     /// they are dropped and the walk goes on matching as it reads.
     fn give_up(&mut self) -> bool {
-        while self.query.as_ref().is_some_and(|q| !q.done && q.pos < self.items.len()) {
+        while self
+            .query
+            .as_ref()
+            .is_some_and(|q| !q.done && q.pos < self.items.len())
+        {
             if !self.scan() {
                 return false;
             }
@@ -276,7 +316,9 @@ impl Walk {
         (self.send)(Event::Overflow)
     }
     fn flush(&mut self) -> bool {
-        let Some(q) = self.query.as_mut() else { return true };
+        let Some(q) = self.query.as_mut() else {
+            return true;
+        };
         if q.batch.is_empty() || q.sent.is_some_and(|t| t.elapsed() < BATCH) {
             return true;
         }
@@ -285,11 +327,20 @@ impl Walk {
         (self.send)(Event::Found(q.id, batch, None))
     }
     fn finish(&mut self, limited: bool) -> bool {
-        let Some(q) = self.query.as_mut() else { return true };
+        let Some(q) = self.query.as_mut() else {
+            return true;
+        };
         q.done = true;
         let batch = std::mem::take(&mut q.batch);
         let icons = std::mem::take(&mut q.icons);
-        if !(self.send)(Event::Found(q.id, batch, Some(Completion { limited, unreadable: self.unreadable }))) {
+        if !(self.send)(Event::Found(
+            q.id,
+            batch,
+            Some(Completion {
+                limited,
+                unreadable: self.unreadable,
+            }),
+        )) {
             return false;
         }
         // Files with their own icon after the list is complete; a new query goes first.
@@ -308,7 +359,10 @@ impl Walk {
 }
 /// Sorting by name then orders the results by relative path.
 fn located(mut entry: Entry, location: &str) -> Entry {
-    entry.wide_name = format!("{location}{}", entry.name).encode_utf16().chain(Some(0)).collect();
+    entry.wide_name = format!("{location}{}", entry.name)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
     entry.location = location.to_string();
     entry
 }
@@ -321,9 +375,17 @@ mod tests {
     struct Tree(PathBuf);
     impl Tree {
         fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir().join(format!("enyfile-finder-{tag}-{}", std::process::id()));
+            let root =
+                std::env::temp_dir().join(format!("enyfile-finder-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
-            for file in [r"top.rs", r"a\mid.rs", r"a\b\deep.rs", r"a\b\notes.txt", r"c\src\x.rs", r"src\y.rs"] {
+            for file in [
+                r"top.rs",
+                r"a\mid.rs",
+                r"a\b\deep.rs",
+                r"a\b\notes.txt",
+                r"c\src\x.rs",
+                r"src\y.rs",
+            ] {
                 let path = root.join(file);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, "").unwrap();
@@ -338,7 +400,12 @@ mod tests {
     }
     fn start(root: &Path, limit: usize) -> (Finder, mpsc::Receiver<Event>) {
         let (tx, rx) = mpsc::channel();
-        (Finder::start(root.to_path_buf(), false, false, limit, move |event| tx.send(event).is_ok()), rx)
+        (
+            Finder::start(root.to_path_buf(), false, false, limit, move |event| {
+                tx.send(event).is_ok()
+            }),
+            rx,
+        )
     }
     #[test]
     fn unreadable_walk_is_reported_on_later_cached_queries_too() {
@@ -347,7 +414,9 @@ mod tests {
         for id in [1, 2] {
             finder.query(id, Pattern::new("*").unwrap());
             loop {
-                if let Event::Found(i, batch, Some(done)) = rx.recv_timeout(Duration::from_secs(10)).unwrap() {
+                if let Event::Found(i, batch, Some(done)) =
+                    rx.recv_timeout(Duration::from_secs(10)).unwrap()
+                {
                     assert_eq!(i, id);
                     assert!(batch.is_empty());
                     assert!(!done.limited);
@@ -358,13 +427,22 @@ mod tests {
         }
     }
     /// The located names of query `id`, in the order they came, and whether the walk overflowed.
-    fn answer(finder: &Finder, rx: &mpsc::Receiver<Event>, id: u64, text: &str) -> (Vec<String>, bool) {
+    fn answer(
+        finder: &Finder,
+        rx: &mpsc::Receiver<Event>,
+        id: u64,
+        text: &str,
+    ) -> (Vec<String>, bool) {
         finder.query(id, Pattern::new(text).unwrap());
         let (mut found, mut overflow) = (Vec::new(), false);
         loop {
             match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
                 Event::Found(i, batch, done) if i == id => {
-                    found.extend(batch.into_iter().map(|e| format!("{}{}", e.location, e.name)));
+                    found.extend(
+                        batch
+                            .into_iter()
+                            .map(|e| format!("{}{}", e.location, e.name)),
+                    );
                     if done.is_some() {
                         return (found, overflow);
                     }
@@ -380,7 +458,16 @@ mod tests {
         let tree = Tree::new("order");
         let (finder, rx) = start(&tree.0, INDEX_LIMIT);
         let (found, overflow) = answer(&finder, &rx, 1, "*.rs");
-        assert_eq!(found, [r"top.rs", r"a\mid.rs", r"src\y.rs", r"a\b\deep.rs", r"c\src\x.rs"]);
+        assert_eq!(
+            found,
+            [
+                r"top.rs",
+                r"a\mid.rs",
+                r"src\y.rs",
+                r"a\b\deep.rs",
+                r"c\src\x.rs"
+            ]
+        );
         assert!(!overflow);
     }
     #[test]
@@ -400,7 +487,11 @@ mod tests {
         assert_eq!(answer(&finder, &rx, 1, "deep").0, [r"a\b\deep.rs"]);
         // Gone from the disk, still in the kept walk: proof that the second query did not read again.
         std::fs::remove_file(tree.0.join(r"a\b\notes.txt")).unwrap();
-        assert_eq!(answer(&finder, &rx, 2, "NOTES").0, [r"a\b\notes.txt"], "case is ignored");
+        assert_eq!(
+            answer(&finder, &rx, 2, "NOTES").0,
+            [r"a\b\notes.txt"],
+            "case is ignored"
+        );
         assert!(answer(&finder, &rx, 3, "nothing-like-this").0.is_empty());
     }
     #[test]
@@ -409,8 +500,16 @@ mod tests {
         let (finder, rx) = start(&tree.0, 3);
         let (found, overflow) = answer(&finder, &rx, 1, "*.rs");
         assert!(overflow);
-        assert_eq!(found.len(), 5, "the kept items and the rest of the walk: {found:?}");
+        assert_eq!(
+            found.len(),
+            5,
+            "the kept items and the rest of the walk: {found:?}"
+        );
         std::fs::remove_file(tree.0.join(r"a\b\deep.rs")).unwrap();
-        assert_eq!(answer(&finder, &rx, 2, "deep").0, Vec::<String>::new(), "the second query reads the disk again");
+        assert_eq!(
+            answer(&finder, &rx, 2, "deep").0,
+            Vec::<String>::new(),
+            "the second query reads the disk again"
+        );
     }
 }
