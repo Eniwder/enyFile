@@ -358,6 +358,9 @@ fn shrink(pixels: Pixels, to: u32) -> Pixels {
 
 /// HICON -> RGBA. Uses the alpha channel when present, otherwise the AND mask.
 fn icon_pixels(icon: HICON) -> Option<Pixels> {
+    // SAFETY: the caller keeps icon alive. GetIconInfo creates owned bitmap copies;
+    // both are deleted even if read fails. Dimensions are bounded before allocation,
+    // and a 32-bit top-down DIB needs exactly w*h*4 writable bytes for GetDIBits.
     unsafe {
         let mut info = ICONINFO::default();
         GetIconInfo(icon, &mut info).ok()?;

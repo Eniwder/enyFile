@@ -5,6 +5,7 @@
 mod smoke;
 #[cfg(test)]
 mod tests;
+pub(super) use smoke::frame_rendered as smoke_frame_rendered;
 pub(super) use smoke::{refresh as smoke_refresh, smoke_modal};
 
 use super::*;
@@ -544,6 +545,8 @@ impl IDropTarget_Impl for Target_Impl {
             keys
         };
         self.highlight(-1, -1);
+        // SAFETY: update_drag succeeded, including its null check. OLE keeps the writable
+        // effect pointer alive throughout this callback; none of our state retains it.
         let delegated = target.is_some() && unsafe { *effect } != DROPEFFECT_NONE;
         let result = if unsafe { *effect } != DROPEFFECT_NONE {
             if let Some(target) = target {

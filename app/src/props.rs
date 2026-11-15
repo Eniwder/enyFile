@@ -171,6 +171,8 @@ pub fn usage(
 
 fn version(path: &Path) -> Option<String> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: the API-sized buffer outlives the query and the returned interior pointer.
+    // Verify non-null/length before copying VS_FIXEDFILEINFO; no borrowed pointer escapes.
     unsafe {
         let size = GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None);
         if size == 0 {

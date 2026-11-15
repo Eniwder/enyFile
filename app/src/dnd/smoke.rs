@@ -2,6 +2,15 @@
 use super::*;
 use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_USEDEFAULTCURSORS};
 
+thread_local! {
+    static FRAMES: Cell<usize> = const { Cell::new(0) };
+}
+
+// Slint allows only one notifier; observe the one installed by the application.
+pub(crate) fn frame_rendered() {
+    FRAMES.set(FRAMES.get().wrapping_add(1));
+}
+
 #[implement(IDropTarget)]
 struct FailingTarget(Rc<Cell<usize>>);
 impl IDropTarget_Impl for FailingTarget_Impl {
@@ -346,21 +355,12 @@ fn smoke_check(
     use windows::Win32::{Graphics::Gdi::ClientToScreen, UI::Shell::BHID_DataObject};
     let check = || -> std::result::Result<(), String> {
         let hwnd = hwnd(ui).ok_or("no HWND")?;
-        let frames = Rc::new(Cell::new(0usize));
-        let rendered = frames.clone();
-        ui.window()
-            .set_rendering_notifier(move |state, _| {
-                if matches!(state, slint::RenderingState::AfterRendering) {
-                    rendered.set(rendered.get() + 1);
-                }
-            })
-            .map_err(|e| e.to_string())?;
         let present = || -> Result<(), String> {
-            let before = frames.get();
+            let before = FRAMES.get();
             // Deliver the same native paint message the OLE loop dispatches. A
             // snapshot alone would mask the missing on-screen rendering regression.
             unsafe { SendMessageW(hwnd, REDRAW_MESSAGE, Some(WPARAM(0)), Some(LPARAM(0))) };
-            if frames.get() == before {
+            if FRAMES.get() == before {
                 return Err("OLE modal loop did not render the window".into());
             }
             Ok(())

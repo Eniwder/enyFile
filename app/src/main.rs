@@ -4438,7 +4438,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rendering_activity.borrow_mut().rendering_started()
                 }
                 // This is before swap/presentation, not proof that pixels reached the screen.
-                slint::RenderingState::AfterRendering => rendering_activity.borrow_mut().frame(),
+                slint::RenderingState::AfterRendering => {
+                    rendering_activity.borrow_mut().frame();
+                    if smoke.is_some() {
+                        dnd::smoke_frame_rendered();
+                    }
+                }
                 slint::RenderingState::RenderingSetup
                 | slint::RenderingState::RenderingTeardown => {
                     if matches!(state, slint::RenderingState::RenderingSetup) {

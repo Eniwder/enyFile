@@ -24,6 +24,9 @@ pub struct Ident {
 /// can be opened. Opens with no access rights, so locked and read-only items work too.
 pub fn ident(path: &Path) -> Option<Ident> {
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: wide is NUL-terminated and lives through CreateFileW. Both info buffers
+    // have the API's exact size/alignment. The owned handle is closed after either query,
+    // including failure; no references into those stack buffers escape.
     unsafe {
         let handle = CreateFileW(
             PCWSTR(wide.as_ptr()),

@@ -29,6 +29,8 @@ cargo test --release --manifest-path app/Cargo.toml   # 単体テスト
 
 CI と `Check.ps1` は整形チェックと Clippy も実行し、Clippy の警告をエラーとして扱う。`-NoBuild` でもこの検査は実行する。
 
+ファイル操作と Windows API の前提・点検範囲・残る制約は [安全性のメモ](../docs/SAFETY.md) を参照。
+
 `Check.ps1` はフォルダ内に `.tools` があればそれを使い（オフラインでビルド）、なければ PATH 上の Rust を使う。スモークのデータは `app/data/` に作成し、次回実行時に削除する。
 
 README のアニメーション（`docs/demo.webp`）は `.\app\Demo.ps1` で作り直せる（ffmpeg が必要）。決まった内容の試験フォルダを毎回作り、`app/src/demo.rs` の台本どおりにキーを送って 1 場面ずつ撮るので、何度作っても同じ映像になる。機能を足したら台本に場面を加えて実行し直す。録画中の約 1 分はウィンドウに触れないこと。
@@ -49,7 +51,7 @@ git push origin v0.1.1
 | ワークフロー | タイミング | 内容 |
 | --- | --- | --- |
 | [CI](../.github/workflows/ci.yml) | main への push / PR | ビルドと単体テスト、依存クレートの既知の脆弱性・ライセンス・取得元の確認（cargo-deny、設定は `app/deny.toml`） |
-| [Release](../.github/workflows/release.yml) | `v*` タグの push | バージョン照合・テスト・ビルド後、zip と SHA-256 を Release に添付し、zip と exe のビルド来歴（attestation）を記録 |
+| [Release](../.github/workflows/release.yml) | `v*` タグの push | バージョン照合・rustfmt・Clippy・テスト・ビルド後、zip と SHA-256 を Release に添付し、zip と exe のビルド来歴（attestation）を記録 |
 
 ## 構成
 

@@ -44,15 +44,18 @@ pub fn system_dir() -> PathBuf {
 }
 
 /// OLE (not plain COM) is required for the OLE clipboard; each worker thread owns one.
-pub struct Apartment;
+pub struct Apartment(std::marker::PhantomData<std::rc::Rc<()>>);
 impl Apartment {
     pub fn new() -> Result<Self, String> {
+        // SAFETY: no reserved parameter; only successful initialization owns an uninit.
         unsafe { OleInitialize(None) }.map_err(|e| e.to_string())?;
-        Ok(Self)
+        // OLE must be uninitialized on this thread; Rc's marker prevents Send and Sync.
+        Ok(Self(std::marker::PhantomData))
     }
 }
 impl Drop for Apartment {
     fn drop(&mut self) {
+        // SAFETY: this guard cannot cross threads and balances one successful OleInitialize.
         unsafe { OleUninitialize() };
     }
 }
@@ -252,6 +255,8 @@ fn etc(cf: u32) -> FORMATETC {
     }
 }
 fn global(bytes: &[u8]) -> Result<HGLOBAL, String> {
+    // SAFETY: GlobalLock exposes the allocation for exactly bytes.len() bytes. The source
+    // slice is a distinct live allocation. Unlock before ownership can pass to the receiver.
     unsafe {
         let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|e| e.to_string())?;
         let ptr = GlobalLock(h);
@@ -356,6 +361,8 @@ pub fn set_opacity(hwnd: HWND, opacity: f32) {
 }
 
 fn read_dword(data: &IDataObject, cf: u32) -> Option<u32> {
+    // SAFETY: inspect the union only for TYMED_HGLOBAL; read four bytes only after a
+    // successful lock and size check. ReleaseStgMedium owns cleanup, including other tymeds.
     unsafe {
         let mut medium = data.GetData(&etc(cf)).ok()?;
         let value = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
@@ -403,6 +410,10 @@ fn hdrop_valid(bytes: &[u8]) -> bool {
     // The list ends at the first empty name.
     let ends = |units: &[u16]| units.first() == Some(&0) || units.windows(2).any(|w| w == [0, 0]);
     if wide {
+        // DragQueryFileW reads UTF-16 directly, unlike our byte-wise validation below.
+        if !at.is_multiple_of(2) || !list.len().is_multiple_of(2) {
+            return false;
+        }
         ends(
             &list
                 .as_chunks::<2>()
@@ -416,13 +427,17 @@ fn hdrop_valid(bytes: &[u8]) -> bool {
     }
 }
 pub(super) fn hdrop_paths(data: &IDataObject) -> Option<Vec<PathBuf>> {
+    // SAFETY: keep the medium alive until all queries finish. Only inspect its HGLOBAL
+    // arm after checking tymed; borrow its bytes only while locked and within GlobalSize.
     unsafe {
         let mut medium = data.GetData(&etc(CF_HDROP.0 as u32)).ok()?;
         let valid = medium.tymed == TYMED_HGLOBAL.0 as u32 && {
             let h = medium.u.hGlobal;
             let ptr = GlobalLock(h);
+            let size = GlobalSize(h);
             let valid = !ptr.is_null()
-                && hdrop_valid(std::slice::from_raw_parts(ptr.cast::<u8>(), GlobalSize(h)));
+                && size <= isize::MAX as usize
+                && hdrop_valid(std::slice::from_raw_parts(ptr.cast::<u8>(), size));
             let _ = GlobalUnlock(h);
             valid
         };
@@ -982,6 +997,9 @@ fn shell_ops<'a>(
     let missed = Arc::new(AtomicBool::new(false));
     let sink: IFileOperationProgressSink = Missed(missed.clone(), None).into();
     let mut folders = std::collections::HashMap::new();
+    // SAFETY: the caller owns an STA Apartment. COM interfaces stay on this thread;
+    // CopyItem/MoveItem capture their arguments when queued, so each UTF-16 name only
+    // needs to live through that call. The operation retains its advised sink to finish.
     unsafe {
         op.Advise(&sink).map_err(|e| e.to_string())?;
         for (step, source) in steps {
@@ -1358,6 +1376,8 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
         data: usize,
     ) -> LRESULT {
         let hook = data as *mut WindowHook;
+        // SAFETY: data is the Box installed below, used only on this window's thread.
+        // WM_NCDESTROY removes the subclass before reclaiming the Box exactly once.
         let repeat = lparam.0 & (1 << 30) != 0;
         match msg {
             WM_QUERYENDSESSION => {
@@ -1414,6 +1434,8 @@ pub fn hook_window(hwnd: HWND, on_notice: Box<dyn Fn(WindowNotice)>) {
             }
             WM_POWERBROADCAST if wparam.0 == PBT_POWERSETTINGCHANGE as usize && lparam.0 != 0 => {
                 let setting = lparam.0 as *const POWERBROADCAST_SETTING;
+                // SAFETY: Windows supplies this message buffer for the callback lifetime;
+                // check its GUID and payload size before the unaligned u32 read.
                 if unsafe {
                     (*setting).PowerSetting == GUID_SESSION_DISPLAY_STATUS
                         && (*setting).DataLength == 4
@@ -1531,7 +1553,10 @@ pub fn window_icon(hwnd: HWND) {
 }
 
 struct Event(HANDLE);
+// SAFETY: kernel event handles support concurrent waits/signals across threads. Arc keeps
+// the handle open until all users finish; only Event::drop closes it, exactly once.
 unsafe impl Send for Event {}
+// SAFETY: shared access only waits/signals; it never closes or mutates the owned handle.
 unsafe impl Sync for Event {}
 impl Drop for Event {
     fn drop(&mut self) {
@@ -1850,6 +1875,13 @@ mod tests {
         let mut inside = good.clone();
         inside[..4].copy_from_slice(&4u32.to_le_bytes());
         assert!(!hdrop_valid(&inside), "list overlaps the header");
+        let mut unaligned = good.clone();
+        unaligned.insert(20, 0);
+        unaligned[..4].copy_from_slice(&21u32.to_le_bytes());
+        assert!(!hdrop_valid(&unaligned), "unaligned UTF-16 list");
+        let mut partial = good.clone();
+        partial.push(0);
+        assert!(!hdrop_valid(&partial), "partial UTF-16 code unit");
         // ANSI lists (fWide = 0) end with two zero bytes.
         let mut ansi = good[..20].to_vec();
         ansi[16..20].copy_from_slice(&0u32.to_le_bytes());
@@ -1945,6 +1977,161 @@ mod tests {
         names.sort();
         names
     }
+    // Include directories and exact bytes: an unexpected deletion or write must be visible.
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn walk(
+            root: &Path,
+            dir: &Path,
+            out: &mut std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>,
+        ) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let directory = path.is_dir();
+                out.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    if directory {
+                        None
+                    } else {
+                        Some(std::fs::read(&path).unwrap())
+                    },
+                );
+                if directory {
+                    walk(root, &path, out);
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn cancelled_batch_preserves_every_file() {
+        for moved in [false, true] {
+            let root = tree(
+                &format!("cancel-batch-{moved}"),
+                &[
+                    r"src\fresh.txt",
+                    r"src\A\new.txt",
+                    r"src\conflict.txt",
+                    r"dst\A\old.txt",
+                    r"dst\conflict.txt",
+                    r"unrelated\keep.txt",
+                ],
+            );
+            let before = snapshot(&root);
+            let mut questions = 0;
+            let result = crate::paste::plan(
+                &[
+                    root.join(r"src\fresh.txt"),
+                    root.join(r"src\A"),
+                    root.join(r"src\conflict.txt"),
+                ],
+                &root.join("dst"),
+                moved,
+                &mut |q| {
+                    questions += 1;
+                    (
+                        if q.kind == crate::paste::Kind::Folder {
+                            crate::paste::Answer::Replace
+                        } else {
+                            crate::paste::Answer::Cancel
+                        },
+                        false,
+                    )
+                },
+            )
+            .unwrap();
+            assert!(result.is_none());
+            assert_eq!(questions, 2);
+            assert_eq!(snapshot(&root), before);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn destination_change_refuses_the_entire_batch() {
+        let _ole = Apartment::new().unwrap();
+        for moved in [false, true] {
+            for overwrite in [false, true] {
+                let root = tree(
+                    &format!("changed-batch-{moved}-{overwrite}"),
+                    &[
+                        r"src\A\new.txt",
+                        r"src\file.txt",
+                        r"dst\A\old.txt",
+                        r"unrelated\keep.txt",
+                    ],
+                );
+                let target = root.join(r"dst\file.txt");
+                if overwrite {
+                    std::fs::write(&target, b"confirmed").unwrap();
+                }
+                let plan = crate::paste::plan(
+                    &[root.join(r"src\A"), root.join(r"src\file.txt")],
+                    &root.join("dst"),
+                    moved,
+                    &mut |q| {
+                        (
+                            if q.kind == crate::paste::Kind::Folder {
+                                crate::paste::Answer::Replace
+                            } else {
+                                crate::paste::Answer::Overwrite
+                            },
+                            false,
+                        )
+                    },
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(plan.remove.len(), 1);
+                std::fs::write(&target, b"another application's data").unwrap();
+                let before = snapshot(&root);
+                assert!(transfer(&plan).unwrap_err().contains("変わった"));
+                assert_eq!(snapshot(&root), before);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn merged_move_keeps_skipped_source_and_unrelated_data() {
+        let _ole = Apartment::new().unwrap();
+        let root = tree(
+            "merge-skip-data",
+            &[
+                r"src\A\fresh.txt",
+                r"src\A\keep.txt",
+                r"dst\A\keep.txt",
+                r"dst\A\unrelated.txt",
+                r"unrelated\keep.txt",
+            ],
+        );
+        std::fs::write(root.join(r"src\A\keep.txt"), b"source version").unwrap();
+        std::fs::write(root.join(r"dst\A\keep.txt"), b"destination version").unwrap();
+        let before = snapshot(&root);
+        let plan = crate::paste::plan(&[root.join(r"src\A")], &root.join("dst"), true, &mut |q| {
+            (
+                if q.kind == crate::paste::Kind::Folder {
+                    crate::paste::Answer::Merge
+                } else {
+                    crate::paste::Answer::Skip
+                },
+                false,
+            )
+        })
+        .unwrap()
+        .unwrap();
+        let done = transfer(&plan).unwrap();
+        assert!(!done.aborted && !done.missed && done.kept.is_empty());
+        plan.remove_emptied();
+        let mut expected = before;
+        let moved = expected.remove(Path::new(r"src\A\fresh.txt")).unwrap();
+        expected.insert(PathBuf::from(r"dst\A\fresh.txt"), moved);
+        assert_eq!(snapshot(&root), expected);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn replace_plan(root: &Path) -> crate::paste::Plan {
         let mut ask = |_: crate::paste::Question| (crate::paste::Answer::Replace, false);
         crate::paste::plan(
