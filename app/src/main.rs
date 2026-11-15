@@ -2135,6 +2135,17 @@ impl Controller {
             // The job for an opened folder ran without the filter.
             self.panes[p].filter = None;
         }
+        // A focus-triggered reload can finish between the two clicks. Keep the
+        // existing TouchAreas when each row still represents the same item;
+        // resetting the model would discard their press/double-click state.
+        let same_rows = {
+            let model = &self.panes[p].model;
+            let previous = model.data.borrow();
+            model.compare.borrow().is_none()
+                && previous.dir == data.dir
+                && previous.rows.len() == data.rows.len()
+                && previous.rows.iter().zip(&data.rows).all(|(a, b)| a.path == b.path)
+        };
         // Comparing: this pane shows its plain list until `recompare` lines it up again.
         *self.panes[p].model.compare.borrow_mut() = None;
         let old = self.saved(p);
@@ -2259,8 +2270,10 @@ impl Controller {
         if changed {
             pane.model.page_start.set(0);
         }
-        pane.model.show_page_of(pane.model.page_start.get());
-        pane.model.notify.reset();
+        let page_changed = pane.model.show_page_of(pane.model.page_start.get());
+        if !same_rows || page_changed {
+            pane.model.notify.reset();
+        }
         if pane.back.len() > 64 {
             pane.back.remove(0);
         }

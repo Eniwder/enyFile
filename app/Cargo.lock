@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "enyfile"
-version = "1.11.16"
+version = "1.11.17"
 dependencies = [
  "chrono",
  "parley",
