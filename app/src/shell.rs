@@ -1,5 +1,6 @@
 //! Windows integration. Clipboard writes run on the UI thread (memory only, no I/O);
 //! everything that touches the file system or another process runs on its own STA thread.
+mod delete_diagnostics;
 use std::{
     ffi::OsString,
     os::windows::ffi::{OsStrExt, OsStringExt},
@@ -522,9 +523,12 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
     fn PostCopyItem(&self, _: u32, _: Item, _: Item, _: &PCWSTR, hr: HRESULT, _: Item) -> windows::core::Result<()> {
         self.note(hr)
     }
-    fn PreDeleteItem(&self, _: u32, _: Item) -> windows::core::Result<()> {
+    fn PreDeleteItem(&self, _: u32, item: Item) -> windows::core::Result<()> {
         if let Some(deleting) = &self.1 {
             deleting();
+            if let Some(item) = item.as_ref() {
+                delete_diagnostics::inspect(&diagnostic_item_path(item), "before", false);
+            }
         }
         Ok(())
     }
@@ -534,6 +538,7 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
             // The copy engine can report this only after its retry/skip dialog closes.
             // Do not interpret this timestamp as the moment the lock was acquired.
             crate::recovery::checkpoint(format!("delete: item failed/skipped; thread={:?} path={path:?} HRESULT=0x{:08X} error={}", std::thread::current().id(), hr.0 as u32, windows::core::Error::from_hresult(hr)));
+            delete_diagnostics::inspect(&path, "after-failure", true);
         }
         self.note(hr)
     }
