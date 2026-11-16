@@ -1,5 +1,7 @@
 //! Windows integration. Clipboard writes run on the UI thread (memory only, no I/O);
 //! everything that touches the file system or another process runs on its own STA thread.
+#[cfg(test)]
+mod clipboard_tests;
 mod delete_diagnostics;
 use std::{
     ffi::OsString,
@@ -319,7 +321,7 @@ impl Drop for Clipboard {
 
 /// Copy/Cut as Explorer expects: CF_HDROP plus "Preferred DropEffect" (COPY|LINK or MOVE).
 /// The data is fully rendered, so it outlives this process and needs no COM callbacks.
-pub fn set_clipboard(owner: HWND, paths: &[PathBuf], cut: bool) -> Result<(), String> {
+pub fn set_clipboard(owner: HWND, paths: &[PathBuf], cut: bool) -> Result<u32, String> {
     // Before emptying: a refused path leaves the clipboard as it was.
     let hdrop = hdrop_bytes(paths)?;
     let clipboard = Clipboard::open(Some(owner), 5)?;
@@ -330,7 +332,10 @@ pub fn set_clipboard(owner: HWND, paths: &[PathBuf], cut: bool) -> Result<(), St
     } else {
         DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_LINK.0)
     };
-    clipboard.put(preferred_effect(), &effect.0.to_le_bytes())
+    clipboard.put(preferred_effect(), &effect.0.to_le_bytes())?;
+    // Capture while we still hold the clipboard open: a later writer must not get
+    // its sequence attached to the paths we just wrote.
+    Ok(clipboard_sequence())
 }
 
 /// Plain text on the clipboard (path bar > パスのコピー).
@@ -360,24 +365,63 @@ pub fn set_opacity(hwnd: HWND, opacity: f32) {
     }
 }
 
-fn read_dword(data: &IDataObject, cf: u32) -> Option<u32> {
-    // SAFETY: inspect the union only for TYMED_HGLOBAL; read four bytes only after a
-    // successful lock and size check. ReleaseStgMedium owns cleanup, including other tymeds.
-    unsafe {
-        let mut medium = data.GetData(&etc(cf)).ok()?;
-        let value = if medium.tymed == TYMED_HGLOBAL.0 as u32 {
-            let h = medium.u.hGlobal;
-            let ptr = GlobalLock(h);
-            let value = (!ptr.is_null() && GlobalSize(h) >= 4)
-                .then(|| u32::from_le_bytes(*ptr.cast::<[u8; 4]>()));
-            let _ = GlobalUnlock(h);
-            value
-        } else {
-            None
-        };
-        ReleaseStgMedium(&mut medium);
-        value
+fn optional_format<T>(result: windows::core::Result<T>) -> windows::core::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if matches!(error.code(), DV_E_FORMATETC | DV_E_CLIPFORMAT) => Ok(None),
+        Err(error) => Err(error),
     }
+}
+
+struct Medium(STGMEDIUM);
+impl Drop for Medium {
+    fn drop(&mut self) {
+        // SAFETY: each successful GetData transfers one medium to this guard.
+        unsafe { ReleaseStgMedium(&mut self.0) };
+    }
+}
+fn read_global<T>(
+    medium: &Medium,
+    read: impl FnOnce(&[u8]) -> windows::core::Result<T>,
+) -> windows::core::Result<T> {
+    if medium.0.tymed != TYMED_HGLOBAL.0 as u32 {
+        return Err(CLIPBRD_E_BAD_DATA.into());
+    }
+    // SAFETY: the checked union arm is owned by medium. The byte slice cannot
+    // escape this call and is valid only while the allocation stays locked.
+    unsafe {
+        let h = medium.0.u.hGlobal;
+        let ptr = GlobalLock(h);
+        if ptr.is_null() {
+            return Err(CLIPBRD_E_BAD_DATA.into());
+        }
+        struct Lock(HGLOBAL);
+        impl Drop for Lock {
+            fn drop(&mut self) {
+                let _ = unsafe { GlobalUnlock(self.0) };
+            }
+        }
+        let _lock = Lock(h);
+        let size = GlobalSize(h);
+        if size == 0 || size > isize::MAX as usize {
+            return Err(CLIPBRD_E_BAD_DATA.into());
+        }
+        read(std::slice::from_raw_parts(ptr.cast::<u8>(), size))
+    }
+}
+fn read_dword(data: &IDataObject, cf: u32) -> windows::core::Result<Option<u32>> {
+    // SAFETY: GetData's output is immediately owned by the medium guard.
+    let Some(medium) = optional_format(unsafe { data.GetData(&etc(cf)) })?.map(Medium) else {
+        return Ok(None);
+    };
+    read_global(&medium, |bytes| {
+        let bytes: [u8; 4] = bytes
+            .get(..4)
+            .ok_or_else(|| windows::core::Error::from(CLIPBRD_E_BAD_DATA))?
+            .try_into()
+            .unwrap();
+        Ok(Some(u32::from_le_bytes(bytes)))
+    })
 }
 fn write_dword(data: &IDataObject, cf: u32, value: u32) {
     let Ok(h) = global(&value.to_le_bytes()) else {
@@ -426,57 +470,51 @@ fn hdrop_valid(bytes: &[u8]) -> bool {
         ends(&list.iter().map(|&b| u16::from(b)).collect::<Vec<_>>())
     }
 }
-pub(super) fn hdrop_paths(data: &IDataObject) -> Option<Vec<PathBuf>> {
-    // SAFETY: keep the medium alive until all queries finish. Only inspect its HGLOBAL
-    // arm after checking tymed; borrow its bytes only while locked and within GlobalSize.
-    unsafe {
-        let mut medium = data.GetData(&etc(CF_HDROP.0 as u32)).ok()?;
-        let valid = medium.tymed == TYMED_HGLOBAL.0 as u32 && {
-            let h = medium.u.hGlobal;
-            let ptr = GlobalLock(h);
-            let size = GlobalSize(h);
-            let valid = !ptr.is_null()
-                && size <= isize::MAX as usize
-                && hdrop_valid(std::slice::from_raw_parts(ptr.cast::<u8>(), size));
-            let _ = GlobalUnlock(h);
-            valid
-        };
-        if !valid {
-            // Left to the copy engine, like Shell items without paths.
-            ReleaseStgMedium(&mut medium);
-            return None;
+pub(super) fn hdrop_paths(data: &IDataObject) -> windows::core::Result<Option<Vec<PathBuf>>> {
+    // SAFETY: the medium guard retains ownership through all queries and errors.
+    let Some(medium) =
+        optional_format(unsafe { data.GetData(&etc(CF_HDROP.0 as u32)) })?.map(Medium)
+    else {
+        return Ok(None);
+    };
+    read_global(&medium, |bytes| {
+        if !hdrop_valid(bytes) {
+            return Err(CLIPBRD_E_BAD_DATA.into());
         }
-        let drop = HDROP(medium.u.hGlobal.0);
+        // SAFETY: validated list, in the locked allocation owned by medium.
+        let drop = HDROP(unsafe { medium.0.u.hGlobal.0 });
         let mut paths = Vec::new();
-        for i in 0..DragQueryFileW(drop, u32::MAX, None) {
-            let mut buffer = vec![0u16; DragQueryFileW(drop, i, None) as usize + 1];
-            let len = DragQueryFileW(drop, i, Some(&mut buffer)) as usize;
-            paths.push(PathBuf::from(OsString::from_wide(&buffer[..len])));
+        for i in 0..unsafe { DragQueryFileW(drop, u32::MAX, None) } {
+            let mut buffer = vec![0u16; unsafe { DragQueryFileW(drop, i, None) } as usize + 1];
+            let len = unsafe { DragQueryFileW(drop, i, Some(&mut buffer)) } as usize;
+            let units = buffer
+                .get(..len)
+                .ok_or_else(|| windows::core::Error::from(CLIPBRD_E_BAD_DATA))?;
+            paths.push(PathBuf::from(OsString::from_wide(units)));
         }
-        ReleaseStgMedium(&mut medium);
-        Some(paths)
-    }
+        Ok(Some(paths))
+    })
 }
 
 /// Reads file paths and the preferred effect from the clipboard (diagnostics and tests).
 pub fn read_clipboard() -> Result<(Vec<PathBuf>, u32), String> {
-    let data = unsafe { OleGetClipboard() }.map_err(|e| e.to_string())?;
-    let paths = hdrop_paths(&data).ok_or("クリップボードにファイルがありません")?;
-    let effect = read_dword(&data, preferred_effect()).unwrap_or(DROPEFFECT_COPY.0);
-    Ok((paths, effect))
+    let (_, contents) = read_clipboard_contents()?;
+    let paths = contents
+        .paths
+        .ok_or("クリップボードにファイルがありません")?;
+    Ok((paths, contents.effect))
 }
 
 pub fn clipboard_sequence() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
 }
 /// Non-file clipboard contents clear decorations; access errors are retried.
-pub fn clipboard_file_marks() -> Result<(Vec<PathBuf>, bool), String> {
-    let data = unsafe { OleGetClipboard() }.map_err(|e| e.to_string())?;
-    let paths = hdrop_paths(&data).unwrap_or_default();
-    let effect = read_dword(&data, preferred_effect()).unwrap_or(DROPEFFECT_COPY.0);
+pub fn clipboard_file_marks() -> Result<(u32, Vec<PathBuf>, bool), String> {
+    let (sequence, contents) = read_clipboard_contents()?;
     Ok((
-        paths,
-        effect & DROPEFFECT_MOVE.0 != 0 && effect & DROPEFFECT_COPY.0 == 0,
+        sequence,
+        contents.paths.unwrap_or_default(),
+        is_cut(contents.effect),
     ))
 }
 
@@ -484,25 +522,98 @@ pub fn clipboard_file_marks() -> Result<(Vec<PathBuf>, bool), String> {
 pub struct Clip {
     pub paths: Option<Vec<PathBuf>>,
     pub moved: bool,
+    data: Option<IDataObject>,
 }
 /// Call on a thread that owns an [`Apartment`].
 pub fn read_clip() -> Result<Clip, String> {
-    unsafe {
-        let data = OleGetClipboard().map_err(|e| e.to_string())?;
-        let paths = hdrop_paths(&data);
-        let has_items = paths.is_some()
-            || data
-                .QueryGetData(&etc(format(w!("Shell IDList Array"))))
-                .is_ok();
-        if !has_items {
-            return Err("クリップボードにファイルがありません".into());
-        }
-        let effect = read_dword(&data, preferred_effect()).unwrap_or(DROPEFFECT_COPY.0);
-        Ok(Clip {
-            paths,
-            moved: effect & DROPEFFECT_MOVE.0 != 0 && effect & DROPEFFECT_COPY.0 == 0,
-        })
+    let (_, contents) = read_clipboard_contents()?;
+    if contents.paths.is_none() && !contents.virtual_items {
+        return Err("クリップボードにファイルがありません".into());
     }
+    Ok(Clip {
+        // Ordinary paths need no COM reference while the user resolves conflicts.
+        data: contents.paths.is_none().then_some(contents.data),
+        paths: contents.paths,
+        moved: is_cut(contents.effect),
+    })
+}
+
+fn is_cut(effect: u32) -> bool {
+    effect & DROPEFFECT_MOVE.0 != 0 && effect & DROPEFFECT_COPY.0 == 0
+}
+
+struct ClipboardContents {
+    data: IDataObject,
+    paths: Option<Vec<PathBuf>>,
+    effect: u32,
+    virtual_items: bool,
+}
+const CLIPBOARD_READ_ATTEMPTS: usize = 8;
+
+// Sequence checks improve consistency; delayed rendering can defer sequence updates,
+// so this is not a transactional snapshot. Never reuse a partially read attempt.
+fn read_consistent<T>(
+    mut read: impl FnMut() -> windows::core::Result<T>,
+    mut sequence: impl FnMut() -> u32,
+    mut pause: impl FnMut(),
+) -> Result<(u32, T), String> {
+    let mut last = String::new();
+    for attempt in 0..CLIPBOARD_READ_ATTEMPTS {
+        let before = sequence();
+        let result = read();
+        let after = sequence();
+        if before == 0 || after == 0 {
+            return Err("クリップボードの変更番号を取得できません".into());
+        }
+        if before != after {
+            drop(result);
+            last = "読み取り中にクリップボードが変更されました".into();
+        } else {
+            match result {
+                Ok(value) => return Ok((after, value)),
+                Err(error) if error.code() == CLIPBRD_E_CANT_OPEN => last = error.to_string(),
+                Err(error) => return Err(format!("クリップボードを取得できません: {error}")),
+            }
+        }
+        if attempt + 1 < CLIPBOARD_READ_ATTEMPTS {
+            pause();
+        }
+    }
+    Err(format!(
+        "クリップボードを取得できません（{CLIPBOARD_READ_ATTEMPTS}回試行）: {last}"
+    ))
+}
+fn read_clipboard_contents() -> Result<(u32, ClipboardContents), String> {
+    read_consistent(
+        || {
+            // SAFETY: callers own an STA Apartment; no shared mutex spans these COM calls.
+            let data = unsafe { OleGetClipboard() }?;
+            read_clipboard_object(data)
+        },
+        clipboard_sequence,
+        || std::thread::sleep(Duration::from_millis(10)),
+    )
+}
+
+fn read_clipboard_object(data: IDataObject) -> windows::core::Result<ClipboardContents> {
+    let paths = hdrop_paths(&data)?;
+    let virtual_items = if paths.is_none() {
+        optional_format(unsafe {
+            data.QueryGetData(&etc(format(w!("Shell IDList Array"))))
+                .ok()
+        })?
+        .is_some()
+    } else {
+        false
+    };
+    // Missing format means COPY; an access error or malformed DWORD never does.
+    let effect = read_dword(&data, preferred_effect())?.unwrap_or(DROPEFFECT_COPY.0);
+    Ok(ClipboardContents {
+        data,
+        paths,
+        effect,
+        virtual_items,
+    })
 }
 
 fn operation(flags: FILEOPERATION_FLAGS) -> Result<IFileOperation, String> {
@@ -1042,7 +1153,7 @@ pub fn duplicate(paths: &[PathBuf], destination: &Path) -> Result<bool, String> 
 pub fn finish_cut(sources: &[PathBuf]) {
     unsafe {
         let Ok(data) = OleGetClipboard() else { return };
-        if hdrop_paths(&data).as_deref() != Some(sources) {
+        if hdrop_paths(&data).ok().flatten().as_deref() != Some(sources) {
             return;
         }
         // We did an optimized move, so the source must not delete anything.
@@ -1056,13 +1167,18 @@ pub fn finish_cut(sources: &[PathBuf]) {
 /// Fallback for clipboard items without file system paths (e.g. some virtual folders):
 /// hands the data object to the copy engine, which then shows its own Windows dialogs.
 /// Call on a thread that owns an [`Apartment`].
-pub fn paste_shell_items(destination: &Path, moved: bool) -> Result<bool, String> {
+pub fn paste_shell_items(destination: &Path, clip: &Clip) -> Result<bool, String> {
+    let data = clip
+        .data
+        .as_ref()
+        .ok_or("仮想項目のデータを取得できません")?;
     unsafe {
-        let data = OleGetClipboard().map_err(|e| e.to_string())?;
         let op = operation(FOF_ALLOWUNDO)?;
         let target = item(destination)?;
+        // Retain the data object acquired with the effect, rather than rereading
+        // a different clipboard here with a stale COPY/MOVE decision.
         let items: windows::core::IUnknown = data.cast().map_err(|e| e.to_string())?;
-        if moved {
+        if clip.moved {
             op.MoveItems(&items, &target)
         } else {
             op.CopyItems(&items, &target)

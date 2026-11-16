@@ -490,10 +490,16 @@ impl IDropTarget_Impl for Target_Impl {
     ) -> WinResult<()> {
         self.end_drag();
         let data = data.as_ref().cloned();
-        let paths = data
-            .as_ref()
-            .and_then(shell::hdrop_paths)
-            .unwrap_or_default();
+        let paths = match data.as_ref().map(shell::hdrop_paths).transpose() {
+            Ok(paths) => paths.flatten().unwrap_or_default(),
+            Err(error) => {
+                // SAFETY: OLE owns this writable callback pointer; null is not dereferenced.
+                if let Some(effect) = unsafe { effect.as_mut() } {
+                    *effect = DROPEFFECT_NONE;
+                }
+                return Err(error);
+            }
+        };
         let wheel = match WheelHook::new(self.hwnd) {
             Ok(wheel) => Some(wheel),
             Err(error) => {

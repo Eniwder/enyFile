@@ -59,8 +59,7 @@ pub fn reader() -> mpsc::SyncSender<()> {
             return;
         };
         while rx.recv().is_ok() {
-            let sequence = crate::shell::clipboard_sequence();
-            let Ok((paths, cut)) = crate::shell::clipboard_file_marks() else {
+            let Ok((sequence, paths, cut)) = crate::shell::clipboard_file_marks() else {
                 continue;
             };
             if sequence == crate::shell::clipboard_sequence()

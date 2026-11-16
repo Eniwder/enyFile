@@ -312,6 +312,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     click(&ui, 0, j, true);
                     ui.invoke_focus_pane(0);
                     window_ctrl_key(&ui, "c");
+                    expect(c.borrow().panes[0].model.clipboard.borrow().state(&root.join("left/a.txt")) == 1, "own copy decorates immediately without rereading")?;
                     let (files, effect) = clip()?;
                     expect(files == ["a.txt", "日本語 ファイル.txt"], "Ctrl+C puts selected files on clipboard")?;
                     expect(effect & 2 == 0 && effect & 1 != 0, "Ctrl+C preferred effect is COPY")?;
@@ -472,6 +473,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let j = index(&c, 1, "日本語 ファイル.txt")?;
                     click(&ui, 1, j, false);
                     ctrl_key(&ui, 1, "x");
+                    expect(c.borrow().panes[1].model.clipboard.borrow().state(&root.join("right/日本語 ファイル.txt")) == 2, "own cut decorates immediately without rereading")?;
                     let (files, effect) = clip()?;
                     expect(files == ["日本語 ファイル.txt"] && effect == 2, "Ctrl+X preferred effect is MOVE")?;
                     let dst2 = root.join("explorer-dst2");

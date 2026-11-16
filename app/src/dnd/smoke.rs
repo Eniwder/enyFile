@@ -56,6 +56,7 @@ fn check_failed_hover(ui: &App, point: POINTL, data: &IDataObject) -> Result<(),
         wheel: Some(WheelHook::new(hwnd).map_err(|e| e.to_string())?),
         data: Some(data.clone()),
         paths: shell::hdrop_paths(data)
+            .map_err(|e| e.to_string())?
             .ok_or("no failure-test source")?
             .into(),
         destination: Some(destination),

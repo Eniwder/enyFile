@@ -559,10 +559,8 @@ impl Controller {
     }
     fn sync_clipboard_marks(&mut self) {
         if self.clipboard_sequence != Some(shell::clipboard_sequence()) {
-            // Clear stale marks immediately, even if the new clipboard owner is busy.
-            if self.clipboard_sequence.take().is_some() {
-                self.set_clipboard_marks(Arc::default());
-            }
+            // Keep the last successful decoration while a new owner is busy.
+            // This cache is never used to perform a paste.
             let _ = self.clipboard_reader.try_send(());
         }
     }
@@ -3271,12 +3269,11 @@ impl Controller {
             .ok_or_else(|| "ウィンドウがまだ準備できていません".to_string())
             .and_then(|h| shell::set_clipboard(h, &paths, cut));
         match result {
-            Ok(()) => {
-                self.clipboard_sequence = Some(shell::clipboard_sequence());
+            Ok(sequence) => {
+                self.clipboard_sequence = Some(sequence);
                 self.set_clipboard_marks(Arc::new(clipmark::Files::new(&paths, cut)));
-                // Verify asynchronously in case another application replaced the
-                // clipboard immediately after our write completed.
-                let _ = self.clipboard_reader.try_send(());
+                // No reread of our fully rendered write. The regular sequence check
+                // picks up external changes, including changes immediately after closing.
                 self.message(format!(
                     "{}件を{}しました",
                     paths.len(),
@@ -3846,10 +3843,11 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
             },
         )
     };
-    let Some(paths) = clip.paths else {
+    if clip.paths.is_none() {
         // Shell items without paths: the Windows copy engine resolves conflicts itself.
-        return shell::paste_shell_items(dir, moved).map(done);
-    };
+        return shell::paste_shell_items(dir, &clip).map(done);
+    }
+    let paths = clip.paths.unwrap();
     let mut ids = pathid::Idents::default();
     let same_folder = !paths.is_empty()
         && paths
