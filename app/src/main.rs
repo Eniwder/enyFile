@@ -1181,13 +1181,6 @@ impl Controller {
         self.paint(other);
     }
     fn paint(&self, p: usize) {
-        let model = &self.panes[p].model;
-        if model.special.get().is_none() {
-            model
-                .selection
-                .borrow_mut()
-                .select_current_if_empty(&model.data.borrow().rows);
-        }
         if let Some(ui) = self.ui.upgrade() {
             // Update the rows of the page in place; a reset would destroy mouse/double-click state.
             let model = &self.panes[p].model;

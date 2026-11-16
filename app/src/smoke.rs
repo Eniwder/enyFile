@@ -105,6 +105,13 @@ fn ctrl_key(ui: &App, p: i32, letter: &str) {
     event.modifiers.control = true;
     ui.invoke_key_event(p, event);
 }
+fn edit_find(ui: &App, text: &str) {
+    // Keep the real editor in sync: losing focus commits its text, not the
+    // argument previously sent straight to the controller's edited callback.
+    ui.set_find_text(text.into());
+    ui.invoke_focus_find();
+    ui.invoke_find_edited(text.into());
+}
 fn fkey(ui: &App, p: i32, key: slint::platform::Key) {
     let mut event = slint::language::KeyEvent::default();
     event.text = key.into();
@@ -550,6 +557,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     // Nothing selected after Escape: Ctrl+C must leave the clipboard alone.
                     ui.window().dispatch_event(slint::platform::WindowEvent::KeyPressed { text: slint::platform::Key::Escape.into() });
                     ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text: slint::platform::Key::Escape.into() });
+                    expect(selected(&c, 0).is_empty(), &format!("Esc clears the selection through the window key path: {:?}", selected(&c, 0)))?;
                     ctrl_key(&ui, 0, "c");
                     expect(clip()? == before, "Ctrl+C with empty selection keeps clipboard")?;
                     s.pass("empty selection does not overwrite clipboard");
@@ -1154,14 +1162,14 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     key("g", true);
                     expect(current() == "file129.txt", "previous match wraps around")?;
                     key("f", false);
-                    ui.invoke_find_edited("nothing*".into());
+                    edit_find(&ui, "nothing*");
                     expect(current() == "file129.txt" && ui.get_message().contains("見つかりません"), "no match keeps the cursor")?;
                     ui.invoke_find_done(false, "nothing*".into());
                     s.pass("Ctrl+F wildcard search, Ctrl+G / Ctrl+Shift+G");
                     key("F", true);
                     expect(ui.get_find_mode() == 2, "Ctrl+Shift+F opens the filter bar")?;
-                    ui.invoke_find_edited("*5.txt; file00".into());
-                    ui.invoke_find_edited("*5.txt; file001".into());
+                    edit_find(&ui, "*5.txt; file00");
+                    edit_find(&ui, "*5.txt; file001");
                 }
                 46 => {
                     if !idle(&c) {
@@ -1183,7 +1191,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     }
                     expect(names(&c, 0).len() == 16, "sort keeps the filter")?;
                     c.borrow_mut().open_find(0, 2);
-                    ui.invoke_find_edited("file00*".into());
+                    edit_find(&ui, "file00*");
                     expect(c.borrow().panes[0].filter.as_ref().is_some_and(|(text, _)| text == "file00*"), "typing changes the filter")?;
                     ui.invoke_find_done(false, "".into());
                     expect(c.borrow().panes[0].filter.as_ref().is_some_and(|(text, _)| text == "*5.txt; file001"), "Esc puts back the previous filter")?;
@@ -1316,8 +1324,8 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(ui.get_find_mode() == 3, "Ctrl+Alt+Shift+F opens the recursive search bar")?;
                     s.session = c.borrow().panes[0].finder.as_ref().map(|f| f.id).ok_or("the walk starts with the bar")?;
                     // Typing: only the text after the pause is searched.
-                    ui.invoke_find_edited("hi".into());
-                    ui.invoke_find_edited("hit*".into());
+                    edit_find(&ui, "hi");
+                    edit_find(&ui, "hit*");
                 }
                 53 => {
                     if !searched(&c, "hit*") {
@@ -1340,11 +1348,21 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                         let Some(checked) = s.drop_check.borrow().clone() else { return Ok(false) };
                         checked?;
                         if !idle(&c) { return Ok(false); }
-                        expect(c.borrow().panes[0].found.is_some() && found(&c) == ["a\\hit.rs", "b\\hit.txt"], "drop refresh preserves the other pane's search results")?;
+                        expect(c.borrow().panes[0].found.is_some() && found(&c) == ["a\\hit.rs", "b\\hit.txt"], &format!("drop refresh preserves the other pane's search results: {:?}", found(&c)))?;
                         expect(c.borrow().panes[0].finder.as_ref().map(|f| f.id) == Some(s.session), "drop refresh preserves the search session")?;
                         s.pass("rejected and completed drops preserve other-pane search results");
                         s.drop_refresh_checked = true;
-                        ui.invoke_find_edited("a/*.rs".into());
+                        // The real Shell drop can commit and close the bar on focus loss.
+                        // Reopen it before testing another typed query, keeping the walk.
+                        if ui.get_find_mode() == 0 {
+                            let mut e = slint::language::KeyEvent::default();
+                            e.text = "F".into();
+                            e.modifiers.control = true;
+                            e.modifiers.alt = true;
+                            e.modifiers.shift = true;
+                            ui.invoke_key_event(0, e);
+                        }
+                        edit_find(&ui, "a/*.rs");
                         return Ok(false);
                     }
                     if !searched(&c, "a/*.rs") {
@@ -1353,7 +1371,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(found(&c) == ["a\\hit.rs"], &format!("a path pattern with '/': {:?}", found(&c)))?;
                     expect(c.borrow().panes[0].finder.as_ref().map(|f| f.id) == Some(s.session), "the next text reuses the walk")?;
                     s.pass("changing the text searches the kept walk again");
-                    ui.invoke_find_edited("".into());
+                    edit_find(&ui, "");
                     let kept = c.borrow().panes[0].found.as_ref().is_some_and(|f| f.text == "a/*.rs");
                     expect(kept && !c.borrow().typing.running() && ui.get_find_mode() == 3, "erasing the text keeps the results and the bar")?;
                     ui.invoke_find_done(true, "a/*.rs".into());
@@ -1401,7 +1419,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     if !c.borrow().panes[0].finder.as_ref().is_some_and(|f| f.overflow) {
                         return Ok(false);
                     }
-                    ui.invoke_find_edited("hit*".into());
+                    edit_find(&ui, "hit*");
                     expect(!c.borrow().typing.running(), "past the index limit typing does not search")?;
                     ui.invoke_find_done(true, "hit*".into());
                 }
