@@ -155,6 +155,37 @@ fn window_ctrl_key(ui: &App, letter: &str) {
 fn expect(ok: bool, what: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(what.into()) }
 }
+fn check_path_edit(ui: &App) -> Result<(), String> {
+    use slint::platform::{Key, PointerEventButton, WindowEvent};
+    let window = ui.window();
+    let click = |x, y, button| {
+        let position = slint::LogicalPosition::new(x, y);
+        window.dispatch_event(WindowEvent::PointerMoved { position });
+        window.dispatch_event(WindowEvent::PointerPressed { position, button });
+        window.dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    ui.invoke_focus_pane(0);
+    let original = ui.get_p0_path();
+    // Right-click the first breadcrumb, then click the second menu entry.
+    click(12.0, 72.0, PointerEventButton::Right);
+    click(35.0, 129.0, PointerEventButton::Left);
+    window.dispatch_event(WindowEvent::KeyPressed { text: "x".into() });
+    window.dispatch_event(WindowEvent::KeyReleased { text: "x".into() });
+    expect(
+        ui.get_p0_path() == "x",
+        "path menu focuses the editor and selects its text",
+    )?;
+    window.dispatch_event(WindowEvent::KeyPressed {
+        text: Key::Escape.into(),
+    });
+    window.dispatch_event(WindowEvent::KeyReleased {
+        text: Key::Escape.into(),
+    });
+    expect(
+        ui.get_p0_path() == original,
+        "Esc restores the original path",
+    )
+}
 fn clip() -> Result<(Vec<String>, u32), String> {
     let (paths, effect) = shell::read_clipboard()?;
     Ok((
@@ -994,6 +1025,8 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     expect(text == display(&c.borrow().data(0).dir), "path bar copy puts the path on the clipboard")?;
                     s.pass("path copy");
+                    check_path_edit(&ui)?;
+                    s.pass("path menu opens a focused editor; Esc restores the path");
                     // Shift+letter on another drive opens the folder last shown there.
                     if let Some((drive, system)) = other_drive(&root) {
                         c.borrow_mut().config.drive_dirs.insert(drive.clone(), system);

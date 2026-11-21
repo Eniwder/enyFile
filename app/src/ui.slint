@@ -550,11 +550,12 @@ component Pane inherits Rectangle {
         }
         path-menu := PopupWindow {
             x: root.menu-x; y: parent.height; width: 180px;
+            close-policy: close-on-click-outside;
             Rectangle {
                 background: Theme.dialog; border-width: 1px; border-color: Theme.border;
                 VerticalLayout {
                     padding: 4px;
-                    MenuEntry { text: "パスのコピー"; clicked => { root.copy-path(); } }
+                    MenuEntry { text: "パスのコピー"; clicked => { path-menu.close(); root.copy-path(); } }
                     MenuEntry {
                         text: "パスの編集";
                         clicked => {
