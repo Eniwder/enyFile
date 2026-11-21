@@ -555,7 +555,14 @@ component Pane inherits Rectangle {
                 VerticalLayout {
                     padding: 4px;
                     MenuEntry { text: "パスのコピー"; clicked => { root.copy-path(); } }
-                    MenuEntry { text: "パスの編集"; clicked => { root.focus-path(); } }
+                    MenuEntry {
+                        text: "パスの編集";
+                        clicked => {
+                            // Closing the popup restores its previous focus.
+                            path-menu.close();
+                            root.focus-path();
+                        }
+                    }
                 }
             }
         }
