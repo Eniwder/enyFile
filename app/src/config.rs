@@ -127,7 +127,8 @@ impl Config {
             Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
                 Ok(raw) if raw.is_object() => (raw, None, false),
                 _ => {
-                    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+                    let now = jiff::ZonedDateTime::now();
+                    let stamp = now.strftime("%Y%m%d-%H%M%S");
                     let aside = file.with_extension(format!("json.broken-{stamp}"));
                     match std::fs::rename(&file, &aside) {
                         Ok(()) => (

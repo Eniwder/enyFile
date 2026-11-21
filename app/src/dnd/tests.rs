@@ -9,7 +9,7 @@ impl Fixture {
             .join(format!(
                 "enyfile-dnd-{tag}-{}-{}",
                 std::process::id(),
-                chrono::Utc::now().timestamp_nanos_opt().unwrap()
+                jiff::Timestamp::now().as_nanosecond()
             ));
         std::fs::create_dir_all(root.join("src/folder/sub")).unwrap();
         std::fs::create_dir_all(root.join("dst")).unwrap();

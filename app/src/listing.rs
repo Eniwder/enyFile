@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, NaiveDate};
+use jiff::{ZonedDateTime, civil::Date};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::{
@@ -187,15 +187,17 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 /// ("今日" / "N 日以前" within a week / "YYYY-MM-DD", "HH:MM").
-pub fn format_date(modified: SystemTime, today: NaiveDate) -> (String, String) {
-    let local = DateTime::<Local>::from(modified);
-    let days = (today - local.date_naive()).num_days();
+pub fn format_date(modified: SystemTime, today: Date) -> (String, String) {
+    let Ok(local) = ZonedDateTime::try_from(modified) else {
+        return ("—".into(), String::new());
+    };
+    let days = (today - local.date()).get_days();
     let date = match days {
         0 => "今日".to_string(),
         1..=6 => format!("{days}日以前"),
-        _ => local.format("%Y-%m-%d").to_string(),
+        _ => local.strftime("%Y-%m-%d").to_string(),
     };
-    (date, local.format("%H:%M").to_string())
+    (date, local.strftime("%H:%M").to_string())
 }
 /// Archive, Read-only, Hidden, System; "_" when not set.
 pub fn format_attributes(attributes: u32) -> String {
@@ -685,13 +687,12 @@ mod tests {
         assert_eq!(format_size(21_390_000), "20.4 MB");
         assert_eq!(format_attributes(0x20), "A___");
         assert_eq!(format_attributes(0x10), "____");
-        let today = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
-        let at = |d: u32| {
-            let t = NaiveDate::from_ymd_opt(2026, 10, d)
-                .unwrap()
-                .and_hms_opt(9, 5, 0)
+        let today = jiff::civil::date(2026, 10, 19);
+        let at = |d| {
+            let local = jiff::civil::datetime(2026, 10, d, 9, 5, 0, 0)
+                .to_zoned_datetime(jiff::tz::TimeZone::system())
                 .unwrap();
-            SystemTime::from(t.and_local_timezone(Local).unwrap())
+            SystemTime::try_from(local).unwrap()
         };
         assert_eq!(format_date(at(19), today), ("今日".into(), "09:05".into()));
         assert_eq!(format_date(at(15), today).0, "4日以前");

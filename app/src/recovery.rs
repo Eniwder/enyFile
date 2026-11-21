@@ -218,7 +218,7 @@ fn append(path: &Path, note: &str) {
         let _ = writeln!(
             file,
             "[{}] enyFile {} pid={}: {note}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S%.3f"),
             env!("CARGO_PKG_VERSION"),
             std::process::id()
         );

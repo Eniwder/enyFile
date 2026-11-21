@@ -3319,8 +3319,10 @@ impl Controller {
             } else {
                 format!("{} バイト", m.size)
             };
-            let date =
-                chrono::DateTime::<chrono::Local>::from(m.modified).format("%Y-%m-%d %H:%M:%S");
+            let date = jiff::ZonedDateTime::try_from(m.modified).map_or_else(
+                |_| "—".into(),
+                |local| local.strftime("%Y-%m-%d %H:%M:%S").to_string(),
+            );
             format!(
                 "{kind}  ·  {date}{}",
                 if newer { "  （新しい）" } else { "" }
@@ -4000,7 +4002,7 @@ fn crash_log(file: PathBuf) {
         let thread = std::thread::current();
         let entry = format!(
             "[{}] enyFile {} thread '{}': {info}\n{}\n\n",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S"),
             env!("CARGO_PKG_VERSION"),
             thread.name().unwrap_or("?"),
             std::backtrace::Backtrace::force_capture(),

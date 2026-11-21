@@ -406,14 +406,11 @@ fn bytes(n: u64) -> String {
     }
 }
 fn time(t: Option<SystemTime>) -> String {
-    t.map_or_else(
-        || "—".into(),
-        |t| {
-            chrono::DateTime::<chrono::Local>::from(t)
-                .format("%Y/%m/%d %H:%M:%S")
-                .to_string()
-        },
-    )
+    t.and_then(|t| jiff::ZonedDateTime::try_from(t).ok())
+        .map_or_else(
+            || "—".into(),
+            |local| local.strftime("%Y/%m/%d %H:%M:%S").to_string(),
+        )
 }
 fn attribute_names(attributes: u32) -> String {
     let names: Vec<&str> = [

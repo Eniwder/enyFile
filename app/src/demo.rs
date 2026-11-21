@@ -18,11 +18,19 @@ const MARKER: &str = "enyfile-demo.txt";
 
 /// Shown as a date, never as "today", so the frames are the same on any day.
 fn at(day: u32, hour: u32, minute: u32) -> SystemTime {
-    let time = chrono::NaiveDate::from_ymd_opt(2026, 9, day)
-        .unwrap()
-        .and_hms_opt(hour, minute, 0)
-        .unwrap();
-    SystemTime::from(time.and_local_timezone(chrono::Local).unwrap())
+    let local = jiff::civil::DateTime::new(
+        2026,
+        9,
+        day.try_into().unwrap(),
+        hour.try_into().unwrap(),
+        minute.try_into().unwrap(),
+        0,
+        0,
+    )
+    .unwrap()
+    .to_zoned_datetime(jiff::tz::TimeZone::system())
+    .unwrap();
+    SystemTime::try_from(local).unwrap()
 }
 /// (path, size, (day, hour, minute)). Projects and Backup are alike except where the
 /// comparison has something to show; Photos and Music fill the four-pane layout.

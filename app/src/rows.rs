@@ -272,7 +272,7 @@ impl RowsModel {
         let data = self.data.borrow();
         let entry = data.rows.get(index)?;
         let selection = self.selection.borrow();
-        let (date, time) = listing::format_date(entry.modified, chrono::Local::now().date_naive());
+        let (date, time) = listing::format_date(entry.modified, jiff::ZonedDateTime::now().date());
         let tint = (!entry.directory)
             .then(|| {
                 self.ext_colors
