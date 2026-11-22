@@ -485,14 +485,14 @@ struct Controller {
     config: config::Config,
     /// Places being edited in the settings dialog.
     /// 0..4 toolbar places, 4..6 start folders (left, right).
-    settings: [Option<PathBuf>; 7],
+    settings: [pathinput::Draft; 7],
     /// Colors and font being edited in the settings dialog.
     settings_colors: Vec<slint::Color>,
     settings_ext: Vec<(String, slint::Color)>,
     settings_font: (String, f32),
     settings_agent_folders: Vec<PathBuf>,
     /// The bookmark editor's copy as typed (name, path), saved by its 保存.
-    bookmark_draft: Vec<(String, String)>,
+    bookmark_draft: Vec<(String, pathinput::Draft)>,
     agent: Agent,
     drives: Arc<Vec<Drive>>,
     menus: Option<ctxmenu::Menus>,
@@ -637,9 +637,9 @@ impl Controller {
             });
         }
     }
-    fn set_path(&self, p: usize, path: String) {
+    fn set_path(&self, p: usize, path: &Path) {
         if let Some(ui) = self.ui.upgrade() {
-            let path = path.into();
+            let path = pathinput::display(path).into();
             match p {
                 0 => ui.set_p0_path(path),
                 1 => ui.set_p1_path(path),
@@ -757,7 +757,7 @@ impl Controller {
                     path.file_name()
                         .map_or(String::new(), |n| n.to_string_lossy().into_owned())
                 } else {
-                    display(path)
+                    pathinput::display(path)
                 }
             })
             .collect();
@@ -1245,7 +1245,18 @@ impl Controller {
     }
     fn typed_path(&mut self, p: usize, text: String) {
         self.active(p);
-        let text = text.trim().trim_matches('"');
+        if text.contains('\0') {
+            self.fail(pathinput::NUL_ERROR);
+            return;
+        }
+        // Keep the actual directory when accepting the displayed path as-is.
+        // Its name can contain literal percent signs or non-Unicode text.
+        let current = &self.data(p).dir;
+        if !text.is_empty() && text == pathinput::display(current) {
+            self.navigate(p, current.clone(), Mode::New(None));
+            return;
+        }
+        let text = pathinput::trim(&text);
         // shell:Desktop and the like: the Shell resolves them, off the UI thread (a known
         // folder can be redirected to the network).
         if text
@@ -1255,7 +1266,7 @@ impl Controller {
             self.panes[p].fallback = None;
             self.panes[p].navigation += 1;
             let navigation = self.panes[p].navigation;
-            let name = text.to_string();
+            let name = text.replace('/', "\\");
             std::thread::spawn(move || {
                 post(Reply::ShellFolder(
                     p,
@@ -1266,7 +1277,7 @@ impl Controller {
             return;
         }
         let path = match pathinput::expand(text) {
-            Ok(path) => PathBuf::from(path),
+            Ok(path) => path,
             Err(error) => {
                 self.fail(error);
                 return;
@@ -1313,7 +1324,7 @@ impl Controller {
                 }
             }
             3 => self.navigate(p, data.dir.clone(), Mode::Refresh),
-            4 => self.set_path(p, display(&data.dir)),
+            4 => self.set_path(p, &data.dir),
             _ => {}
         }
     }
@@ -2225,7 +2236,7 @@ impl Controller {
             })
             .collect();
         self.agent.memory = Some(text);
-        ui.set_memory_file(display(&self.config.agent_memory()).into());
+        ui.set_memory_file(pathinput::display(&self.config.agent_memory()).into());
         ui.set_memory_lines(ModelRc::from(Rc::new(slint::VecModel::from(lines))));
         ui.set_memory_open(true);
         ui.invoke_focus_memory();
@@ -2456,7 +2467,7 @@ impl Controller {
                     }
                     self.settings_agent_rows();
                 } else {
-                    self.settings[i] = Some(path);
+                    self.settings[i] = pathinput::Draft::Saved(Some(path));
                     self.settings_rows();
                 }
             }
@@ -2707,7 +2718,9 @@ impl Controller {
             });
         }
         let stale = std::mem::take(&mut pane.stale);
-        self.set_path(p, display(&data.dir));
+        if changed || focus_list {
+            self.set_path(p, &data.dir);
+        }
         if let Some(ui) = self.ui.upgrade() {
             let crumbs: Vec<slint::SharedString> = Self::crumbs(&data.dir)
                 .into_iter()

@@ -586,7 +586,7 @@ component Pane inherits Rectangle {
             x: 2px; y: 0px; width: parent.width - 36px; height: parent.height;
             visible: root.editing;
             text <=> root.path;
-            accepted => { root.editing = false; root.navigate(self.text); keys.focus(); }
+            accepted => { let path = self.text; root.editing = false; root.navigate(path); keys.focus(); }
             key-pressed(e) => {
                 if e.text == Key.Escape { root.editing = false; root.command(4); keys.focus(); return accept; }
                 if e.modifiers.alt || e.text == Key.F5 { return root.key-event(e) ? accept : reject; }

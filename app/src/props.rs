@@ -508,11 +508,13 @@ impl Controller {
         });
         if let Some(ui) = self.ui.upgrade() {
             let name = entry.path.file_name().map_or_else(
-                || shown(&entry.path),
+                || visible_path(&entry.path),
                 |n| listing::visible(&n.to_string_lossy()).into_owned(),
             );
             ui.set_props_name(name.into());
-            ui.set_props_folder(entry.path.parent().map(shown).unwrap_or_default().into());
+            ui.set_props_folder(
+                entry.path.parent().map(visible_path).unwrap_or_default().into(),
+            );
         }
         self.props_rows();
         true
@@ -611,7 +613,7 @@ impl Controller {
     /// C: everything shown, as "label<TAB>value" lines.
     pub(super) fn props_copy(&mut self) {
         let Some(props) = &self.props else { return };
-        let mut lines = vec![format!("パス\t{}", display(&props.path))];
+        let mut lines = vec![format!("パス\t{}", pathinput::display(&props.path))];
         for row in self.props_list() {
             if row.heading {
                 lines.push(String::new());
@@ -700,7 +702,7 @@ impl Controller {
         rows.push(row("作成日時", time(info.created)));
         rows.push(row("属性", attribute_names(info.attributes)));
         if let Some(link) = &info.link {
-            rows.push(row("リンク先", shown(link)));
+            rows.push(row("リンク先", visible_path(link)));
         }
         if let Some(version) = &info.version {
             rows.push(row("バージョン", version.clone()));
@@ -768,6 +770,10 @@ impl Controller {
         ui.set_props_hash(hash);
         ui.set_props_rows(ModelRc::new(slint::VecModel::from(self.props_list())));
     }
+}
+
+fn visible_path(path: &Path) -> String {
+    listing::visible(&pathinput::display(path)).into_owned()
 }
 
 /// Reports progress at most every 100 ms; stops when cancelled or the app is gone.

@@ -1,12 +1,14 @@
 //! The settings dialog, colors and font, bookmarks, and keeping the config on disk.
 use super::*;
+use crate::pathinput::Draft;
 
 impl Controller {
     /// Settings dialog (File > 設定): edits a copy of the places until saved.
     pub(super) fn open_settings(&mut self) {
         let [desktop, documents, pictures, videos, music] = self.config.places.clone();
         let [left, right] = self.config.start.clone();
-        self.settings = [desktop, documents, pictures, videos, music, left, right];
+        self.settings =
+            [desktop, documents, pictures, videos, music, left, right].map(Draft::Saved);
         self.settings_rows();
         self.settings_colors = self.config.colors.clone();
         self.settings_ext = self.config.extension_colors.clone();
@@ -24,8 +26,8 @@ impl Controller {
             ui.set_settings_agent_path(
                 self.config
                     .agent_path
-                    .as_ref()
-                    .map_or(String::new(), |p| display(p))
+                    .as_deref()
+                    .map_or_else(String::new, pathinput::display)
                     .into(),
             );
             let access = agent::Access::ALL
@@ -34,7 +36,7 @@ impl Controller {
                 .unwrap_or(0);
             ui.set_settings_agent_access(access as i32);
             ui.set_settings_agent_panes(self.config.agent_panes);
-            ui.set_settings_agent_memory(display(&self.config.agent_memory()).into());
+            ui.set_settings_agent_memory(pathinput::display(&self.config.agent_memory()).into());
             ui.set_settings_agent_detected("空欄: 自動で検出".into());
         }
         self.settings_agent_folders = self.config.agent_folders.clone();
@@ -44,7 +46,7 @@ impl Controller {
             // Looking along PATH can touch slow drives: off the UI thread.
             std::thread::spawn(|| {
                 post(Reply::AgentFound(match agent::locate(None) {
-                    Ok(program) => format!("空欄: 自動で検出（{}）", display(&program)),
+                    Ok(program) => format!("空欄: 自動で検出（{}）", pathinput::display(&program)),
                     Err(_) => {
                         "空欄: 自動で検出（今は見つかりません。codex.exe の場所を入力できます）"
                             .into()
@@ -73,18 +75,17 @@ impl Controller {
         let rows: Vec<PlaceRow> = (0..7)
             .map(|i| PlaceRow {
                 label: labels[i].into(),
-                value: self.settings[i]
-                    .as_ref()
-                    .map_or(String::new(), |p| display(p))
-                    .into(),
+                value: self.settings[i].text().into(),
                 fallback: match (i, &sandbox) {
-                    (5, Some(d)) => display(&d.join("left")),
-                    (6, Some(d)) => display(&d.join("right")),
+                    (5, Some(d)) => pathinput::display(&d.join("left")),
+                    (6, Some(d)) => pathinput::display(&d.join("right")),
                     // Released builds start at the Desktop / Documents (see `default_start`).
-                    (5 | 6, None) => {
-                        config::known_folder(i - 5).map_or(String::new(), |p| display(&p))
-                    }
-                    _ => config::known_folder(i).map_or(String::new(), |p| display(&p)),
+                    (5 | 6, None) => config::known_folder(i - 5)
+                        .as_deref()
+                        .map_or_else(String::new, pathinput::display),
+                    _ => config::known_folder(i)
+                        .as_deref()
+                        .map_or_else(String::new, pathinput::display),
                 }
                 .into(),
             })
@@ -94,18 +95,18 @@ impl Controller {
         }
     }
     pub(super) fn setting_edited(&mut self, i: usize, text: &str) {
-        let text = text.trim().trim_matches('"');
-        self.settings[i] = (!text.is_empty()).then(|| PathBuf::from(text));
+        self.settings[i] = Draft::Edited(text.to_string());
     }
     pub(super) fn setting_reset(&mut self, i: usize) {
-        self.settings[i] = None;
+        self.settings[i] = Draft::default();
         self.settings_rows();
     }
     /// The Windows folder picker runs on its own thread so the window keeps responding.
     pub(super) fn setting_browse(&mut self, i: usize) {
-        let start = self.settings[i]
-            .clone()
-            .or_else(|| if i < 5 { config::known_folder(i) } else { None });
+        let start = match self.settings[i].path() {
+            Ok(path) => path.or_else(|| if i < 5 { config::known_folder(i) } else { None }),
+            Err(error) => return self.fail(error),
+        };
         std::thread::spawn(move || {
             if let Some(path) = shell::pick_folder(start.as_deref()) {
                 post(Reply::Picked(i, path));
@@ -235,10 +236,32 @@ impl Controller {
     }
     pub(super) fn settings_done(&mut self, save: bool) {
         if save {
-            let [desktop, documents, pictures, videos, music, left, right] = self.settings.clone();
+            let mut paths = [const { None }; 7];
+            for (path, draft) in paths.iter_mut().zip(&self.settings) {
+                *path = match draft.path() {
+                    Ok(path) => path,
+                    Err(error) => return self.fail(error),
+                };
+            }
+            let ui = self.ui.upgrade();
+            let program = if let Some(ui) = &ui {
+                let text = ui.get_settings_agent_path();
+                let saved = self.config.agent_path.as_deref();
+                if saved.is_some_and(|p| text.as_str() == pathinput::display(p)) {
+                    self.config.agent_path.clone()
+                } else {
+                    match pathinput::literal(&text) {
+                        Ok(path) => path,
+                        Err(error) => return self.fail(error),
+                    }
+                }
+            } else {
+                self.config.agent_path.clone()
+            };
+            let [desktop, documents, pictures, videos, music, left, right] = paths;
             self.config.places = [desktop, documents, pictures, videos, music];
             self.config.start = [left, right];
-            if let Some(ui) = self.ui.upgrade() {
+            if let Some(ui) = ui {
                 self.config.intra_pane_move = ui.get_settings_intra_pane_move();
                 self.config.pane_drag_drop = ui.get_settings_pane_drag_drop();
                 self.config.opacity = ui.get_settings_opacity() as f32 / 100.0;
@@ -252,9 +275,6 @@ impl Controller {
                         }
                     }
                 }
-                let program = ui.get_settings_agent_path();
-                let program = program.trim().trim_matches('"');
-                let program = (!program.is_empty()).then(|| PathBuf::from(program));
                 if program != self.config.agent_path {
                     self.config.agent_path = program;
                     self.agent.version = None;
@@ -390,7 +410,7 @@ impl Controller {
             .config
             .bookmarks
             .iter()
-            .map(|b| (b.name.clone(), b.path.to_string_lossy().into_owned()))
+            .map(|b| (b.name.clone(), Draft::Saved(Some(b.path.clone()))))
             .collect();
         self.bookmark_rows(i, false);
         if let Some(ui) = self.ui.upgrade() {
@@ -407,7 +427,7 @@ impl Controller {
             .iter()
             .map(|(name, path)| BookmarkRow {
                 name: name.clone().into(),
-                path: path.clone().into(),
+                path: path.text().into(),
             })
             .collect();
         ui.set_bookmark_focus_row(if focus < rows.len() { focus as i32 } else { -1 });
@@ -416,16 +436,21 @@ impl Controller {
     }
     pub(super) fn bookmark_edited(&mut self, i: usize, path: bool, text: &str) {
         if let Some((n, p)) = self.bookmark_draft.get_mut(i) {
-            *if path { p } else { n } = text.to_string();
+            if path {
+                *p = Draft::Edited(text.to_string());
+            } else {
+                *n = text.to_string();
+            }
         }
     }
     pub(super) fn bookmark_browse(&self, i: usize) {
-        let start = self
-            .bookmark_draft
-            .get(i)
-            .map(|(_, p)| p.trim().trim_matches('"'))
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from);
+        let Some((_, draft)) = self.bookmark_draft.get(i) else {
+            return;
+        };
+        let start = match draft.path() {
+            Ok(path) => path,
+            Err(error) => return self.fail(error),
+        };
         std::thread::spawn(move || {
             if let Some(path) = shell::pick_folder(start.as_deref()) {
                 post(Reply::Picked(BOOKMARK_FOLDER + i, path));
@@ -441,7 +466,7 @@ impl Controller {
             return;
         }
         if let Some((_, p)) = self.bookmark_draft.get_mut(i) {
-            *p = display(path);
+            *p = Draft::Saved(Some(path.to_path_buf()));
             self.bookmark_rows(i, true);
         }
     }
@@ -449,7 +474,8 @@ impl Controller {
         let Some(b) = self.current_bookmark() else {
             return;
         };
-        self.bookmark_draft.push((b.name, display(&b.path)));
+        self.bookmark_draft
+            .push((b.name, Draft::Saved(Some(b.path))));
         self.bookmark_rows(self.bookmark_draft.len() - 1, false);
     }
     pub(super) fn delete_bookmark(&mut self, i: usize) {
@@ -469,17 +495,24 @@ impl Controller {
     pub(super) fn bookmark_done(&mut self, save: bool) {
         if save {
             let mut bookmarks = Vec::new();
-            for (i, (name, path)) in self.bookmark_draft.iter().enumerate() {
-                let (name, path) = (name.trim(), path.trim().trim_matches('"'));
-                if name.is_empty() || path.is_empty() {
-                    self.message("名前とパスを入力してください");
-                    let path = !name.is_empty();
-                    self.bookmark_rows(i, path);
-                    return;
-                }
+            for (i, (name, draft)) in self.bookmark_draft.iter().enumerate() {
+                let name = name.trim();
+                let path = match draft.path() {
+                    Ok(Some(path)) if !name.is_empty() => path,
+                    Err(error) => {
+                        self.fail(error);
+                        self.bookmark_rows(i, true);
+                        return;
+                    }
+                    _ => {
+                        self.message("名前とパスを入力してください");
+                        self.bookmark_rows(i, !name.is_empty());
+                        return;
+                    }
+                };
                 bookmarks.push(config::Bookmark {
                     name: name.into(),
-                    path: path.into(),
+                    path,
                 });
             }
             self.config.bookmarks = bookmarks;
@@ -498,7 +531,7 @@ impl Controller {
             let rows: Vec<slint::SharedString> = self
                 .settings_agent_folders
                 .iter()
-                .map(|d| display(d).into())
+                .map(|d| pathinput::display(d).into())
                 .collect();
             ui.set_settings_agent_folders(ModelRc::new(slint::VecModel::from(rows)));
         }
