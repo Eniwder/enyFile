@@ -15,7 +15,7 @@ impl Controller {
         self.settings_font = (self.config.font_family.clone(), self.config.font_size);
         self.settings_color_rows();
         if let Some(ui) = self.ui.upgrade() {
-            self.font_filter("");
+            self.font_filter("", "");
             ui.set_settings_font_family(self.settings_font.0.clone().into());
             ui.set_settings_font_size(self.settings_font.1.round() as i32);
             ui.set_settings_opacity((self.config.opacity * 100.0).round() as i32);
@@ -113,15 +113,19 @@ impl Controller {
             }
         });
     }
-    pub(super) fn font_filter(&self, query: &str) {
-        if let Some(ui) = self.ui.upgrade() {
-            let fonts: Vec<slint::SharedString> =
-                theme::filter_fonts(&theme::font_families(), query)
-                    .into_iter()
-                    .map(Into::into)
-                    .collect();
-            ui.set_fonts(ModelRc::new(slint::VecModel::from(fonts)));
-        }
+    pub(super) fn font_filter(&self, query: &str, selected: &str) -> i32 {
+        let Some(ui) = self.ui.upgrade() else {
+            return 0;
+        };
+        let fonts = theme::filter_fonts(&theme::font_families(), query);
+        let selected = selected.to_lowercase();
+        let index = fonts
+            .iter()
+            .position(|font| font.to_lowercase() == selected)
+            .unwrap_or(0);
+        let fonts: Vec<slint::SharedString> = fonts.into_iter().map(Into::into).collect();
+        ui.set_fonts(ModelRc::new(slint::VecModel::from(fonts)));
+        index as i32
     }
 
     /// Copies colors, extension colors and font from the config into the UI.

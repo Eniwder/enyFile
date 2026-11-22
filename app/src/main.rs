@@ -541,6 +541,13 @@ fn display(path: &Path) -> String {
 fn shown(path: &Path) -> String {
     listing::visible(&display(path)).into_owned()
 }
+fn is_key_text(text: &str) -> bool {
+    // Match Slint's TextInput: non-text keys use control codes or U+F700–U+F7FF.
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|ch| !ch.is_control() && !('\u{f700}'..='\u{f7ff}').contains(&ch))
+}
 fn hwnd(ui: &App) -> Option<HWND> {
     let handle = ui.window().window_handle();
     match handle.window_handle().ok()?.as_raw() {
@@ -3782,7 +3789,7 @@ impl Controller {
                 return true;
             }
         }
-        if !ctrl && !alt && !event.text.is_empty() && !event.text.chars().any(char::is_control) {
+        if !ctrl && !alt && is_key_text(&event.text) {
             let pane = &mut self.panes[p];
             if pane.typed.elapsed() > Duration::from_millis(900) {
                 pane.prefix.clear();
@@ -4433,8 +4440,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     controller.borrow().apply_appearance();
     {
         let c = controller.clone();
-        ui.on_font_filter(move |query| c.borrow().font_filter(query.as_str()));
+        ui.on_font_filter(move |query, selected| c.borrow().font_filter(&query, &selected));
     }
+    ui.on_font_search_text(|text| is_key_text(&text));
     let activity = Rc::new(RefCell::new(recovery::Activity::default()));
     {
         let rendering_activity = activity.clone();
@@ -4834,6 +4842,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_search_ignores_special_keys() {
+        use slint::platform::Key;
+
+        for key in [Key::LeftArrow, Key::RightArrow, Key::Shift, Key::F12] {
+            assert!(!is_key_text(&slint::SharedString::from(key)));
+        }
+        assert!(!is_key_text(""));
+        assert!(!is_key_text("a\u{f702}"));
+        assert!(is_key_text("資料 A"));
+    }
+
     /// The sandbox's link example shows what following links changes in a search.
     #[test]
     fn link_example_search() {

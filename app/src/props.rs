@@ -513,7 +513,12 @@ impl Controller {
             );
             ui.set_props_name(name.into());
             ui.set_props_folder(
-                entry.path.parent().map(visible_path).unwrap_or_default().into(),
+                entry
+                    .path
+                    .parent()
+                    .map(visible_path)
+                    .unwrap_or_default()
+                    .into(),
             );
         }
         self.props_rows();
