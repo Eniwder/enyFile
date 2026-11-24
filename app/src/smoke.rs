@@ -879,13 +879,26 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     fkey(&ui, 0, slint::platform::Key::RightArrow);
                     expect(c.borrow().cursor_row(0) == last - 1, "Right on the last page steps down a row")?;
                     s.pass("first/last page: wheel stays, Left/Right step one row");
+                    fkey(&ui, 0, slint::platform::Key::PageDown);
+                    expect(c.borrow().cursor_row(0) == last, "PageDown reaches the last row of the last page")?;
+                    fkey(&ui, 0, slint::platform::Key::PageUp);
+                    expect(c.borrow().cursor_row(0) == last / size * size, "PageUp reaches the first row of the last page")?;
+                    fkey(&ui, 0, slint::platform::Key::PageUp);
+                    expect(c.borrow().cursor_row(0) == (last / size - 1) * size, "PageUp at the first row reaches the previous page's first row")?;
+                    fkey(&ui, 0, slint::platform::Key::PageDown);
+                    expect(c.borrow().cursor_row(0) == last / size * size - 1, "PageDown reaches the current page's last row")?;
+                    fkey(&ui, 0, slint::platform::Key::PageDown);
+                    expect(c.borrow().cursor_row(0) == last, "PageDown at the last row reaches the next page's last row")?;
+                    fkey(&ui, 0, slint::platform::Key::PageDown);
+                    expect(c.borrow().cursor_row(0) == last, "PageDown stays at the end of the list")?;
+                    s.pass("PageUp and PageDown move to page boundaries and continue onto adjacent pages");
                     // Shift ranges stop at entries ("..", drive rows) and start where the move does.
                     use slint::platform::Key;
                     let entries = c.borrow().data(0).rows.len();
                     let selected_count = || c.borrow().panes[0].model.selection.borrow().count();
                     fkey(&ui, 0, Key::Home);
                     shift_key(&ui, 0, Key::PageDown);
-                    expect(selected_count() == size && c.borrow().cursor_row(0) == size, "Shift+PageDown from \"..\" selects the first page")?;
+                    expect(selected_count() == size - 1 && c.borrow().cursor_row(0) == size - 1, "Shift+PageDown from \"..\" selects the first page")?;
                     shift_key(&ui, 0, Key::End);
                     expect(selected_count() == entries && c.borrow().cursor_row(0) == entries, "Shift+End selects to the last entry, not a drive")?;
                     shift_key(&ui, 0, Key::Home);

@@ -1071,9 +1071,9 @@ impl Controller {
             return;
         }
         let key = if forward {
-            slint::platform::Key::PageDown
+            slint::platform::Key::RightArrow
         } else {
-            slint::platform::Key::PageUp
+            slint::platform::Key::LeftArrow
         };
         let mut event = slint::language::KeyEvent::default();
         event.text = key.into();
@@ -3766,14 +3766,28 @@ impl Controller {
             Some(0)
         } else if is(Key::End) {
             Some(rows - 1)
+        } else if is(Key::PageUp) {
+            let start = model.page_start.get();
+            Some(if cursor == start {
+                start.saturating_sub(page)
+            } else {
+                start
+            })
+        } else if is(Key::PageDown) {
+            let end = (model.page_start.get() + page - 1).min(rows - 1);
+            Some(if cursor == end {
+                (end + page).min(rows - 1)
+            } else {
+                end
+            })
         } else if is(Key::LeftArrow) && cursor < page {
             // No page before: Left steps up a row (Right steps down on the last page).
             Some(cursor.saturating_sub(1))
         } else if is(Key::RightArrow) && cursor / page == (rows - 1) / page {
             Some((cursor + 1).min(rows - 1))
-        } else if is(Key::PageUp) || is(Key::LeftArrow) {
+        } else if is(Key::LeftArrow) {
             Some(cursor.saturating_sub(page))
-        } else if is(Key::PageDown) || is(Key::RightArrow) {
+        } else if is(Key::RightArrow) {
             Some((cursor + page).min(rows - 1))
         } else {
             None
@@ -3800,7 +3814,7 @@ impl Controller {
                     model.special.set(None);
                     selection.select(&data.rows, index, ctrl, shift, false);
                     drop(selection);
-                    self.reveal(p, index);
+                    self.reveal_row(p, row);
                 }
                 Some(slot) => {
                     model.special.set(Some(match slot {
