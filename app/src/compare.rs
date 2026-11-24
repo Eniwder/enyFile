@@ -1,7 +1,96 @@
-//! Ctrl+Shift+D: two folders side by side, row by row (only the entries in them; the
-//! contents of subfolders are not compared). The old side is the left / upper pane.
+//! Ctrl+Shift+D: two folders side by side, with a metadata check of matched folders.
+//! The old side is the left / upper pane.
 use crate::listing::{self, Entry};
-use std::{cmp::Ordering, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::HashSet,
+    os::windows::fs::MetadataExt,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
+    time::Duration,
+};
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+pub type FolderChanges = HashSet<Arc<PathBuf>>;
+
+/// Runs on the Diff worker. Only matched, ordinary folders get a child listing.
+pub fn folder_changes(
+    old: &[Entry],
+    new: &[Entry],
+    show_hidden: bool,
+    stop: &AtomicBool,
+) -> FolderChanges {
+    let mut changes = FolderChanges::new();
+    let mut new = new.iter().peekable();
+    for a in old {
+        if stop.load(AtomicOrdering::Relaxed) {
+            break;
+        }
+        while new
+            .peek()
+            .is_some_and(|b| listing::name_order(a, b) == Ordering::Greater)
+        {
+            new.next();
+        }
+        let Some(b) = new.next_if(|b| a.directory == b.directory && a.name_fold == b.name_fold)
+        else {
+            continue;
+        };
+        if a.directory
+            && a.path != b.path
+            && (a.attributes | b.attributes) & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0
+            && children_differ(&a.path, &b.path, show_hidden, stop)
+        {
+            changes.insert(a.path.clone());
+        }
+    }
+    changes
+}
+
+fn children_differ(old: &Path, new: &Path, show_hidden: bool, stop: &AtomicBool) -> bool {
+    let children = |dir: &Path| {
+        // Check again at the point of use, in case a folder was replaced after listing.
+        let attributes = std::fs::symlink_metadata(dir).ok()?.file_attributes();
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return None;
+        }
+        let mut rows: Vec<_> = listing::scan(dir, show_hidden)
+            .ok()?
+            .into_iter()
+            .map(|row| (row.name.to_string_lossy().to_lowercase(), row))
+            .collect();
+        rows.sort_unstable_by(|(a, ar), (b, br)| a.cmp(b).then_with(|| ar.name.cmp(&br.name)));
+        Some(rows)
+    };
+    let mut pending = vec![(old.to_path_buf(), new.to_path_buf())];
+    while let Some((old, new)) = pending.pop() {
+        if stop.load(AtomicOrdering::Relaxed) {
+            return false;
+        }
+        let (Some(a), Some(b)) = (children(&old), children(&new)) else {
+            continue;
+        };
+        if a.len() != b.len() {
+            return true;
+        }
+        for ((an, a), (bn, b)) in a.into_iter().zip(b) {
+            if an != bn
+                || a.directory != b.directory
+                || (a.attributes ^ b.attributes) & (0x27 | FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
+                || (!a.directory && (a.size != b.size || time_differs(a.modified, b.modified)))
+            {
+                return true;
+            }
+            if a.directory && a.attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 {
+                pending.push((old.join(a.name), new.join(b.name)));
+            }
+        }
+    }
+    false
+}
 
 /// How one row differs. `kind`: 0 same, 1 only on the new side ("+"), 2 only on the old
 /// side ("-"), 3 on both sides but different (the differing cells are flagged).
@@ -30,7 +119,12 @@ impl Aligned {
 
 /// Matches `old` and `new` by name (both in `listing::name_order`). Returns the rows and
 /// the entries each side shows, in row order; with `only_diff` equal rows are left out.
-pub fn align(old: &[Entry], new: &[Entry], only_diff: bool) -> (Aligned, [Vec<Entry>; 2]) {
+pub fn align(
+    old: &[Entry],
+    new: &[Entry],
+    only_diff: bool,
+    folders: &FolderChanges,
+) -> (Aligned, [Vec<Entry>; 2]) {
     let mut aligned = Aligned::default();
     let mut shown: [Vec<Entry>; 2] = [Vec::new(), Vec::new()];
     let (mut i, mut j) = (0, 0);
@@ -40,7 +134,11 @@ pub fn align(old: &[Entry], new: &[Entry], only_diff: bool) -> (Aligned, [Vec<En
             (Some(a), Some(b)) if a.directory == b.directory && a.name_fold == b.name_fold => {
                 i += 1;
                 j += 1;
-                ([Some(a), Some(b)], differ(a, b))
+                let mut diff = differ(a, b);
+                if folders.contains(&a.path) {
+                    diff.kind = 3;
+                }
+                ([Some(a), Some(b)], diff)
             }
             (Some(a), Some(b)) if listing::name_order(a, b) == Ordering::Greater => {
                 j += 1;
@@ -102,12 +200,8 @@ pub fn align(old: &[Entry], new: &[Entry], only_diff: bool) -> (Aligned, [Vec<En
 /// Size (files only), modified time (2 s apart counts as the same: FAT keeps even seconds)
 /// and the A R H S attributes.
 fn differ(a: &Entry, b: &Entry) -> Diff {
-    let apart = a
-        .modified
-        .duration_since(b.modified)
-        .unwrap_or_else(|e| e.duration());
     let size = !a.directory && a.size != b.size;
-    let time = apart > Duration::from_secs(2);
+    let time = time_differs(a.modified, b.modified);
     let attr = (a.attributes ^ b.attributes) & 0x27 != 0;
     Diff {
         kind: if size || time || attr { 3 } else { 0 },
@@ -117,10 +211,18 @@ fn differ(a: &Entry, b: &Entry) -> Diff {
     }
 }
 
+fn time_differs(a: std::time::SystemTime, b: std::time::SystemTime) -> bool {
+    a.duration_since(b).unwrap_or_else(|e| e.duration()) > Duration::from_secs(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{path::PathBuf, sync::Arc, time::UNIX_EPOCH};
+    fn align(old: &[Entry], new: &[Entry], only_diff: bool) -> (Aligned, [Vec<Entry>; 2]) {
+        super::align(old, new, only_diff, &FolderChanges::new())
+    }
+
     fn entry(name: &str, directory: bool, size: u64, secs: u64) -> Entry {
         Entry {
             path: Arc::new(PathBuf::from(name)),
@@ -139,6 +241,46 @@ mod tests {
             icon: "".into(),
         }
     }
+    #[test]
+    fn folder_diff_checks_nested_metadata_and_skips_reparse_points() {
+        let root = std::env::temp_dir().join(format!("enyfile-folder-diff-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Cleanup(root);
+        let a = root.0.join("old");
+        let b = root.0.join("new");
+        std::fs::create_dir_all(a.join("sub")).unwrap();
+        std::fs::create_dir_all(b.join("sub")).unwrap();
+        let mut old = [entry("folder", true, 0, 0)];
+        let mut new = [entry("folder", true, 0, 0)];
+        old[0].path = Arc::new(a.clone());
+        new[0].path = Arc::new(b.clone());
+        let stop = AtomicBool::new(false);
+        assert!(folder_changes(&old, &new, false, &stop).is_empty());
+
+        let direct = a.join("direct.txt");
+        std::fs::write(&direct, b"only on the old side").unwrap();
+        let folders = folder_changes(&old, &new, false, &stop);
+        let (aligned, _) = super::align(&old, &new, true, &folders);
+        assert_eq!(aligned.diffs[0].kind, 3);
+        std::fs::remove_file(direct).unwrap();
+
+        std::fs::write(a.join("sub/file.txt"), b"old").unwrap();
+        std::fs::write(b.join("sub/FILE.TXT"), b"longer").unwrap();
+        let folders = folder_changes(&old, &new, false, &stop);
+        let (aligned, _) = super::align(&old, &new, true, &folders);
+        assert_eq!(aligned.counts, [0, 0, 1, 0]);
+        assert_eq!(aligned.diffs[0].kind, 3);
+
+        new[0].attributes |= FILE_ATTRIBUTE_REPARSE_POINT.0;
+        assert!(folder_changes(&old, &new, false, &stop).is_empty());
+    }
+
     #[test]
     fn rows_line_up_by_name() {
         let old = [

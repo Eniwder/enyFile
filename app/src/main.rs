@@ -30,7 +30,11 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Condvar, Mutex, mpsc},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::HWND;
@@ -130,6 +134,7 @@ enum Reply {
     PropsShow(u64),
     Hash(u64, props::Hashing),
     Usage(u64, props::Measuring),
+    Compared(Arc<AtomicBool>, [Arc<Snapshot>; 2], compare::FolderChanges),
 }
 /// `Reply::Picked` for 設定 > エージェント's folder list rather than a place.
 const AGENT_FOLDER: usize = 100;
@@ -452,6 +457,8 @@ struct Comparing {
     base: [Arc<Snapshot>; 2],
     /// Sort order before the comparison, which shows both sides by name.
     sort: [(usize, bool); 2],
+    checking: Option<Arc<AtomicBool>>,
+    folder_changes: Option<compare::FolderChanges>,
     counts: [usize; 4],
 }
 /// Typing in the recursive search bar: the query runs once the keys pause this long.
@@ -1715,6 +1722,8 @@ impl Controller {
             only_diff: false,
             base: panes.map(|p| self.data(p)),
             sort,
+            checking: None,
+            folder_changes: None,
             counts: [0; 4],
         });
         // Both sides by name, so the rows line up; the reply of the sort compares.
@@ -1739,7 +1748,26 @@ impl Controller {
         if c.panes.iter().any(|&p| self.panes[p].pending.is_some()) {
             return;
         }
-        let (aligned, shown) = compare::align(&c.base[0].rows, &c.base[1].rows, c.only_diff);
+        let Some(folders) = &c.folder_changes else {
+            if c.checking.is_none() {
+                let token = Arc::new(AtomicBool::new(false));
+                c.checking = Some(token.clone());
+                let base = c.base.clone();
+                let show_hidden = c
+                    .panes
+                    .map(|p| self.config.show_hidden[p])
+                    .into_iter()
+                    .all(|visible| visible);
+                std::thread::spawn(move || {
+                    let changes =
+                        compare::folder_changes(&base[0].rows, &base[1].rows, show_hidden, &token);
+                    post(Reply::Compared(token, base, changes));
+                });
+            }
+            return;
+        };
+        let (aligned, shown) =
+            compare::align(&c.base[0].rows, &c.base[1].rows, c.only_diff, folders);
         c.counts = aligned.counts;
         let aligned = Rc::new(aligned);
         // The cursor stays on its item (or its row, when the item is gone).
@@ -1810,6 +1838,9 @@ impl Controller {
     /// is already the new one).
     fn end_compare(&mut self, keep: Option<usize>) {
         let Some(c) = self.compare.take() else { return };
+        if let Some(token) = &c.checking {
+            token.store(true, Ordering::Relaxed);
+        }
         for (s, &p) in c.panes.iter().enumerate() {
             let model = &self.panes[p].model;
             *model.compare.borrow_mut() = None;
@@ -2369,6 +2400,25 @@ impl Controller {
                     finder::Event::Icons => self.repaint(p),
                 }
             }
+            Reply::Compared(token, base, changes) => {
+                let Some(c) = &mut self.compare else { return };
+                if !c
+                    .checking
+                    .as_ref()
+                    .is_some_and(|running| Arc::ptr_eq(running, &token))
+                {
+                    return;
+                }
+                c.checking = None;
+                if c.base
+                    .iter()
+                    .zip(&base)
+                    .all(|(current, scanned)| Arc::ptr_eq(current, scanned))
+                {
+                    c.folder_changes = Some(changes);
+                }
+                self.recompare();
+            }
             Reply::Changed(p, dir) => {
                 // Search results stay as found; F5 searches again.
                 if self.data(p).dir != dir || self.panes[p].found.is_some() {
@@ -2762,6 +2812,10 @@ impl Controller {
             } else {
                 if let Some(c) = &mut self.compare {
                     c.base[side] = data.clone();
+                    c.folder_changes = None;
+                    if let Some(token) = &c.checking {
+                        token.store(true, Ordering::Relaxed);
+                    }
                 }
                 self.recompare();
             }

@@ -626,6 +626,7 @@ component Pane inherits Rectangle {
         key-pressed(e) => { return root.key-event(e) ? accept : reject; }
         key-released(e) => { if e.text == Key.Alt { root.alt-released(); } return reject; }
     }
+    diff-mark := Text { text: "≠"; font-weight: 700; visible: false; }
     // One page of rows. Clicks on the empty part reach this area; the wheel turns pages.
     list := TouchArea {
         x: 1px; y: 50px; width: parent.width - 2px; height: parent.height - 51px;
@@ -663,10 +664,15 @@ component Pane inherits Rectangle {
             // Files, folders and "..". Comparing, an empty row stays empty.
             if !row.drive && !row.gap : HorizontalLayout {
                 padding-left: row.compare ? 2px : 8px; padding-right: 10px; spacing: 7px;
-                // Comparing: "+" / "-" stay readable when the cursor or selection hides the color.
-                if row.compare : Text {
-                    width: 8px; text: row.diff == 1 ? "+" : row.diff == 2 ? "-" : "";
-                    color: item.fg; font-weight: 700; horizontal-alignment: center; vertical-alignment: center;
+                // Keep the difference marker visible even on the selected row.
+                if row.compare : Rectangle {
+                    width: max(8px, diff-mark.preferred-width) + 4px;
+                    background: row.diff == 3 ? Theme.diff-change-bg : transparent;
+                    Text {
+                        text: row.diff == 1 ? "+" : row.diff == 2 ? "-" : row.diff == 3 ? "≠" : "";
+                        color: row.diff == 3 ? Theme.text : item.fg;
+                        font-weight: 700; horizontal-alignment: center; vertical-alignment: center;
+                    }
                 }
                 Rectangle {
                     width: 16px;
