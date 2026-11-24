@@ -132,7 +132,7 @@ thread_local! {
     static IMAGES: RefCell<HashMap<Arc<str>, slint::Image>> = RefCell::new(HashMap::new());
 }
 /// The icon for `key`, or the `fallback` (type icon) while a per-file icon is still loading.
-fn icon_image(key: &Arc<str>, fallback: &Arc<str>) -> slint::Image {
+pub(super) fn icon_image(key: &Arc<str>, fallback: &Arc<str>) -> slint::Image {
     IMAGES.with(|images| {
         let mut images = images.borrow_mut();
         for key in [key, fallback] {

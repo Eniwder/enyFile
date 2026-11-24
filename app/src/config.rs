@@ -75,6 +75,7 @@ pub struct Config {
     pub pane_drag_drop: bool,
     /// Same-pane folder drops may move only; never copy in place.
     pub intra_pane_move: bool,
+    pub drives_in_toolbar: bool,
     /// Shift+letter: the folder last shown on each drive ("D:"), saved on exit.
     pub drive_dirs: std::collections::BTreeMap<String, PathBuf>,
     /// Where the window was when it was last closed; None = Slint's default placement.
@@ -274,6 +275,7 @@ impl Config {
             .map_or(theme::DEFAULT_SIZE, |s| s as f32)
             .clamp(8.0, 32.0);
         let intra_pane_move = raw["intra_pane_move"].as_bool().unwrap_or(false);
+        let drives_in_toolbar = raw["drives_in_toolbar"].as_bool().unwrap_or(false);
         let pane_drag_drop = raw["pane_drag_drop"].as_bool().unwrap_or(false);
         let search_links = raw["search_links"].as_bool().unwrap_or(false);
         let drive_dirs = raw["drive_dirs"]
@@ -348,6 +350,7 @@ impl Config {
             search_links,
             pane_drag_drop,
             intra_pane_move,
+            drives_in_toolbar,
             drive_dirs,
             window,
             agent_enabled,
@@ -435,6 +438,7 @@ impl Config {
         }
         self.raw["font"] = json!({ "family": self.font_family, "size": self.font_size });
         self.raw["intra_pane_move"] = json!(self.intra_pane_move);
+        self.raw["drives_in_toolbar"] = json!(self.drives_in_toolbar);
         self.raw["pane_drag_drop"] = json!(self.pane_drag_drop);
         self.raw["search_links"] = json!(self.search_links);
         self.raw["drive_dirs"] = Value::Object(
@@ -545,6 +549,8 @@ mod tests {
         assert_eq!(config.split, 0.5);
         assert!(!config.intra_pane_move);
         config.intra_pane_move = true;
+        assert!(!config.drives_in_toolbar);
+        config.drives_in_toolbar = true;
         assert!(!config.pane_drag_drop);
         config.pane_drag_drop = true;
         config.bookmarks.push(Bookmark {
@@ -556,6 +562,7 @@ mod tests {
         config.save().unwrap();
         let again = Config::load(file.clone());
         assert_eq!(again.bookmarks.len(), 2);
+        assert!(again.drives_in_toolbar);
         assert!(again.pane_drag_drop);
         assert!(again.intra_pane_move);
         assert_eq!(again.raw["theme"], "dark");

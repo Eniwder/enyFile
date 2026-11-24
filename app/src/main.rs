@@ -34,7 +34,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::HWND;
-slint::slint! { export { App, DropHit, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine, PropRow } from "src/ui.slint"; }
+slint::slint! { export { App, DropHit, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine, PropRow, DriveButton } from "src/ui.slint"; }
 
 #[derive(Clone)]
 struct Saved {
@@ -1096,7 +1096,10 @@ impl Controller {
     }
     fn info(&self, p: usize) -> PaneInfo {
         let data = self.data(p);
-        let volume = data.volume.as_ref().filter(|_| !self.demo);
+        let volume = data
+            .volume
+            .as_ref()
+            .filter(|_| !self.demo && !self.config.drives_in_toolbar);
         let folders = data.rows.iter().filter(|e| e.directory).count();
         let total: u64 = data
             .rows
@@ -2676,7 +2679,7 @@ impl Controller {
         };
         // Keep the cursor on ".." or a drive across refresh; an empty folder puts it on "..",
         // and so does opening one, so a repeated Enter never starts the first program in it.
-        let drives = self.drives.len();
+        let drives = self.panes[p].model.drives.borrow().len();
         let special = if data.offset() == 1 && data.rows.is_empty() {
             Some(Special::Parent)
         } else if made {
@@ -3151,17 +3154,48 @@ impl Controller {
             post(Reply::Made(pane, dir, before, result));
         });
     }
-    /// New drive list from the drive thread: shown under the entries in both panes.
+    /// Refresh the drive buttons or pane rows from the same drive snapshot.
     fn set_drives(&mut self, drives: Arc<Vec<Drive>>) {
-        let same_count = drives.len() == self.drives.len();
-        self.drives = drives.clone();
-        for pane in &self.panes {
+        self.drives = drives;
+        let drives = if self.config.drives_in_toolbar {
+            if let Some(ui) = self.ui.upgrade() {
+                let buttons: Vec<_> = self
+                    .drives
+                    .iter()
+                    .map(|drive| DriveButton {
+                        letter: drive_of(&drive.root).unwrap_or_default().into(),
+                        icon: rows::icon_image(&drive.icon, &drive.icon),
+                        free: if drive.total == 0 {
+                            -1.0
+                        } else {
+                            (drive.free as f32 / drive.total as f32).clamp(0.0, 1.0)
+                        },
+                    })
+                    .collect();
+                ui.set_drive_buttons(ModelRc::new(slint::VecModel::from(buttons)));
+            }
+            Arc::new(Vec::new())
+        } else {
+            if let Some(ui) = self.ui.upgrade() {
+                ui.set_drive_buttons(ModelRc::default());
+            }
+            self.drives.clone()
+        };
+        for (p, pane) in self.panes.iter().enumerate() {
             let model = &pane.model;
+            let same_count = model.drives.borrow().len() == drives.len();
             *model.drives.borrow_mut() = drives.clone();
-            if let Some(Special::Drive(i)) = model.special.get()
-                && i >= drives.len()
-            {
-                model.special.set(None);
+            let cursor_removed =
+                matches!(model.special.get(), Some(Special::Drive(i)) if i >= drives.len());
+            if cursor_removed {
+                let data = model.data.borrow();
+                model
+                    .special
+                    .set((data.rows.is_empty() && data.offset() == 1).then_some(Special::Parent));
+                model
+                    .selection
+                    .borrow_mut()
+                    .select_current_if_empty(&data.rows);
             }
             // Compared panes show no drive list.
             if model.compare.borrow().is_some() {
@@ -3178,7 +3212,11 @@ impl Controller {
                     }
                 }
             } else {
+                if cursor_removed || model.page_start.get() >= model.total() {
+                    model.show_page_of(self.cursor_row(p));
+                }
                 model.notify.reset();
+                self.paint(p);
             }
         }
     }
@@ -4280,6 +4318,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let c = controller.clone();
         ui.on_bookmark_open(move |i| c.borrow_mut().open_bookmark(i as usize));
+    }
+    {
+        let c = controller.clone();
+        ui.on_drive_open(move |i| {
+            let mut controller = c.borrow_mut();
+            if let Some(root) = controller
+                .drives
+                .get(i as usize)
+                .map(|drive| drive.root.clone())
+            {
+                let pane = controller.active;
+                controller.open_drive(pane, root);
+            }
+        });
     }
     {
         let c = controller.clone();

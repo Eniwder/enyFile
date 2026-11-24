@@ -21,6 +21,7 @@ impl Controller {
             ui.set_settings_opacity((self.config.opacity * 100.0).round() as i32);
             ui.set_settings_intra_pane_move(self.config.intra_pane_move);
             ui.set_settings_pane_drag_drop(self.config.pane_drag_drop);
+            ui.set_settings_drives_in_toolbar(self.config.drives_in_toolbar);
             ui.set_settings_search_links(self.config.search_links);
             ui.set_settings_agent_cli(if self.config.agent_enabled { 0 } else { 1 });
             ui.set_settings_agent_path(
@@ -268,6 +269,14 @@ impl Controller {
             if let Some(ui) = ui {
                 self.config.intra_pane_move = ui.get_settings_intra_pane_move();
                 self.config.pane_drag_drop = ui.get_settings_pane_drag_drop();
+                let drives_in_toolbar = ui.get_settings_drives_in_toolbar();
+                if self.config.drives_in_toolbar != drives_in_toolbar {
+                    self.config.drives_in_toolbar = drives_in_toolbar;
+                    self.set_drives(self.drives.clone());
+                    for pane in 0..self.panes.len() {
+                        self.paint(pane);
+                    }
+                }
                 self.config.opacity = ui.get_settings_opacity() as f32 / 100.0;
                 let follow = ui.get_settings_search_links();
                 if follow != self.config.search_links {

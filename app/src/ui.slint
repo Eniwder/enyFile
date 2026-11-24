@@ -47,6 +47,7 @@ export global Theme {
 // cells flagged by size-diff / time-diff / attr-diff.
 // `spoof`: the name holds characters that reorder or hide text (shown as marks, in red).
 export struct DropHit { pane: int, row: int, in-name: bool }
+export struct DriveButton { letter: string, icon: image, free: float }
 export struct Row { transfer: int, compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, spoof: bool, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
 // Menu bar item: `checkable` shows a check column; a separator ignores the rest.
 export struct MenuItem { text: string, command: int, checkable: bool, checked: bool, separator: bool }
@@ -615,7 +616,7 @@ component Pane inherits Rectangle {
         if root.info.page != "" : Text { text: "   ページ " + root.info.page; color: Theme.dim; vertical-alignment: center; }
         Rectangle { horizontal-stretch: 1; }
         // Narrow panes leave out the volume part so the counts stay readable.
-        if root.width >= 420px : Text { text: root.info.volume + " "; color: Theme.text; vertical-alignment: center; overflow: elide; }
+        if root.width >= 420px && root.info.volume != "" : Text { text: root.info.volume + " "; color: Theme.text; vertical-alignment: center; overflow: elide; }
         if root.width >= 420px : Text { text: root.info.free; color: Theme.accent; font-weight: 700; vertical-alignment: center; }
         if root.width >= 420px && root.info.free != "" : Text { text: " 空き"; color: Theme.text; vertical-alignment: center; }
     }
@@ -1149,6 +1150,7 @@ component SettingsDialog inherits Rectangle {
     in-out property <bool> search-links;
     in-out property <bool> pane-drag-drop;
     in-out property <bool> intra-pane-move;
+    in-out property <bool> drives-in-toolbar;
     // エージェント: the CLI (0 Codex, 1 none), program (empty = found automatically, shown dim),
     // write access 0 / 1 / 2, the folders access 1 adds, and the memory file.
     in-out property <int> agent-cli;
@@ -1360,6 +1362,9 @@ component SettingsDialog inherits Rectangle {
                             // その他
                             if root.tab == 3 : VerticalLayout {
                                 spacing: 12px; alignment: start;
+                                Text { text: "ドライブの表示"; font-weight: 700; color: Theme.text; }
+                                CheckBox { text: "ドライブをお気に入りの隣に表示する"; checked <=> root.drives-in-toolbar; }
+                                Text { text: "チェックを外すと各ペインの末尾に表示します。"; color: Theme.dim; wrap: word-wrap; }
                                 Text { text: "ドラッグ＆ドロップ"; font-weight: 700; color: Theme.text; }
                                 CheckBox { text: "同じペインのフォルダへのドラッグ移動を有効にする"; checked <=> root.intra-pane-move; }
                                 CheckBox { text: "ペイン間のドラッグ＆ドロップを有効にする"; checked <=> root.pane-drag-drop; }
@@ -1598,6 +1603,8 @@ export component App inherits Window {
     in property <bool> ask-open;
     in property <AskInfo> ask;
     in property <[BookmarkRow]> bookmarks;
+    in property <[DriveButton]> drive-buttons;
+    callback drive-open(int);
     in property <bool> bookmark-editing;
     in property <[BookmarkRow]> bookmark-draft;
     in property <int> bookmark-focus-row;
@@ -1639,6 +1646,7 @@ export component App inherits Window {
     in-out property <bool> settings-search-links;
     in-out property <bool> settings-pane-drag-drop;
     in-out property <bool> settings-intra-pane-move;
+    in-out property <bool> settings-drives-in-toolbar;
     in-out property <int> drop-pane: -1;
     in-out property <int> drop-row: -1;
     in-out property <int> settings-agent-cli;
@@ -1833,7 +1841,7 @@ export component App inherits Window {
 
     // Toolbar: history, then places (paths from the config file) and bookmarks.
     HorizontalLayout {
-        x: 6px; y: 26px; height: 32px; spacing: 2px; alignment: start;
+        x: 6px; y: 26px; width: root.width - 12px; height: 32px; spacing: 2px;
         // nudge: optical vertical centering (glyphs carry different empty space above/below).
         FlatButton { width: 36px; text: "◁"; font-size: 17px; tint: Theme.key; nudge: -1.33px; clicked => { root.command(root.active-pane, 0); } }
         FlatButton { width: 36px; text: "▷"; font-size: 17px; tint: Theme.key; nudge: -1.33px; clicked => { root.command(root.active-pane, 1); } }
@@ -1850,6 +1858,43 @@ export component App inherits Window {
             glyph: "\u{EB51}"; tint: #e86a8a;
             glyph-size: 17px;
             clicked => { root.bookmarks-open = true; bookmark-keys.focus(); }
+        }
+        if root.drive-buttons.length > 0 : Rectangle {
+            width: 14px;
+            Rectangle { x: 6px; y: 6px; width: 1px; height: parent.height - 12px; background: Theme.border; }
+        }
+        if root.drive-buttons.length > 0 : drive-strip := Flickable {
+            min-width: 0; horizontal-stretch: 1;
+            content-width: root.drive-buttons.length * 44px;
+            content-height: self.height;
+            interactive: self.content-width > self.width;
+            for drive[i] in root.drive-buttons : Rectangle {
+                x: i * 44px; y: 2px; width: 42px; height: 28px;
+                border-radius: 4px;
+                background: drive-hit.has-hover ? Theme.hover : Theme.bar;
+                clip: true;
+                if drive.free >= 0 : Rectangle {
+                    x: 0; y: 0; width: parent.width * drive.free; height: parent.height;
+                    background: Theme.accent.with-alpha(drive-hit.has-hover ? 0.45 : 0.28);
+                }
+                HorizontalLayout {
+                    padding-left: 3px; padding-right: 3px; spacing: 2px;
+                    alignment: center;
+                    if drive.icon.width > 0 : Rectangle {
+                        width: 16px;
+                        Image { y: (parent.height - 16px) / 2; width: 16px; height: 16px; source: drive.icon; }
+                    }
+                    Text { text: drive.letter; color: Theme.text; font-size: 12px; vertical-alignment: center; }
+                }
+                drive-hit := TouchArea {
+                    clicked => { root.drive-open(i); root.focus-pane(root.active-pane); }
+                    scroll-event(e) => {
+                        if !drive-strip.interactive { return reject; }
+                        drive-strip.content-x = clamp(drive-strip.content-x + e.delta-x + e.delta-y, drive-strip.width - drive-strip.content-width, 0px);
+                        return accept;
+                    }
+                }
+            }
         }
     }
     // Layouts: 2 panes side by side, 3 side by side or stacked, 4 in a 2x2 grid.
@@ -2301,6 +2346,7 @@ export component App inherits Window {
         search-links <=> root.settings-search-links;
         pane-drag-drop <=> root.settings-pane-drag-drop;
         intra-pane-move <=> root.settings-intra-pane-move;
+        drives-in-toolbar <=> root.settings-drives-in-toolbar;
         agent-cli <=> root.settings-agent-cli;
         agent-path <=> root.settings-agent-path;
         agent-detected: root.settings-agent-detected;
