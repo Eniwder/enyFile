@@ -4,6 +4,7 @@
 mod clipboard_tests;
 mod delete_diagnostics;
 use std::{
+    collections::HashSet,
     ffi::OsString,
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
@@ -692,13 +693,18 @@ fn finish(op: &IFileOperation) -> Result<bool, String> {
     }
 }
 
+struct DeleteProgress {
+    confirmed: Box<dyn Fn() + Send + Sync>,
+    selected: HashSet<PathBuf>,
+}
+
 /// Notes items the copy engine left out: an error the user skipped in its own dialog, which
 /// it does not count as aborting. The callback runs before each item is deleted: Windows asks
 /// its own confirmation first, so the first call means the user said yes.
 /// Thread safe, though the copy engine calls it on the thread running the operation:
 /// `implement` does not require it, so nothing would catch a call from another thread.
 #[windows::core::implement(IFileOperationProgressSink)]
-struct Missed(Arc<AtomicBool>, Option<Box<dyn Fn() + Send + Sync>>);
+struct Missed(Arc<AtomicBool>, Option<DeleteProgress>);
 impl Missed {
     fn note(&self, hr: HRESULT) -> windows::core::Result<()> {
         if hr.is_err() || hr == COPYENGINE_S_USER_IGNORED {
@@ -765,9 +771,14 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
     }
     fn PreDeleteItem(&self, _: u32, item: Item) -> windows::core::Result<()> {
         if let Some(deleting) = &self.1 {
-            deleting();
+            (deleting.confirmed)();
             if let Some(item) = item.as_ref() {
-                delete_diagnostics::inspect(&diagnostic_item_path(item), "before", false);
+                let path = diagnostic_item_path(item);
+                // Recursive deletion also calls this for descendants. Probe only the
+                // items added to the operation, and keep diagnostics for actual failures.
+                if deleting.selected.contains(Path::new(&path)) {
+                    delete_diagnostics::inspect(&path, "before", false);
+                }
             }
         }
         Ok(())
@@ -1258,8 +1269,12 @@ fn delete_inner(
             deleting();
         }
     };
+    let progress = DeleteProgress {
+        confirmed: Box::new(deleting),
+        selected: paths.iter().map(|path| shell_path(path)).collect(),
+    };
     let sink: IFileOperationProgressSink =
-        Missed(Arc::new(AtomicBool::new(false)), Some(Box::new(deleting))).into();
+        Missed(Arc::new(AtomicBool::new(false)), Some(progress)).into();
     unsafe {
         op.Advise(&sink).map_err(|e| e.to_string())?;
         for path in paths {

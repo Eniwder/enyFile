@@ -3466,6 +3466,10 @@ impl Controller {
         self.show_question();
     }
     fn delete(&mut self, p: usize, permanent: bool) {
+        // Wait for the current confirmation before opening another delete dialog.
+        if self.confirming > 0 {
+            return;
+        }
         let paths = self.selected_paths(p);
         if paths.is_empty() {
             self.message("項目が選択されていません");
@@ -3508,11 +3512,6 @@ impl Controller {
     }
     fn key(&mut self, p: usize, event: slint::language::KeyEvent) -> bool {
         use slint::platform::Key;
-        // Windows' confirmation takes a moment to appear: keys meant for it must not move the
-        // cursor away from what is being deleted.
-        if self.confirming > 0 {
-            return true;
-        }
         self.active(p);
         let data = self.data(p);
         let is = |k: Key| event.text == slint::SharedString::from(k);
