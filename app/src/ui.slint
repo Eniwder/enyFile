@@ -27,6 +27,7 @@ export global Theme {
     in-out property <color> error: #f07a6a;
     in-out property <color> folder-text: #e8e8e8;
     in-out property <color> drive-text: #64a8ee;
+    in-out property <color> drive-used-bg: #404444;
     in-out property <color> readonly-text: #d8c060;
     in-out property <color> hidden-text: #8a8a8a;
     in-out property <color> size-text: #c8c8c8;
@@ -47,7 +48,7 @@ export global Theme {
 // cells flagged by size-diff / time-diff / attr-diff.
 // `spoof`: the name holds characters that reorder or hide text (shown as marks, in red).
 export struct DropHit { pane: int, row: int, in-name: bool }
-export struct DriveButton { letter: string, icon: image, free: float }
+export struct DriveButton { letter: string, icon: image, used: float, name: string, capacity: string }
 export struct Row { transfer: int, compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, spoof: bool, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
 // Menu bar item: `checkable` shows a check column; a separator ignores the rest.
 export struct MenuItem { text: string, command: int, checkable: bool, checked: bool, separator: bool }
@@ -1604,6 +1605,9 @@ export component App inherits Window {
     in property <AskInfo> ask;
     in property <[BookmarkRow]> bookmarks;
     in property <[DriveButton]> drive-buttons;
+    property <int> drive-tip-index: -1;
+    property <length> drive-tip-x;
+    changed drive-buttons => { root.drive-tip-index = -1; }
     callback drive-open(int);
     in property <bool> bookmark-editing;
     in property <[BookmarkRow]> bookmark-draft;
@@ -1865,17 +1869,24 @@ export component App inherits Window {
         }
         if root.drive-buttons.length > 0 : drive-strip := Flickable {
             min-width: 0; horizontal-stretch: 1;
-            content-width: root.drive-buttons.length * 44px;
+            property <length> button-margin: 4px;
+            property <length> button-width: 42px;
+            property <length> slot-width: self.button-width + 2 * self.button-margin;
+            content-width: root.drive-buttons.length * self.slot-width;
             content-height: self.height;
             interactive: self.content-width > self.width;
             for drive[i] in root.drive-buttons : Rectangle {
-                x: i * 44px; y: 2px; width: 42px; height: 28px;
+                x: i * drive-strip.slot-width + drive-strip.button-margin;
+                y: drive-strip.button-margin;
+                width: drive-strip.button-width;
+                height: drive-strip.height - 2 * drive-strip.button-margin;
                 border-radius: 4px;
                 background: drive-hit.has-hover ? Theme.hover : Theme.bar;
                 clip: true;
-                if drive.free >= 0 : Rectangle {
-                    x: 0; y: 0; width: parent.width * drive.free; height: parent.height;
-                    background: Theme.accent.with-alpha(drive-hit.has-hover ? 0.45 : 0.28);
+                if drive.used >= 0 : Rectangle {
+                    x: 0; y: parent.height - self.height;
+                    width: parent.width; height: parent.height * drive.used;
+                    background: drive-hit.has-hover ? Theme.drive-used-bg.brighter(0.08) : Theme.drive-used-bg;
                 }
                 HorizontalLayout {
                     padding-left: 3px; padding-right: 3px; spacing: 2px;
@@ -1886,10 +1897,26 @@ export component App inherits Window {
                     }
                     Text { text: drive.letter; color: Theme.text; font-size: 12px; vertical-alignment: center; }
                 }
+                Timer {
+                    interval: 700ms;
+                    running: drive-hit.has-hover && !drive-hit.pressed && root.drive-tip-index != i;
+                    triggered => {
+                        root.drive-tip-x = drive-hit.absolute-position.x;
+                        root.drive-tip-index = i;
+                    }
+                }
                 drive-hit := TouchArea {
-                    clicked => { root.drive-open(i); root.focus-pane(root.active-pane); }
+                    changed has-hover => {
+                        if !self.has-hover && root.drive-tip-index == i { root.drive-tip-index = -1; }
+                    }
+                    clicked => {
+                        root.drive-tip-index = -1;
+                        root.drive-open(i);
+                        root.focus-pane(root.active-pane);
+                    }
                     scroll-event(e) => {
                         if !drive-strip.interactive { return reject; }
+                        root.drive-tip-index = -1;
                         drive-strip.content-x = clamp(drive-strip.content-x + e.delta-x + e.delta-y, drive-strip.width - drive-strip.content-width, 0px);
                         return accept;
                     }
@@ -2097,6 +2124,23 @@ export component App inherits Window {
         y: p0.tip-shown ? p0.tip-y : p1.tip-shown ? p1.tip-y : p2.tip-shown ? p2.tip-y : p3.tip-y;
         background: Theme.dialog; border-width: 1px; border-color: Theme.border-active;
         tip-label := Text { x: 6px; height: parent.height; text: parent.text; color: Theme.text; vertical-alignment: center; }
+    }
+    if root.drive-tip-index >= 0 && root.drive-tip-index < root.drive-buttons.length : drive-tip := Rectangle {
+        property <DriveButton> drive: root.drive-buttons[root.drive-tip-index];
+        width: min(root.width, details.preferred-width);
+        height: details.preferred-height;
+        x: clamp(root.drive-tip-x, 0px, root.width - self.width);
+        y: root.area-y;
+        border-width: 1px;
+        border-radius: 4px;
+        border-color: Theme.border-active;
+        background: Theme.dialog;
+        details := VerticalLayout {
+            padding: 8px;
+            spacing: 3px;
+            Text { text: drive-tip.drive.name; color: Theme.text; font-weight: 700; overflow: elide; }
+            Text { text: drive-tip.drive.capacity; color: Theme.text; overflow: elide; }
+        }
     }
     // Find bar: Ctrl+F moves the cursor while typing (Ctrl+G next, Enter / Esc end),
     // Ctrl+Shift+F filters on Enter (Esc cancels).

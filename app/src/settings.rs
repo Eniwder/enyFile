@@ -140,6 +140,7 @@ impl Controller {
                 "text" => theme.set_text(color),
                 "folder-text" => theme.set_folder_text(color),
                 "drive-text" => theme.set_drive_text(color),
+                "drive-used-bg" => theme.set_drive_used_bg(color),
                 "readonly-text" => theme.set_readonly_text(color),
                 "hidden-text" => theme.set_hidden_text(color),
                 "size-text" => theme.set_size_text(color),

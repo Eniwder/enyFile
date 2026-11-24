@@ -8,6 +8,7 @@ pub const BASE: &[(&str, &str, &str)] = &[
     ("text", "前景", "#dcdcdc"),
     ("folder-text", "フォルダ", "#e8e8e8"),
     ("drive-text", "ドライブ", "#64a8ee"),
+    ("drive-used-bg", "ドライブボタンの使用容量", "#404444"),
     ("readonly-text", "読み取り専用属性", "#d8c060"),
     ("hidden-text", "隠し属性", "#8a8a8a"),
     ("size-text", "サイズ", "#c8c8c8"),

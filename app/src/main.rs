@@ -3165,14 +3165,38 @@ impl Controller {
                     .map(|drive| DriveButton {
                         letter: drive_of(&drive.root).unwrap_or_default().into(),
                         icon: rows::icon_image(&drive.icon, &drive.icon),
-                        free: if drive.total == 0 {
+                        name: listing::visible(&drive.name).as_ref().into(),
+                        capacity: if drive.total == 0 {
+                            "容量情報を取得できません".into()
+                        } else {
+                            format!(
+                                "空き {} / 合計 {}（使用 {}）",
+                                listing::format_size(drive.free),
+                                listing::format_size(drive.total),
+                                listing::format_size(drive.total.saturating_sub(drive.free)),
+                            )
+                            .into()
+                        },
+                        used: if drive.total == 0 {
                             -1.0
                         } else {
-                            (drive.free as f32 / drive.total as f32).clamp(0.0, 1.0)
+                            drive.total.saturating_sub(drive.free) as f32 / drive.total as f32
                         },
                     })
                     .collect();
-                ui.set_drive_buttons(ModelRc::new(slint::VecModel::from(buttons)));
+                let model = ui.get_drive_buttons();
+                if model.row_count() == buttons.len()
+                    && model
+                        .iter()
+                        .zip(&buttons)
+                        .all(|(old, new)| old.letter == new.letter)
+                {
+                    for (i, button) in buttons.into_iter().enumerate() {
+                        model.set_row_data(i, button);
+                    }
+                } else {
+                    ui.set_drive_buttons(ModelRc::new(slint::VecModel::from(buttons)));
+                }
             }
             Arc::new(Vec::new())
         } else {
