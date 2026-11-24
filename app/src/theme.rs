@@ -89,6 +89,22 @@ pub fn hex(color: slint::Color) -> String {
         color.blue()
     )
 }
+pub fn picker_color(
+    color: slint::Color,
+    hue: f32,
+    saturation: f32,
+    brightness: f32,
+) -> crate::PickerColor {
+    crate::PickerColor {
+        hue,
+        saturation,
+        brightness,
+        value: color,
+        hex: hex(color).into(),
+        hue_color: slint::Color::from_hsva(hue, 1.0, 1.0, 1.0),
+    }
+}
+
 /// "zip; RAR" -> ["zip", "rar"]
 pub fn split_extensions(text: &str) -> Vec<String> {
     text.split([';', ',', ' '])

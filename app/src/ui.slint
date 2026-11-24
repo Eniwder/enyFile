@@ -981,23 +981,39 @@ component BookmarkDialog inherits Rectangle {
     }
 }
 
-// Color editor used by the カラー tab: RGB sliders, #RRGGBB, and extensions for rules.
+export struct PickerColor {
+    hue: float,
+    saturation: float,
+    brightness: float,
+    value: color,
+    hex: string,
+    hue-color: color,
+}
+
 component ColorEditor inherits Rectangle {
     in property <string> title;
     in property <bool> with-extensions;
-    in-out property <int> red;
-    in-out property <int> green;
-    in-out property <int> blue;
     in-out property <string> extensions;
+    out property <color> value: root.selected.value;
     callback done(bool);
-    property <color> value: rgb(root.red, root.green, root.blue);
+    pure callback read-color(string) -> PickerColor;
+    pure callback make-color(float, float, float) -> PickerColor;
+    property <PickerColor> selected;
+    property <bool> valid: true;
     property <[string]> digits: ["0","1","2","3","4","5","6","7","8","9","a","b","c","d","e","f"];
+
     function hex2(v: int) -> string { return root.digits[floor(v / 16)] + root.digits[mod(v, 16)]; }
-    // Column widths at the chosen font size, the same on every row (the value never shifts the slider).
-    property <length> letter-w: max(14px, letter-probe.preferred-width);
-    property <length> value-w: max(28px, value-probe.preferred-width);
-    letter-probe := Text { text: "G"; visible: false; }
-    value-probe := Text { text: "255"; visible: false; }
+    public function open(r: int, g: int, b: int) {
+        root.selected = root.read-color("#" + root.hex2(r) + root.hex2(g) + root.hex2(b));
+        hex-input.text = root.selected.hex;
+        root.valid = true;
+    }
+    function select(hue: float, saturation: float, brightness: float) {
+        root.selected = root.make-color(hue, saturation, brightness);
+        hex-input.text = root.selected.hex;
+        root.valid = true;
+    }
+
     background: #00000066;
     TouchArea { }
     DialogFrame {
@@ -1009,20 +1025,64 @@ component ColorEditor inherits Rectangle {
             Text { text: "拡張子"; min-width: 50px; horizontal-stretch: 0; color: Theme.text; vertical-alignment: center; }
             LineEdit { text <=> root.extensions; placeholder-text: "ZIP;RAR;7Z"; }
         }
-        HorizontalLayout {
-            spacing: 12px;
-            Rectangle { width: 64px; height: 64px; background: root.value; border-width: 1px; border-color: Theme.border; }
-            VerticalLayout {
-                spacing: 4px;
-                HorizontalLayout { spacing: 6px; Text { text: "R"; width: root.letter-w; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.red; changed(v) => { root.red = round(v); } } Text { text: root.red; width: root.value-w; color: Theme.dim; vertical-alignment: center; } }
-                HorizontalLayout { spacing: 6px; Text { text: "G"; width: root.letter-w; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.green; changed(v) => { root.green = round(v); } } Text { text: root.green; width: root.value-w; color: Theme.dim; vertical-alignment: center; } }
-                HorizontalLayout { spacing: 6px; Text { text: "B"; width: root.letter-w; color: Theme.text; vertical-alignment: center; } Slider { minimum: 0; maximum: 255; value: root.blue; changed(v) => { root.blue = round(v); } } Text { text: root.blue; width: root.value-w; color: Theme.dim; vertical-alignment: center; } }
+        palette := Rectangle {
+            height: 112px;
+            background: root.selected.hue-color;
+            clip: true;
+            Rectangle { background: @linear-gradient(90deg, #fff, #fff0); }
+            Rectangle { background: @linear-gradient(180deg, #0000, #000); }
+            Rectangle {
+                width: 12px; height: 12px; border-radius: 6px;
+                x: root.selected.saturation * parent.width - self.width / 2;
+                y: (1 - root.selected.brightness) * parent.height - self.height / 2;
+                border-width: 2px; border-color: white;
+                Rectangle { x: 2px; y: 2px; width: 8px; height: 8px; border-radius: 4px; border-width: 1px; border-color: black; }
+            }
+            TouchArea {
+                function pick() {
+                    root.select(root.selected.hue, clamp(self.mouse-x / self.width, 0, 1),
+                        1 - clamp(self.mouse-y / self.height, 0, 1));
+                }
+                pointer-event(e) => { if e.button == PointerEventButton.left && e.kind == PointerEventKind.down { self.pick(); } }
+                moved => { if self.pressed { self.pick(); } }
             }
         }
-        Text { text: "#" + root.hex2(root.red) + root.hex2(root.green) + root.hex2(root.blue); color: root.value; font-size: 14px; }
+        Rectangle {
+            height: 18px;
+            background: @linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+            clip: true;
+            Rectangle {
+                width: 6px; height: parent.height;
+                x: clamp(root.selected.hue / 360 * parent.width - self.width / 2, 0px, parent.width - self.width);
+                border-width: 2px; border-color: white;
+                Rectangle { x: 2px; width: 2px; background: black; }
+            }
+            TouchArea {
+                function pick() {
+                    root.select(clamp(self.mouse-x / self.width, 0, 1) * 360,
+                        root.selected.saturation, root.selected.brightness);
+                }
+                pointer-event(e) => { if e.button == PointerEventButton.left && e.kind == PointerEventKind.down { self.pick(); } }
+                moved => { if self.pressed { self.pick(); } }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle { width: 32px; height: 28px; background: root.value; border-width: 1px; border-color: Theme.border; }
+            Text { text: "HEX"; color: Theme.text; vertical-alignment: center; horizontal-stretch: 0; }
+            hex-input := LineEdit {
+                placeholder-text: "#RRGGBB";
+                edited(text) => {
+                    let color = root.read-color(text);
+                    root.valid = color.hex != "";
+                    if root.valid { root.selected = color; }
+                }
+            }
+        }
+        if !root.valid : Text { text: "#RRGGBB 形式で入力してください。"; color: Theme.error; }
         HorizontalLayout {
             spacing: 6px; alignment: end;
-            DialogButton { text: "OK"; primary: true; clicked => { root.done(true); } }
+            DialogButton { text: "OK"; primary: true; enabled: root.valid; clicked => { root.done(true); } }
             DialogButton { text: "キャンセル"; clicked => { root.done(false); } }
         }
     }
@@ -1182,6 +1242,8 @@ component SettingsDialog inherits Rectangle {
     callback browse(int);
     callback reset(int);
     callback done(bool);
+    pure callback read-color(string) -> PickerColor;
+    pure callback make-color(float, float, float) -> PickerColor;
     callback color-base(int, color);
     callback color-ext(int, string, color);
     callback color-ext-delete(int);
@@ -1199,9 +1261,7 @@ component SettingsDialog inherits Rectangle {
     function edit(kind: int, index: int, r: int, g: int, b: int, exts: string) {
         root.edit-kind = kind;
         root.edit-index = index;
-        editor.red = r;
-        editor.green = g;
-        editor.blue = b;
+        editor.open(r, g, b);
         editor.extensions = exts;
         root.editing = true;
     }
@@ -1542,13 +1602,15 @@ component SettingsDialog inherits Rectangle {
         visible: root.editing;
         title: root.edit-kind == 0 ? "基本カラーの変更" : root.edit-index < 0 ? "拡張子の色分けを追加" : "拡張子の色分けを編集";
         with-extensions: root.edit-kind == 1;
+        read-color(text) => { root.read-color(text) }
+        make-color(h, s, v) => { root.make-color(h, s, v) }
         done(ok) => {
             root.editing = false;
             if ok {
                 if root.edit-kind == 0 {
-                    root.color-base(root.edit-index, rgb(self.red, self.green, self.blue));
+                    root.color-base(root.edit-index, self.value);
                 } else {
-                    root.color-ext(root.edit-index < 0 ? 100000 : root.edit-index, self.extensions, rgb(self.red, self.green, self.blue));
+                    root.color-ext(root.edit-index < 0 ? 100000 : root.edit-index, self.extensions, self.value);
                 }
             }
             keys.focus();
@@ -1684,6 +1746,8 @@ export component App inherits Window {
     out property <bool> agent-following: agent-panel.following;
     out property <length> agent-hidden: agent-panel.hidden;
     public function focus-agent() { agent-panel.focus-input(); }
+    pure callback read-color(string) -> PickerColor;
+    pure callback make-color(float, float, float) -> PickerColor;
     callback color-base(int, color);
     callback color-ext(int, string, color);
     callback color-ext-delete(int);
@@ -2401,6 +2465,8 @@ export component App inherits Window {
         agent-folder-add => { root.agent-folder-add(); }
         agent-folder-remove(i) => { root.agent-folder-remove(i); }
         agent-memory-open => { root.agent-memory-open(); }
+        read-color(text) => { root.read-color(text) }
+        make-color(h, s, v) => { root.make-color(h, s, v) }
         color-base(i, c) => { root.color-base(i, c); }
         color-ext(i, e, c) => { root.color-ext(i, e, c); }
         color-ext-delete(i) => { root.color-ext-delete(i); }

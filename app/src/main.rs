@@ -34,7 +34,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::HWND;
-slint::slint! { export { App, DropHit, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine, PropRow, DriveButton } from "src/ui.slint"; }
+slint::slint! { export { App, DropHit, Row, AskInfo, PaneInfo, BookmarkRow, PlaceRow, ColorRow, ExtRow, Theme, Columns, AgentLine, PropRow, DriveButton, PickerColor } from "src/ui.slint"; }
 
 #[derive(Clone)]
 struct Saved {
@@ -4513,6 +4513,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let c = controller.clone();
         ui.on_font_set(move |family, size| c.borrow_mut().font_set(family.as_str(), size as f32));
     }
+    ui.on_read_color(|text| {
+        theme::parse(&text).map_or_else(PickerColor::default, |color| {
+            let hsv = color.to_hsva();
+            theme::picker_color(color, hsv.hue, hsv.saturation, hsv.value)
+        })
+    });
+    ui.on_make_color(|h, s, v| theme::picker_color(slint::Color::from_hsva(h, s, v, 1.0), h, s, v));
     controller.borrow().apply_appearance();
     {
         let c = controller.clone();
