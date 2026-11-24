@@ -511,7 +511,7 @@ component Pane inherits Rectangle {
     callback blank();
     callback blank-menu(bool);
     callback page-resized(int);
-    callback page-step(bool);
+    callback page-step(bool, bool);
     callback copy-path();
     callback alt-released();
     property <length> menu-x;
@@ -636,8 +636,8 @@ component Pane inherits Rectangle {
         scroll-event(e) => {
             // Collect small touchpad steps; one wheel notch turns one page.
             root.wheel += e.delta-y;
-            if root.wheel >= 30px { root.wheel = 0; root.page-step(false); }
-            if root.wheel <= -30px { root.wheel = 0; root.page-step(true); }
+            if root.wheel >= 30px { root.wheel = 0; root.page-step(false, e.modifiers.control); }
+            if root.wheel <= -30px { root.wheel = 0; root.page-step(true, e.modifiers.control); }
             return accept;
         }
         for row[index] in root.rows : item := Rectangle {
@@ -1771,7 +1771,7 @@ export component App inherits Window {
     callback blank-menu(int, bool);
     callback page-resized(int, int);
     callback copy-path(int);
-    callback page-step(int, bool);
+    callback page-step(int, bool, bool);
     callback menu-command(int);
     callback name-validate(string) -> string;
     callback name-done(bool, string);
@@ -2026,7 +2026,7 @@ export component App inherits Window {
         navigate(p) => { root.navigate(0, p); } command(c) => { root.command(0, c); } crumb(i) => { root.crumb(0, i); }
         pointer(i, c, s, k) => { root.pointer(0, i, c, s, k); } key-event(e) => { return root.key-event(0, e); }
         blank => { root.blank(0); } blank-menu(s) => { root.blank-menu(0, s); } alt-released => { root.alt-released(); }
-        page-resized(n) => { root.page-resized(0, n); } copy-path => { root.copy-path(0); } page-step(f) => { root.page-step(0, f); }
+        page-resized(n) => { root.page-resized(0, n); } copy-path => { root.copy-path(0); } page-step(f, c) => { root.page-step(0, f, c); }
     }
     p1 := Pane {
         drop-active: root.drop-pane == 1; drop-row: root.drop-row;
@@ -2040,7 +2040,7 @@ export component App inherits Window {
         navigate(p) => { root.navigate(1, p); } command(c) => { root.command(1, c); } crumb(i) => { root.crumb(1, i); }
         pointer(i, c, s, k) => { root.pointer(1, i, c, s, k); } key-event(e) => { return root.key-event(1, e); }
         blank => { root.blank(1); } blank-menu(s) => { root.blank-menu(1, s); } alt-released => { root.alt-released(); }
-        page-resized(n) => { root.page-resized(1, n); } copy-path => { root.copy-path(1); } page-step(f) => { root.page-step(1, f); }
+        page-resized(n) => { root.page-resized(1, n); } copy-path => { root.copy-path(1); } page-step(f, c) => { root.page-step(1, f, c); }
     }
     p2 := Pane {
         drop-active: root.drop-pane == 2; drop-row: root.drop-row;
@@ -2055,7 +2055,7 @@ export component App inherits Window {
         navigate(p) => { root.navigate(2, p); } command(c) => { root.command(2, c); } crumb(i) => { root.crumb(2, i); }
         pointer(i, c, s, k) => { root.pointer(2, i, c, s, k); } key-event(e) => { return root.key-event(2, e); }
         blank => { root.blank(2); } blank-menu(s) => { root.blank-menu(2, s); } alt-released => { root.alt-released(); }
-        page-resized(n) => { root.page-resized(2, n); } copy-path => { root.copy-path(2); } page-step(f) => { root.page-step(2, f); }
+        page-resized(n) => { root.page-resized(2, n); } copy-path => { root.copy-path(2); } page-step(f, c) => { root.page-step(2, f, c); }
     }
     p3 := Pane {
         drop-active: root.drop-pane == 3; drop-row: root.drop-row;
@@ -2068,7 +2068,7 @@ export component App inherits Window {
         navigate(p) => { root.navigate(3, p); } command(c) => { root.command(3, c); } crumb(i) => { root.crumb(3, i); }
         pointer(i, c, s, k) => { root.pointer(3, i, c, s, k); } key-event(e) => { return root.key-event(3, e); }
         blank => { root.blank(3); } blank-menu(s) => { root.blank-menu(3, s); } alt-released => { root.alt-released(); }
-        page-resized(n) => { root.page-resized(3, n); } copy-path => { root.copy-path(3); } page-step(f) => { root.page-step(3, f); }
+        page-resized(n) => { root.page-resized(3, n); } copy-path => { root.copy-path(3); } page-step(f, c) => { root.page-step(3, f, c); }
     }
     public function hit-drop(x: length, y: length) -> DropHit {
         if x >= p0.x + 1px && x < p0.x + p0.width - 1px && y >= p0.y + 50px && y < p0.y + p0.height - 1px { return { pane: 0, row: floor((y - p0.y - 50px) / root.row-h), in-name: x - p0.x < p0.drop-name-end }; }

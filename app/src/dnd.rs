@@ -199,7 +199,7 @@ pub(super) fn wheel(ui: &App, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         // resolves the newly visible row before allowing any operation.
         feedback(ui, -1, -1);
         for _ in 0..(total / 120).unsigned_abs() {
-            c.page_step(pane as usize, total < 0);
+            c.page_step(pane as usize, total < 0, false);
         }
     });
     request_frame(ui);

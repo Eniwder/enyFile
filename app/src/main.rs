@@ -1056,7 +1056,7 @@ impl Controller {
     }
     /// Mouse wheel: one page per notch, the cursor moves along.
     /// On the first or last page there is no page to turn to, and the cursor stays put.
-    fn page_step(&mut self, p: usize, forward: bool) {
+    fn page_step(&mut self, p: usize, forward: bool, ctrl: bool) {
         self.active(p);
         let model = &self.panes[p].model;
         let (page, rows, cursor) = (
@@ -1077,6 +1077,7 @@ impl Controller {
         };
         let mut event = slint::language::KeyEvent::default();
         event.text = key.into();
+        event.modifiers.control = ctrl;
         self.key(p, event);
     }
     /// Breadcrumb segments ("D:", "Game", ...) and the ancestor each one opens.
@@ -4667,7 +4668,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
-        ui.on_page_step(move |p, forward| c.borrow_mut().page_step(p as usize, forward));
+        ui.on_page_step(move |p, forward, ctrl| {
+            c.borrow_mut().page_step(p as usize, forward, ctrl)
+        });
     }
     {
         let c = controller.clone();
