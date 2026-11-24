@@ -1530,7 +1530,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(c.borrow().compare.as_ref().is_some_and(|k| k.panes == [0, 1]), "Ctrl+Shift+D compares the two panes")?;
                 }
                 61 => {
-                    if !idle(&c) || c.borrow().panes[0].model.compare.borrow().is_none() {
+                    if !idle(&c) || c.borrow().panes[0].model.compare.borrow().is_none() || c.borrow().compare.as_ref().is_some_and(|k| k.pending > 0) {
                         return Ok(false);
                     }
                     expect(compared(&c, 0) == ["dir", "", "old.txt", "same.txt", "size.txt"], &format!("left rows: {:?}", compared(&c, 0)))?;
@@ -1556,7 +1556,7 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     std::fs::File::options().write(true).open(&made).and_then(|f| f.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000))).map_err(|e| e.to_string())?;
                 }
                 62 => {
-                    if !idle(&c) || c.borrow().compare.as_ref().is_none_or(|k| k.counts[0] != 0) {
+                    if !idle(&c) || c.borrow().compare.as_ref().is_none_or(|k| k.counts[0] != 0 || k.pending > 0) {
                         return Ok(false);
                     }
                     expect(compared(&c, 0) == ["", "size.txt"], &format!("old.txt now on both sides and the same: {:?}", compared(&c, 0)))?;

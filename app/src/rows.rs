@@ -311,6 +311,7 @@ impl RowsModel {
             current: self.special.get().is_none() && selection.current == Some(index),
             compare: diff.is_some(),
             diff: diff.map_or(0, |d| d.kind),
+            diff_pending: diff.is_some_and(|d| d.pending),
             size_diff: diff.is_some_and(|d| d.size),
             time_diff: diff.is_some_and(|d| d.time),
             attr_diff: diff.is_some_and(|d| d.attr),

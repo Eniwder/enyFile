@@ -49,7 +49,7 @@ export global Theme {
 // `spoof`: the name holds characters that reorder or hide text (shown as marks, in red).
 export struct DropHit { pane: int, row: int, in-name: bool }
 export struct DriveButton { letter: string, icon: image, used: float, name: string, capacity: string }
-export struct Row { transfer: int, compare: bool, gap: bool, diff: int, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, spoof: bool, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
+export struct Row { transfer: int, compare: bool, gap: bool, diff: int, diff-pending: bool, size-diff: bool, time-diff: bool, attr-diff: bool, location: string, name: string, ext: string, spoof: bool, size: string, date: string, time: string, attr: string, kind: string, directory: bool, parent: bool, selected: bool, current: bool, hidden: bool, drive: bool, used: float, icon: image, readonly: bool, tinted: bool, tint: color }
 // Menu bar item: `checkable` shows a check column; a separator ignores the rest.
 export struct MenuItem { text: string, command: int, checkable: bool, checked: bool, separator: bool }
 export struct Columns { size: bool, date: bool, time: bool, attr: bool, kind: bool }
@@ -667,10 +667,10 @@ component Pane inherits Rectangle {
                 // Keep the difference marker visible even on the selected row.
                 if row.compare : Rectangle {
                     width: max(8px, diff-mark.preferred-width) + 4px;
-                    background: row.diff == 3 ? Theme.diff-change-bg : transparent;
+                    background: row.diff == 3 && !row.diff-pending ? Theme.diff-change-bg : transparent;
                     Text {
-                        text: row.diff == 1 ? "+" : row.diff == 2 ? "-" : row.diff == 3 ? "≠" : "";
-                        color: row.diff == 3 ? Theme.text : item.fg;
+                        text: row.diff-pending ? "…" : row.diff == 1 ? "+" : row.diff == 2 ? "-" : row.diff == 3 ? "≠" : "";
+                        color: row.diff == 3 && !row.diff-pending ? Theme.text : item.fg;
                         font-weight: 700; horizontal-alignment: center; vertical-alignment: center;
                     }
                 }

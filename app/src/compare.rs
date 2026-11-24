@@ -3,7 +3,7 @@
 use crate::listing::{self, Entry};
 use std::{
     cmp::Ordering,
-    collections::HashSet,
+    collections::HashMap,
     os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{
@@ -14,21 +14,20 @@ use std::{
 };
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
-pub type FolderChanges = HashSet<Arc<PathBuf>>;
+const FILE_DIFF_ATTRIBUTES: u32 = 0x27;
+#[derive(Clone, Copy)]
+pub enum FolderState {
+    Pending,
+    Changed,
+}
 
-/// Runs on the Diff worker. Only matched, ordinary folders get a child listing.
-pub fn folder_changes(
-    old: &[Entry],
-    new: &[Entry],
-    show_hidden: bool,
-    stop: &AtomicBool,
-) -> FolderChanges {
-    let mut changes = FolderChanges::new();
+pub type FolderStates = HashMap<Arc<PathBuf>, FolderState>;
+
+/// Only matched, ordinary folders get a child listing.
+pub fn folder_pairs(old: &[Entry], new: &[Entry]) -> Vec<[Arc<PathBuf>; 2]> {
+    let mut pairs = Vec::new();
     let mut new = new.iter().peekable();
-    for a in old {
-        if stop.load(AtomicOrdering::Relaxed) {
-            break;
-        }
+    for a in old.iter().take_while(|entry| entry.directory) {
         while new
             .peek()
             .is_some_and(|b| listing::name_order(a, b) == Ordering::Greater)
@@ -39,18 +38,14 @@ pub fn folder_changes(
         else {
             continue;
         };
-        if a.directory
-            && a.path != b.path
-            && (a.attributes | b.attributes) & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0
-            && children_differ(&a.path, &b.path, show_hidden, stop)
-        {
-            changes.insert(a.path.clone());
+        if a.path != b.path && (a.attributes | b.attributes) & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 {
+            pairs.push([a.path.clone(), b.path.clone()]);
         }
     }
-    changes
+    pairs
 }
 
-fn children_differ(old: &Path, new: &Path, show_hidden: bool, stop: &AtomicBool) -> bool {
+pub fn children_differ(old: &Path, new: &Path, show_hidden: bool, stop: &AtomicBool) -> bool {
     let children = |dir: &Path| {
         // Check again at the point of use, in case a folder was replaced after listing.
         let attributes = std::fs::symlink_metadata(dir).ok()?.file_attributes();
@@ -77,10 +72,14 @@ fn children_differ(old: &Path, new: &Path, show_hidden: bool, stop: &AtomicBool)
             return true;
         }
         for ((an, a), (bn, b)) in a.into_iter().zip(b) {
+            let attr_diff = a.attributes ^ b.attributes;
             if an != bn
                 || a.directory != b.directory
-                || (a.attributes ^ b.attributes) & (0x27 | FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
-                || (!a.directory && (a.size != b.size || time_differs(a.modified, b.modified)))
+                || attr_diff & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+                || (!a.directory
+                    && (a.size != b.size
+                        || time_differs(a.modified, b.modified)
+                        || attr_diff & FILE_DIFF_ATTRIBUTES != 0))
             {
                 return true;
             }
@@ -97,6 +96,7 @@ fn children_differ(old: &Path, new: &Path, show_hidden: bool, stop: &AtomicBool)
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Diff {
     pub kind: i32,
+    pub pending: bool,
     pub size: bool,
     pub time: bool,
     pub attr: bool,
@@ -110,6 +110,7 @@ pub struct Aligned {
     pub rows: [Vec<usize>; 2],
     /// Rows only on the old side, only on the new side, differing, the same.
     pub counts: [usize; 4],
+    pub pending: usize,
 }
 impl Aligned {
     pub fn row_of(&self, side: usize, entry: usize) -> Option<usize> {
@@ -123,7 +124,7 @@ pub fn align(
     old: &[Entry],
     new: &[Entry],
     only_diff: bool,
-    folders: &FolderChanges,
+    folders: &FolderStates,
 ) -> (Aligned, [Vec<Entry>; 2]) {
     let mut aligned = Aligned::default();
     let mut shown: [Vec<Entry>; 2] = [Vec::new(), Vec::new()];
@@ -135,8 +136,10 @@ pub fn align(
                 i += 1;
                 j += 1;
                 let mut diff = differ(a, b);
-                if folders.contains(&a.path) {
-                    diff.kind = 3;
+                match folders.get(&a.path) {
+                    Some(FolderState::Pending) => diff.pending = true,
+                    Some(FolderState::Changed) => diff.kind = 3,
+                    None => {}
                 }
                 ([Some(a), Some(b)], diff)
             }
@@ -178,8 +181,12 @@ pub fn align(
             3 => 2,
             _ => 3,
         };
-        aligned.counts[count] += 1;
-        if only_diff && diff.kind == 0 {
+        if diff.pending {
+            aligned.pending += 1;
+        } else {
+            aligned.counts[count] += 1;
+        }
+        if only_diff && diff.kind == 0 && !diff.pending {
             continue;
         }
         let row = aligned.pairs.len();
@@ -197,17 +204,21 @@ pub fn align(
     (aligned, shown)
 }
 
-/// Size (files only), modified time (2 s apart counts as the same: FAT keeps even seconds)
-/// and the A R H S attributes.
+/// File size, modified time (FAT keeps even seconds), and A R H S attributes.
+/// Matched folders are classified by their contents check.
 fn differ(a: &Entry, b: &Entry) -> Diff {
-    let size = !a.directory && a.size != b.size;
+    if a.directory {
+        return Diff::default();
+    }
+    let size = a.size != b.size;
     let time = time_differs(a.modified, b.modified);
-    let attr = (a.attributes ^ b.attributes) & 0x27 != 0;
+    let attr = (a.attributes ^ b.attributes) & FILE_DIFF_ATTRIBUTES != 0;
     Diff {
         kind: if size || time || attr { 3 } else { 0 },
         size,
         time,
         attr,
+        pending: false,
     }
 }
 
@@ -220,7 +231,7 @@ mod tests {
     use super::*;
     use std::{path::PathBuf, sync::Arc, time::UNIX_EPOCH};
     fn align(old: &[Entry], new: &[Entry], only_diff: bool) -> (Aligned, [Vec<Entry>; 2]) {
-        super::align(old, new, only_diff, &FolderChanges::new())
+        super::align(old, new, only_diff, &FolderStates::new())
     }
 
     fn entry(name: &str, directory: bool, size: u64, secs: u64) -> Entry {
@@ -241,6 +252,36 @@ mod tests {
             icon: "".into(),
         }
     }
+    fn folder_changes(
+        old: &[Entry],
+        new: &[Entry],
+        show_hidden: bool,
+        stop: &AtomicBool,
+    ) -> FolderStates {
+        folder_pairs(old, new)
+            .into_iter()
+            .filter(|[a, b]| children_differ(a, b, show_hidden, stop))
+            .map(|[a, _]| (a, FolderState::Changed))
+            .collect()
+    }
+
+    #[test]
+    fn pending_folders_stay_visible_until_resolved() {
+        let mut old = [entry("folder", true, 0, 0)];
+        let new = [entry("folder", true, 0, 0)];
+        old[0].path = Arc::new(PathBuf::from("old/folder"));
+        let [[a, _]]: [[Arc<PathBuf>; 2]; 1] = folder_pairs(&old, &new).try_into().unwrap();
+        let mut states = FolderStates::from([(a.clone(), FolderState::Pending)]);
+        let (aligned, _) = super::align(&old, &new, true, &states);
+        assert!(aligned.diffs[0].pending);
+        assert_eq!(aligned.pending, 1);
+        assert_eq!(aligned.counts, [0; 4]);
+        states.remove(&a);
+        let (aligned, _) = super::align(&old, &new, true, &states);
+        assert!(aligned.pairs.is_empty());
+        assert_eq!(aligned.counts, [0, 0, 0, 1]);
+    }
+
     #[test]
     fn folder_diff_checks_nested_metadata_and_skips_reparse_points() {
         let root = std::env::temp_dir().join(format!("enyfile-folder-diff-{}", std::process::id()));
@@ -315,6 +356,7 @@ mod tests {
             aligned.diffs[3],
             Diff {
                 kind: 3,
+                pending: false,
                 size: true,
                 time: false,
                 attr: false
@@ -355,7 +397,7 @@ mod tests {
             with(entry("n", false, 1, 100), 0x20),
         ];
         let new = [
-            entry("dir", true, 4096, 100),
+            with(entry("dir", true, 4096, 103), 0x21),
             entry("t2", false, 1, 98),
             entry("t3", false, 1, 103),
             with(entry("r", false, 1, 100), 0x21),
@@ -369,7 +411,7 @@ mod tests {
                 .position(|p| shown[0][p[0].unwrap()].name == name)
                 .unwrap()]
         };
-        assert_eq!(diff("dir").kind, 0, "folder sizes are not compared");
+        assert_eq!(diff("dir"), Diff::default(), "folder metadata is ignored");
         assert_eq!(
             diff("t2").kind,
             0,
@@ -379,6 +421,7 @@ mod tests {
             diff("t3"),
             Diff {
                 kind: 3,
+                pending: false,
                 size: false,
                 time: true,
                 attr: false
@@ -388,6 +431,7 @@ mod tests {
             diff("r"),
             Diff {
                 kind: 3,
+                pending: false,
                 size: false,
                 time: false,
                 attr: true

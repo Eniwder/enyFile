@@ -134,7 +134,6 @@ enum Reply {
     PropsShow(u64),
     Hash(u64, props::Hashing),
     Usage(u64, props::Measuring),
-    Compared(Arc<AtomicBool>, [Arc<Snapshot>; 2], compare::FolderChanges),
 }
 /// `Reply::Picked` for 設定 > エージェント's folder list rather than a place.
 const AGENT_FOLDER: usize = 100;
@@ -457,9 +456,22 @@ struct Comparing {
     base: [Arc<Snapshot>; 2],
     /// Sort order before the comparison, which shows both sides by name.
     sort: [(usize, bool); 2],
-    checking: Option<Arc<AtomicBool>>,
-    folder_changes: Option<compare::FolderChanges>,
+    checking: Option<FolderCheck>,
+    folder_states: Option<compare::FolderStates>,
     counts: [usize; 4],
+    pending: usize,
+}
+
+struct FolderCheck {
+    stop: Arc<AtomicBool>,
+    results: mpsc::Receiver<(Arc<PathBuf>, bool)>,
+    timer: slint::Timer,
+}
+
+impl Drop for FolderCheck {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 /// Typing in the recursive search bar: the query runs once the keys pause this long.
 const TYPING: Duration = Duration::from_millis(120);
@@ -1151,7 +1163,12 @@ impl Controller {
                     } else {
                         ""
                     };
-                    format!("-{old} +{new} ≠{differ} ={same}{only}")
+                    let pending = if c.pending > 0 {
+                        format!(" …{}", c.pending)
+                    } else {
+                        String::new()
+                    };
+                    format!("-{old} +{new} ≠{differ} ={same}{pending}{only}")
                 }
                 None => String::new(),
             }
@@ -1723,8 +1740,9 @@ impl Controller {
             base: panes.map(|p| self.data(p)),
             sort,
             checking: None,
-            folder_changes: None,
+            folder_states: None,
             counts: [0; 4],
+            pending: 0,
         });
         // Both sides by name, so the rows line up; the reply of the sort compares.
         for p in panes {
@@ -1748,28 +1766,73 @@ impl Controller {
         if c.panes.iter().any(|&p| self.panes[p].pending.is_some()) {
             return;
         }
-        let Some(folders) = &c.folder_changes else {
-            if c.checking.is_none() {
-                let token = Arc::new(AtomicBool::new(false));
-                c.checking = Some(token.clone());
-                let base = c.base.clone();
-                let show_hidden = c
-                    .panes
-                    .map(|p| self.config.show_hidden[p])
-                    .into_iter()
-                    .all(|visible| visible);
-                std::thread::spawn(move || {
-                    let changes =
-                        compare::folder_changes(&base[0].rows, &base[1].rows, show_hidden, &token);
-                    post(Reply::Compared(token, base, changes));
+        let folders = c.folder_states.get_or_insert_with(|| {
+            let pairs = compare::folder_pairs(&c.base[0].rows, &c.base[1].rows);
+            let states = pairs
+                .iter()
+                .map(|[a, _]| (a.clone(), compare::FolderState::Pending))
+                .collect();
+            if !pairs.is_empty() {
+                let (tx, results) = mpsc::channel();
+                let stop = Arc::new(AtomicBool::new(false));
+                let show_hidden = c.panes.iter().all(|&p| self.config.show_hidden[p]);
+                // A slow folder can occupy one worker while the other completes later rows.
+                let workers = pairs.len().min(2);
+                let pairs = Arc::new(Mutex::new(pairs.into_iter()));
+                for _ in 0..workers {
+                    let (pairs, tx, stop) = (pairs.clone(), tx.clone(), stop.clone());
+                    std::thread::spawn(move || {
+                        while !stop.load(Ordering::Relaxed) {
+                            let pair = pairs.lock().unwrap().next();
+                            let Some([a, b]) = pair else { break };
+                            let changed = compare::children_differ(&a, &b, show_hidden, &stop);
+                            if tx.send((a, changed)).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                let timer = slint::Timer::default();
+                // Apply completed checks in order, batching bursts into one redraw.
+                timer.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(40),
+                    || {
+                        if let Some(c) = CONTROLLER.with(|c| c.borrow().clone()) {
+                            c.borrow_mut().apply_folder_checks();
+                        }
+                    },
+                );
+                c.checking = Some(FolderCheck {
+                    stop,
+                    results,
+                    timer,
                 });
             }
-            return;
-        };
+            states
+        });
         let (aligned, shown) =
             compare::align(&c.base[0].rows, &c.base[1].rows, c.only_diff, folders);
         c.counts = aligned.counts;
+        c.pending = aligned.pending;
         let aligned = Rc::new(aligned);
+        let panes = c.panes;
+        if panes.iter().all(|&p| {
+            self.panes[p]
+                .model
+                .compare
+                .borrow()
+                .as_ref()
+                .is_some_and(|(previous, _)| previous.pairs == aligned.pairs)
+        }) {
+            // The displayed entries have the same indexes. Update their markers
+            // in place so background results do not disrupt an ongoing click.
+            for (side, p) in panes.into_iter().enumerate() {
+                *self.panes[p].model.compare.borrow_mut() = Some((aligned.clone(), side));
+                self.paint(p);
+            }
+            return;
+        }
         // The cursor stays on its item (or its row, when the item is gone).
         let side = if self.active == c.panes[1] { 1 } else { 0 };
         let model = &self.panes[c.panes[side]].model;
@@ -1796,13 +1859,18 @@ impl Controller {
             let snapshot = Snapshot::new(base.dir.clone(), rows, base.volume.clone());
             let model = &self.panes[p].model;
             let old = model.selection.borrow().clone();
-            *model.selection.borrow_mut() = Selection::only(
+            let mut selection = Selection::only(
                 snapshot
                     .rows
                     .iter()
                     .filter(|e| old.contains(&e.path))
                     .map(|e| e.path.clone()),
             );
+            selection.anchor = old.anchor.and_then(|i| {
+                let data = model.data.borrow();
+                snapshot.positions.get(&data.rows.get(i)?.path).copied()
+            });
+            *model.selection.borrow_mut() = selection;
             *model.data.borrow_mut() = Arc::new(snapshot);
             *model.compare.borrow_mut() = Some((aligned.clone(), s));
         }
@@ -1819,7 +1887,6 @@ impl Controller {
             .and_then(|i| aligned.row_of(side, i))
             .unwrap_or(old_row)
             .min(aligned.pairs.len().saturating_sub(1));
-        let panes = c.panes;
         for p in panes {
             let model = &self.panes[p].model;
             match model.slot(row) {
@@ -1834,13 +1901,39 @@ impl Controller {
             self.paint(p);
         }
     }
+    fn apply_folder_checks(&mut self) {
+        let Some(c) = &mut self.compare else { return };
+        let (Some(check), Some(states)) = (&c.checking, &mut c.folder_states) else {
+            return;
+        };
+        let mut updated = false;
+        loop {
+            match check.results.try_recv() {
+                Ok((path, true)) => {
+                    states.insert(path, compare::FolderState::Changed);
+                    updated = true;
+                }
+                Ok((path, false)) => {
+                    states.remove(&path);
+                    updated = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    check.timer.stop();
+                    c.checking = None;
+                    break;
+                }
+            }
+        }
+        if updated {
+            self.recompare();
+        }
+    }
     /// Back to the folders as loaded. `keep`: a pane that opened another folder (its list
     /// is already the new one).
     fn end_compare(&mut self, keep: Option<usize>) {
         let Some(c) = self.compare.take() else { return };
-        if let Some(token) = &c.checking {
-            token.store(true, Ordering::Relaxed);
-        }
+        drop(c.checking);
         for (s, &p) in c.panes.iter().enumerate() {
             let model = &self.panes[p].model;
             *model.compare.borrow_mut() = None;
@@ -2400,25 +2493,6 @@ impl Controller {
                     finder::Event::Icons => self.repaint(p),
                 }
             }
-            Reply::Compared(token, base, changes) => {
-                let Some(c) = &mut self.compare else { return };
-                if !c
-                    .checking
-                    .as_ref()
-                    .is_some_and(|running| Arc::ptr_eq(running, &token))
-                {
-                    return;
-                }
-                c.checking = None;
-                if c.base
-                    .iter()
-                    .zip(&base)
-                    .all(|(current, scanned)| Arc::ptr_eq(current, scanned))
-                {
-                    c.folder_changes = Some(changes);
-                }
-                self.recompare();
-            }
             Reply::Changed(p, dir) => {
                 // Search results stay as found; F5 searches again.
                 if self.data(p).dir != dir || self.panes[p].found.is_some() {
@@ -2812,10 +2886,8 @@ impl Controller {
             } else {
                 if let Some(c) = &mut self.compare {
                     c.base[side] = data.clone();
-                    c.folder_changes = None;
-                    if let Some(token) = &c.checking {
-                        token.store(true, Ordering::Relaxed);
-                    }
+                    c.folder_states = None;
+                    c.checking = None;
                 }
                 self.recompare();
             }
