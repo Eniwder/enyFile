@@ -275,7 +275,7 @@ impl Config {
             .map_or(theme::DEFAULT_SIZE, |s| s as f32)
             .clamp(8.0, 32.0);
         let intra_pane_move = raw["intra_pane_move"].as_bool().unwrap_or(false);
-        let drives_in_toolbar = raw["drives_in_toolbar"].as_bool().unwrap_or(false);
+        let drives_in_toolbar = raw["drives_in_toolbar"].as_bool().unwrap_or(true);
         let pane_drag_drop = raw["pane_drag_drop"].as_bool().unwrap_or(false);
         let search_links = raw["search_links"].as_bool().unwrap_or(false);
         let drive_dirs = raw["drive_dirs"]
@@ -549,8 +549,8 @@ mod tests {
         assert_eq!(config.split, 0.5);
         assert!(!config.intra_pane_move);
         config.intra_pane_move = true;
-        assert!(!config.drives_in_toolbar);
-        config.drives_in_toolbar = true;
+        assert!(config.drives_in_toolbar);
+        config.drives_in_toolbar = false;
         assert!(!config.pane_drag_drop);
         config.pane_drag_drop = true;
         config.bookmarks.push(Bookmark {
@@ -562,7 +562,7 @@ mod tests {
         config.save().unwrap();
         let again = Config::load(file.clone());
         assert_eq!(again.bookmarks.len(), 2);
-        assert!(again.drives_in_toolbar);
+        assert!(!again.drives_in_toolbar);
         assert!(again.pane_drag_drop);
         assert!(again.intra_pane_move);
         assert_eq!(again.raw["theme"], "dark");

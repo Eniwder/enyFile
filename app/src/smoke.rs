@@ -693,32 +693,28 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     s.pass("settings dialog saves places; splitter position saved");
                 }
                 28 => {
-                    // Drives arrive from the drive thread and are listed after the entries.
-                    let (rows, offset, entries) = {
-                        let c = c.borrow();
-                        let data = c.data(0);
-                        (c.panes[0].model.total(), data.offset(), data.rows.len())
-                    };
-                    if rows <= offset + entries {
+                    // Wait for the drive snapshot to populate the toolbar.
+                    let drive_count = ui.get_drive_buttons().row_count();
+                    if drive_count == 0 {
                         return Ok(false);
                     }
-                    let drive = c.borrow().panes[0].model.row_at(offset + entries).unwrap();
-                    expect(drive.drive && drive.name.contains(':'), "drive row after the entries")?;
+                    let entry_rows = {
+                        let data = c.borrow().data(0);
+                        data.offset() + data.rows.len()
+                    };
                     ui.invoke_open_settings();
-                    expect(!ui.get_settings_drives_in_toolbar(), "drive rows are the default")?;
-                    ui.set_settings_drives_in_toolbar(true);
-                    ui.invoke_settings_done(true);
-                    expect(ui.get_drive_buttons().row_count() == rows - offset - entries, "toolbar shows the drives")?;
+                    expect(ui.get_settings_drives_in_toolbar(), "toolbar drive display is checked by default")?;
                     expect(c.borrow().panes.iter().all(|pane| pane.model.drives.borrow().is_empty()), "drive rows hidden in every pane")?;
                     expect(ui.get_p0_info().volume.is_empty() && ui.get_p0_info().free.is_empty(), "pane volume and free space hidden")?;
                     fkey(&ui, 0, slint::platform::Key::End);
-                    expect(c.borrow().cursor_row(0) == offset + entries - 1, "End goes to the last folder entry")?;
-                    ui.invoke_open_settings();
-                    expect(ui.get_settings_drives_in_toolbar(), "settings reflect toolbar mode")?;
+                    expect(c.borrow().cursor_row(0) == entry_rows - 1, "End goes to the last folder entry")?;
                     ui.set_settings_drives_in_toolbar(false);
                     ui.invoke_settings_done(true);
-                    expect(ui.get_drive_buttons().row_count() == 0 && c.borrow().panes[0].model.total() == rows, "drive rows restored")?;
-                    s.pass("drive display switches between pane rows and toolbar; End reaches the last entry");
+                    let model = c.borrow().panes[0].model.clone();
+                    expect(ui.get_drive_buttons().row_count() == 0 && model.total() == entry_rows + drive_count, "drive rows replace the toolbar buttons")?;
+                    let drive = model.row_at(entry_rows).unwrap();
+                    expect(drive.drive && drive.name.contains(':'), "drive row after the entries")?;
+                    s.pass("drives default to the toolbar and can be shown as pane rows");
                     ui.invoke_focus_pane(0);
                     fkey(&ui, 0, slint::platform::Key::F7);
                     expect(ui.get_name_open() && ui.get_name_initial() == "新しいフォルダ", "F7 opens the new-folder dialog")?;
