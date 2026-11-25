@@ -1,12 +1,94 @@
 //! Best-effort snapshots, never evidence that a listed process caused the failure.
 use super::*;
+use std::{sync::Mutex, thread};
 use windows::{Win32::System::RestartManager::*, core::PWSTR};
 
-pub(super) fn inspect(path: &str, phase: &str, always: bool) {
-    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+pub(super) struct Watch {
+    current: Arc<Mutex<Option<Arc<str>>>>,
+    stopped: Arc<AtomicBool>,
+    worker: Option<thread::Thread>,
+}
+
+impl Watch {
+    pub(super) fn start() -> Self {
+        let current = Arc::new(Mutex::new(None::<Arc<str>>));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let operation = thread::current().id();
+        let worker = thread::Builder::new()
+            .name("delete-diagnostics".into())
+            .spawn({
+                let current = current.clone();
+                let stopped = stopped.clone();
+                move || {
+                    let mut reported: Option<Arc<str>> = None;
+                    while !stopped.load(Ordering::Acquire) {
+                        let path = current.lock().unwrap().clone();
+                        if let Some(path) = path
+                            && !reported
+                                .as_ref()
+                                .is_some_and(|last| Arc::ptr_eq(last, &path))
+                        {
+                            let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+                            if let Err(error) = probe(&wide)
+                                && matches!(error.code().0 as u32, 0x80070020 | 0x80070021)
+                            {
+                                report(
+                                    &path,
+                                    &wide,
+                                    "in-progress",
+                                    operation,
+                                    &format!("HRESULT=0x{:08X} {error}", error.code().0 as u32),
+                                );
+                                reported = Some(path);
+                            }
+                        }
+                        thread::park_timeout(Duration::from_millis(50));
+                    }
+                }
+            })
+            .map(|handle| handle.thread().clone())
+            .map_err(|error| {
+                crate::recovery::record(format!(
+                    "delete: live diagnostics unavailable; thread={operation:?} error={error}"
+                ))
+            })
+            .ok();
+        Self {
+            current,
+            stopped,
+            worker,
+        }
+    }
+
+    pub(super) fn track(&self, path: &str) {
+        *self.current.lock().unwrap() = Some(Arc::from(path));
+    }
+
+    pub(super) fn clear(&self, path: &str) {
+        let mut current = self.current.lock().unwrap();
+        if current.as_deref() == Some(path) {
+            *current = None;
+        }
+    }
+
+    pub(super) fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(worker) = &self.worker {
+            worker.unpark();
+        }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn probe(wide: &[u16]) -> windows::core::Result<()> {
     // OPEN_EXISTING without DELETE_ON_CLOSE: request access only, never delete data.
     // Share everything and close immediately so this probe cannot retain a lock.
-    let probe = unsafe {
+    let handle = unsafe {
         CreateFileW(
             PCWSTR(wide.as_ptr()),
             DELETE.0,
@@ -16,19 +98,24 @@ pub(super) fn inspect(path: &str, phase: &str, always: bool) {
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
             None,
         )
-    };
-    let access = match probe {
-        Ok(handle) => {
-            let _ = unsafe { CloseHandle(handle) };
-            if !always {
-                return;
-            }
-            "allowed-now (does not guarantee deletion)".to_owned()
-        }
+    }?;
+    let _ = unsafe { CloseHandle(handle) };
+    Ok(())
+}
+
+pub(super) fn inspect(path: &str, phase: &str, always: bool) {
+    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    let access = match probe(&wide) {
+        Ok(()) if !always => return,
+        Ok(()) => "allowed-now (does not guarantee deletion)".to_owned(),
         Err(error) => format!("HRESULT=0x{:08X} {error}", error.code().0 as u32),
     };
-    crate::recovery::checkpoint(format!(
-        "delete: access snapshot; phase={phase} path={path:?} delete_access={access}"
+    report(path, &wide, phase, thread::current().id(), &access);
+}
+
+fn report(path: &str, wide: &[u16], phase: &str, operation: thread::ThreadId, access: &str) {
+    crate::recovery::record(format!(
+        "delete: access snapshot; thread={operation:?} phase={phase} path={path:?} delete_access={access}"
     ));
     // Restart Manager does not accept directories. Never follow a directory or link.
     match std::fs::symlink_metadata(path) {
@@ -40,9 +127,9 @@ pub(super) fn inspect(path: &str, phase: &str, always: bool) {
             return;
         }
     }
-    let result = users(&wide);
+    let result = users(wide);
     crate::recovery::checkpoint(format!(
-        "delete: users snapshot (not necessarily blockers); phase={phase} path={path:?} result={result:?}"
+        "delete: users snapshot (not necessarily blockers); thread={operation:?} phase={phase} path={path:?} result={result:?}"
     ));
 }
 

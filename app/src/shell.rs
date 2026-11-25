@@ -696,6 +696,7 @@ fn finish(op: &IFileOperation) -> Result<bool, String> {
 struct DeleteProgress {
     confirmed: Box<dyn Fn() + Send + Sync>,
     selected: HashSet<PathBuf>,
+    watch: delete_diagnostics::Watch,
 }
 
 /// Notes items the copy engine left out: an error the user skipped in its own dialog, which
@@ -719,7 +720,8 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
         Ok(())
     }
     fn FinishOperations(&self, hr: HRESULT) -> windows::core::Result<()> {
-        if self.1.is_some() {
+        if let Some(deleting) = &self.1 {
+            deleting.watch.stop();
             crate::recovery::record(format!(
                 "delete: Shell finished; thread={:?} HRESULT=0x{:08X}",
                 std::thread::current().id(),
@@ -774,6 +776,7 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
             (deleting.confirmed)();
             if let Some(item) = item.as_ref() {
                 let path = diagnostic_item_path(item);
+                deleting.watch.track(&path);
                 // Recursive deletion also calls this for descendants. Probe only the
                 // items added to the operation, and keep diagnostics for actual failures.
                 if deleting.selected.contains(Path::new(&path)) {
@@ -790,11 +793,15 @@ impl IFileOperationProgressSink_Impl for Missed_Impl {
         hr: HRESULT,
         _: Item,
     ) -> windows::core::Result<()> {
-        if self.1.is_some() && (hr.is_err() || hr == COPYENGINE_S_USER_IGNORED) {
+        if let Some(deleting) = &self.1 {
             let path = item
                 .as_ref()
                 .map(diagnostic_item_path)
                 .unwrap_or_else(|| "<null item>".into());
+            deleting.watch.clear(&path);
+            if hr.is_ok() && hr != COPYENGINE_S_USER_IGNORED {
+                return self.note(hr);
+            }
             // The copy engine can report this only after its retry/skip dialog closes.
             // Do not interpret this timestamp as the moment the lock was acquired.
             crate::recovery::checkpoint(format!(
@@ -1272,6 +1279,7 @@ fn delete_inner(
     let progress = DeleteProgress {
         confirmed: Box::new(deleting),
         selected: paths.iter().map(|path| shell_path(path)).collect(),
+        watch: delete_diagnostics::Watch::start(),
     };
     let sink: IFileOperationProgressSink =
         Missed(Arc::new(AtomicBool::new(false)), Some(progress)).into();
