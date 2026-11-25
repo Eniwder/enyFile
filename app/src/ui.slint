@@ -230,6 +230,7 @@ component PropsDialog inherits Rectangle {
     in property <int> hash;
     callback close();
     callback copy();
+    callback copy-path();
     callback hash-key();
     callback windows();
     public function open() { keys.focus(); }
@@ -239,15 +240,16 @@ component PropsDialog inherits Rectangle {
     date-probe := Text { text: "更新日時"; visible: false; }
     background: #00000066;
     TouchArea { }
+    function handle-key(e: KeyEvent) -> EventResult {
+        if e.text == Key.Escape || e.text == Key.Return { root.close(); return accept; }
+        if e.modifiers.control || e.modifiers.alt { return reject; }
+        if e.text.to-lowercase() == "c" { root.copy(); return accept; }
+        if e.text.to-lowercase() == "h" { root.hash-key(); return accept; }
+        if e.text.to-lowercase() == "w" { root.windows(); return accept; }
+        return reject;
+    }
     keys := FocusScope {
-        key-pressed(e) => {
-            if e.text == Key.Escape || e.text == Key.Return { root.close(); return accept; }
-            if e.modifiers.control || e.modifiers.alt { return reject; }
-            if e.text.to-lowercase() == "c" { root.copy(); return accept; }
-            if e.text.to-lowercase() == "h" { root.hash-key(); return accept; }
-            if e.text.to-lowercase() == "w" { root.windows(); return accept; }
-            return reject;
-        }
+        key-pressed(e) => { return root.handle-key(e); }
     }
     Rectangle {
         // Grows with the window so a long download URL takes fewer lines.
@@ -258,7 +260,22 @@ component PropsDialog inherits Rectangle {
         content := VerticalLayout {
             padding: 16px; spacing: 4px;
             Text { text: root.name; font-weight: 700; font-size: 14px; color: Theme.text; overflow: elide; }
-            Text { text: root.folder; color: Theme.dim; font-size: 12px; overflow: elide; }
+            HorizontalLayout {
+                spacing: 6px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    clip: true;
+                    TextInput {
+                        width: parent.width; height: parent.height;
+                        text: root.folder; color: Theme.dim; font-size: 12px;
+                        single-line: true; read-only: true; vertical-alignment: center;
+                        selection-background-color: Theme.selected-bg;
+                        selection-foreground-color: Theme.selected-text;
+                        key-pressed(e) => { return root.handle-key(e); }
+                    }
+                }
+                DialogButton { text: "パスをコピー"; clicked => { root.copy-path(); } }
+            }
             Rectangle { height: 6px; }
             // Scrolls when the window is too short, so the buttons are never cut off.
             rows-view := Flickable {
@@ -1790,6 +1807,7 @@ export component App inherits Window {
     in property <int> props-hash;
     callback props-close();
     callback props-copy();
+    callback props-copy-path();
     callback props-hash-key();
     callback props-windows();
     public function focus-props() { props-dialog.open(); }
@@ -2502,6 +2520,7 @@ export component App inherits Window {
         name: root.props-name; folder: root.props-folder; rows: root.props-rows; hash: root.props-hash;
         close => { root.props-close(); }
         copy => { root.props-copy(); }
+        copy-path => { root.props-copy-path(); }
         hash-key => { root.props-hash-key(); }
         windows => { root.props-windows(); }
     }

@@ -615,6 +615,10 @@ impl Controller {
             _ => {}
         }
     }
+    pub(super) fn props_copy_path(&self) {
+        let Some(props) = &self.props else { return };
+        self.clipboard_text(&pathinput::display(&props.path), "パスをコピーしました");
+    }
     /// C: everything shown, as "label<TAB>value" lines.
     pub(super) fn props_copy(&mut self) {
         let Some(props) = &self.props else { return };

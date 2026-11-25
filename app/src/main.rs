@@ -4879,6 +4879,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let c = controller.clone();
+        ui.on_props_copy_path(move || c.borrow().props_copy_path());
+    }
+    {
+        let c = controller.clone();
         ui.on_props_hash_key(move || c.borrow_mut().props_hash_key());
     }
     {
