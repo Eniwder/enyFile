@@ -1541,12 +1541,19 @@ pub fn start(c: Rc<RefCell<Controller>>, root: PathBuf, log: Option<PathBuf>) ->
                     expect(size.size_diff && !size.time_diff && !size.attr_diff, "only the size cell differs")?;
                     expect(c.borrow().panes[0].model.row_at(1).is_some_and(|row| row.gap), "the left side has an empty row for new.txt")?;
                     expect(ui.get_p0_info().compare == "-1 +1 ≠1 =2", &format!("counts in the info line: {}", ui.get_p0_info().compare))?;
-                    // The cursor moves on both sides; an empty row can hold it.
+                    // Vertical movement skips gaps on the active side and keeps both cursors aligned.
                     fkey(&ui, 0, slint::platform::Key::Home);
                     fkey(&ui, 0, slint::platform::Key::DownArrow);
-                    let other = c.borrow().panes[1].model.selection.borrow().current;
-                    let right = other.map(|i| c.borrow().data(1).rows[i].name.clone());
-                    expect(c.borrow().panes[0].model.special.get() == Some(Special::Gap(1)) && right.as_deref() == Some("new.txt"), "both cursors on row 2")?;
+                    expect(c.borrow().cursor_row(0) == 2 && c.borrow().panes[1].model.special.get() == Some(Special::Gap(2)), "Down skips the left gap and aligns the right cursor")?;
+                    fkey(&ui, 0, slint::platform::Key::UpArrow);
+                    expect(c.borrow().cursor_row(0) == 0, "Up skips the left gap")?;
+                    shift_key(&ui, 0, slint::platform::Key::DownArrow);
+                    shift_key(&ui, 0, slint::platform::Key::DownArrow);
+                    let range = selected(&c, 0);
+                    expect(c.borrow().cursor_row(0) == 3 && range.len() == 3 && range.iter().any(|name| name == "old.txt"), "Shift+Down selects across the gap and continues")?;
+                    shift_key(&ui, 0, slint::platform::Key::UpArrow);
+                    shift_key(&ui, 0, slint::platform::Key::UpArrow);
+                    expect(c.borrow().cursor_row(0) == 0 && selected(&c, 0).len() == 1, "Shift+Up contracts the range across the gap")?;
                     s.pass("Ctrl+Shift+D lines up both folders: -, +, differing cells, cursor in step");
                     ctrl_shift_key(&ui, 0, "D");
                     expect(compared(&c, 1) == ["new.txt", "", "size.txt"], &format!("second Ctrl+Shift+D: only the differences: {:?}", compared(&c, 1)))?;

@@ -3883,7 +3883,22 @@ impl Controller {
             None => model.entry_row(current),
         };
         let page = model.page_size.get().max(1);
-        let target = if is(Key::UpArrow) {
+        let target = if comparing && (is(Key::UpArrow) || is(Key::DownArrow)) {
+            let next = if is(Key::UpArrow) {
+                cursor
+                    .checked_sub(1)
+                    .and_then(|row| model.entry_toward(row, 0))
+            } else {
+                (cursor + 1 < rows)
+                    .then(|| model.entry_toward(cursor + 1, rows - 1))
+                    .flatten()
+            };
+            if next.is_none() {
+                self.panes[p].prefix.clear();
+                return true;
+            }
+            next
+        } else if is(Key::UpArrow) {
             Some(cursor.saturating_sub(1))
         } else if is(Key::DownArrow) {
             Some((cursor + 1).min(rows - 1))
