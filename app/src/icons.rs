@@ -429,6 +429,50 @@ fn icon_pixels(icon: HICON) -> Option<Pixels> {
 mod tests {
     use super::*;
     #[test]
+    fn saved_shortcut_icon_is_reloaded() {
+        let _com = crate::shell::Apartment::new().unwrap();
+        let dir = std::env::temp_dir().join(format!("enyfile-icon-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shortcut = dir.join("program.lnk");
+        let system = Path::new(&std::env::var("SystemRoot").unwrap()).join("system32");
+        let wide =
+            |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain(Some(0)).collect() };
+        let file = wide(&shortcut);
+        let target = wide(&system.join("notepad.exe"));
+        let source = wide(&system.join("shell32.dll"));
+        let save = |index| unsafe {
+            let link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            link.SetPath(PCWSTR(target.as_ptr())).unwrap();
+            link.SetIconLocation(PCWSTR(source.as_ptr()), index)
+                .unwrap();
+            link.cast::<IPersistFile>()
+                .unwrap()
+                .Save(PCWSTR(file.as_ptr()), true)
+                .unwrap();
+        };
+        let load = || {
+            let (_, rows) = crate::listing::read(&dir, false).unwrap();
+            let key = rows
+                .into_iter()
+                .find(|row| row.name == "program.lnk")
+                .unwrap()
+                .icon;
+            ensure_path(&key, &shortcut);
+            let pixels = get(&key).unwrap();
+            (key, pixels)
+        };
+        save(0);
+        let (before_key, before) = load();
+        save(1);
+        let (after_key, after) = load();
+        std::fs::remove_file(&shortcut).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        assert_ne!(before_key, after_key);
+        assert_ne!(before.as_bytes(), after.as_bytes());
+    }
+
+    #[test]
     fn file_icons_release_source_files() {
         let _com = crate::shell::Apartment::new().unwrap();
         let dir = std::env::temp_dir().join(format!("enyfile-icon-release-{}", std::process::id()));

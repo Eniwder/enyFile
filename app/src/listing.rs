@@ -101,9 +101,10 @@ pub fn entry(dir: &Path, raw: Raw) -> Entry {
     let type_icon = crate::icons::type_key(&ext, directory);
     crate::icons::ensure_type(&type_icon, directory);
     let path = Arc::new(dir.join(&raw.name));
-    let icon = if (!directory && crate::icons::per_file(&ext))
-        || (directory && crate::shell::is_junction(&path))
-    {
+    let icon = if !directory && crate::icons::per_file(&ext) {
+        // A saved icon change must miss both the pixel cache and the UI image cache.
+        format!("{}\0{:?}\0{}", path.display(), raw.modified, raw.size).into()
+    } else if directory && crate::shell::is_junction(&path) {
         path.to_string_lossy().as_ref().into()
     } else {
         type_icon.clone()
