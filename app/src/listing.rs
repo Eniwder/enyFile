@@ -365,7 +365,7 @@ pub fn sort(rows: &mut [Entry], column: usize, descending: bool) {
         if !folders.is_eq() {
             return folders;
         }
-        let name = || name_order(a, b).then(a.path.cmp(&b.path));
+        let name = || name_order(a, b).then_with(|| a.path.cmp(&b.path));
         let order = match column {
             1 => a.size.cmp(&b.size).then_with(name),
             2 => a.modified.cmp(&b.modified).then_with(name),
