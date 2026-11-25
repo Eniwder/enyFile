@@ -282,8 +282,8 @@ impl RowsModel {
             })
             .flatten();
         let display_location = entry.location.replace('\\', "/");
-        let [location, name, ext] = [&display_location, &entry.stem, &entry.ext]
-            .map(|s| listing::visible(s));
+        let [location, name, ext] =
+            [&display_location, &entry.stem, &entry.ext].map(|s| listing::visible(s));
         let spoof = [&location, &name, &ext]
             .iter()
             .any(|s| matches!(s, Cow::Owned(_)));
