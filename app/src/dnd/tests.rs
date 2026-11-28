@@ -41,6 +41,11 @@ fn rejects_same_missing_and_descendants() {
     assert!(!valid_destination(&paths, &f.0.join("src/a.txt")));
     assert!(!valid_destination(&[f.0.join("missing")], &f.0.join("dst")));
     assert!(!valid_destination(&[], &f.0.join("dst")));
+    let dotted = f.0.join("src/a.txt.");
+    std::fs::write(&dotted, b"separate file").unwrap();
+    assert!(!valid_destination(&[dotted], &f.0.join("dst")));
+    let folder = shell::shell_path(&f.0.join("src/folder"));
+    assert!(!valid_destination(&[folder], &f.0.join("src/folder/sub")));
 }
 
 #[test]

@@ -187,7 +187,7 @@ impl Planner<'_> {
             .into_owned();
         // A folder cannot go into itself or below itself (Windows refuses, and a Replace
         // first would already have deleted something): left out before any question.
-        if self.ids.within(dir, source) {
+        if inside(dir, source, &mut self.ids)? {
             self.plan.inside += 1;
             self.plan.skipped = true;
             return Ok(Ok(()));
@@ -203,7 +203,7 @@ impl Planner<'_> {
         // The item is already here (copied from this folder along with items from others):
         // a copy becomes "name (2)" as when everything comes from this folder; a move has
         // nothing to do. Asking would offer Replace / Overwrite of the item with itself.
-        if self.ids.same(source, &target) {
+        if self.ids.same(source, &target) == Some(true) {
             if !self.plan.moved {
                 let auto = auto_name(&name, from.directory, self.names(dir)?);
                 self.names(dir)?.insert(fold(&auto));
@@ -261,6 +261,11 @@ impl Planner<'_> {
             Answer::Skip => self.plan.skipped = true,
             Answer::Newer if from.modified <= to.modified => self.plan.skipped = true,
             Answer::Overwrite | Answer::Newer if kind == Kind::File => {
+                if self.ids.same(source, &target) != Some(false) {
+                    return Err(format!(
+                        "上書き元と上書き先を別のファイルと確認できません: {name}"
+                    ));
+                }
                 self.push(source, dir, None, false, top);
                 self.plan.ops.last_mut().unwrap().overwrites = Some(Overwrite {
                     meta: to,
@@ -328,6 +333,16 @@ pub fn plan(
     }
     Ok(Some(planner.plan))
 }
+fn inside(inner: &Path, outer: &Path, ids: &mut crate::pathid::Idents) -> Result<bool, String> {
+    ids.within(inner, outer).ok_or_else(|| {
+        format!(
+            "パスの包含関係を確認できないため中止しました: {} / {}",
+            inner.display(),
+            outer.display()
+        )
+    })
+}
+
 /// `inner` relative to `outer`, both resolved as the file system names them now.
 fn below(inner: &Path, outer: &Path) -> Option<PathBuf> {
     let (inner, outer) = (
@@ -343,7 +358,8 @@ impl Plan {
     pub fn changed(&self) -> bool {
         self.ops.iter().any(|op| match &op.overwrites {
             Some(seen) => meta(&op.target()).as_ref() != Some(&seen.meta)
-                || seen.id.is_some_and(|id| crate::pathid::ident(&op.target()) != Some(id)),
+                || seen.id.is_none()
+                || crate::pathid::ident(&op.target()) != seen.id,
             // Errors other than absence are not evidence that creating here is safe.
             None => op.fresh && !matches!(std::fs::symlink_metadata(op.target()), Err(e) if e.kind() == std::io::ErrorKind::NotFound),
         })
@@ -383,29 +399,36 @@ impl Plan {
                 ));
             }
         }
-        if let Some(op) = self.ops.iter().find(|op| ids.within(&op.dir, &op.source)) {
-            return Err(format!(
-                "フォルダをその中へは貼り付けられません: {}",
-                op.source.display()
-            ));
-        }
-        let mut inside = Vec::new();
+        let mut displaced = Vec::new();
         for op in &self.ops {
-            let Some(i) = self
-                .remove
-                .iter()
-                .position(|path| ids.within(&op.source, path))
-            else {
-                inside.push(None);
+            if inside(&op.dir, &op.source, &mut ids)? {
+                return Err(format!(
+                    "フォルダをその中へは貼り付けられません: {}",
+                    op.source.display()
+                ));
+            }
+            if op.overwrites.is_some() && ids.same(&op.source, &op.target()) != Some(false) {
+                return Err(format!(
+                    "上書き元と上書き先を別のファイルと確認できません: {}",
+                    op.source.display()
+                ));
+            }
+            let mut enclosing = None;
+            for (i, path) in self.remove.iter().enumerate() {
+                if inside(&op.source, path, &mut ids)? && enclosing.is_none() {
+                    enclosing = Some(i);
+                }
+            }
+            let Some(i) = enclosing else {
+                displaced.push(None);
                 continue;
             };
-            // Replacing an item with itself deletes it; a source we cannot find again below
-            // the set-aside item would be lost the same way.
-            let below = (!ids.same(&op.source, &self.remove[i]))
+            // A source must still be reachable after its enclosing folder is set aside.
+            let below = (ids.same(&op.source, &self.remove[i]) == Some(false))
                 .then(|| below(&op.source, &self.remove[i]))
                 .flatten();
             match below {
-                Some(rest) => inside.push(Some((i, rest))),
+                Some(rest) => displaced.push(Some((i, rest))),
                 None => {
                     return Err(format!(
                         "貼り付け元を削除することになるため中止しました: {}",
@@ -414,7 +437,7 @@ impl Plan {
                 }
             }
         }
-        Ok(inside)
+        Ok(displaced)
     }
     /// After a move: remove merged source folders that ended up empty (skipped items stay).
     /// A junction or folder symlink is left alone: removing the link succeeds whatever its
@@ -743,11 +766,11 @@ mod tests {
         assert!(planned.changed());
         assert!(planned.verify().is_err());
         assert_eq!(std::fs::read(&existing).unwrap(), b"other");
-        // A filesystem without IDs retains the previous metadata-only behavior.
+        // Matching metadata alone cannot authorize an overwrite.
         let mut no_id = planned;
         no_id.ops[0].overwrites.as_mut().unwrap().id = None;
-        assert!(!no_id.changed());
-        assert!(no_id.verify().is_ok());
+        assert!(no_id.changed());
+        assert!(no_id.verify().is_err());
     }
     #[test]
     fn merge_unreadable_source_fails_before_any_transfer() {

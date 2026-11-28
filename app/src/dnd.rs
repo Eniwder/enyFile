@@ -262,8 +262,11 @@ fn valid_destination(paths: &[PathBuf], dir: &Path) -> bool {
     let mut ids = pathid::Idents::default();
     paths.iter().all(|source| {
         source.exists()
-            && !source.parent().is_some_and(|parent| ids.same(parent, dir))
-            && !ids.within(dir, source)
+            && shell::os_path(source).is_ok()
+            && source
+                .parent()
+                .is_some_and(|parent| ids.same(parent, dir) == Some(false))
+            && ids.within(dir, source) == Some(false)
     })
 }
 
@@ -539,6 +542,25 @@ impl IDropTarget_Impl for Target_Impl {
         let _transfer = NativeDrop(DROPPING.replace(true));
         let wheel = self.state.borrow_mut().wheel.take();
         drop(wheel); // No interception while Shell transfer/conflict dialogs are open.
+        // The object handed to the Shell must still advertise the paths we validated.
+        let paths = data
+            .as_ref()
+            .and_then(|data| shell::hdrop_paths(data).ok().flatten());
+        let unchanged = paths.is_some_and(|paths| {
+            let state = self.state.borrow();
+            paths.len() == state.paths.len()
+                && paths
+                    .iter()
+                    .zip(state.paths.iter())
+                    .all(|(a, b)| a.as_os_str() == b.as_os_str())
+        });
+        if !unchanged {
+            if let Some(effect) = unsafe { effect.as_mut() } {
+                *effect = DROPEFFECT_NONE;
+            }
+            self.end_drag();
+            return Ok(());
+        }
         // Recheck position, setting, identities and existence on release.
         self.update_drag(keys, pt, effect, true)?;
         let (target, move_only) = {

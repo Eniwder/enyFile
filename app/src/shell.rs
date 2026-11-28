@@ -171,6 +171,19 @@ pub fn wsl_running(path: &Path) -> Result<bool, String> {
 pub fn os_path(path: &Path) -> Result<PathBuf, String> {
     let plain = shell_path(path);
     if plain.as_os_str() != path.as_os_str() {
+        use std::path::{Component, Prefix};
+        if !path.is_absolute()
+            || !matches!(
+                    path.components().next(),
+                Some(Component::Prefix(prefix))
+                    if matches!(prefix.kind(), Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(..))
+            )
+        {
+            return Err(format!(
+                "Windows の通常のパスに変換できません: {}",
+                path.display()
+            ));
+        }
         let odd = path.components().find_map(|c| match c {
             std::path::Component::Normal(name) => {
                 win32_alters(&name.to_string_lossy()).then_some(name)
@@ -972,6 +985,28 @@ fn reach(dir: &Path, limit: usize) -> Result<usize, String> {
     }
     Ok(deepest)
 }
+fn exceeds_shell(
+    source: &Path,
+    target: &Path,
+    source_extra: usize,
+    target_extra: usize,
+) -> Result<bool, String> {
+    use std::os::windows::fs::MetadataExt;
+    let len = |p: &Path| shell_path(p).as_os_str().encode_wide().count();
+    let base = (len(source) + source_extra).max(len(target) + target_extra);
+    let attributes = std::fs::symlink_metadata(source)
+        .map_err(|e| format!("{}: {e}", source.display()))?
+        .file_attributes();
+    let extent = if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+        0
+    } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        FOLDER_ROOM
+    } else {
+        reach(source, SHELL_MAX.saturating_sub(base))?
+    };
+    Ok(base + extent > SHELL_MAX)
+}
+
 /// For each op, whether it goes past [`SHELL_MAX`] and is moved here instead of by the copy
 /// engine. Checked before anything changes: a long copy, or a long move to another volume,
 /// refuses the whole paste. `inside` is from [`crate::paste::Plan::verify`].
@@ -979,8 +1014,6 @@ fn beyond_shell(
     plan: &crate::paste::Plan,
     inside: &[Option<(usize, PathBuf)>],
 ) -> Result<Vec<bool>, String> {
-    use std::os::windows::fs::MetadataExt;
-    let len = |p: &Path| shell_path(p).as_os_str().encode_wide().count();
     let mut direct = Vec::new();
     for (op, inside) in plan.ops.iter().zip(inside) {
         // A source inside a replaced folder is reached through its set-aside name.
@@ -989,18 +1022,7 @@ fn beyond_shell(
         } else {
             0
         };
-        let base = (len(&op.source) + aside).max(len(&op.target()));
-        let attributes = std::fs::symlink_metadata(&op.source)
-            .map_err(|e| format!("{}: {e}", op.source.display()))?
-            .file_attributes();
-        let extent = if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
-            0
-        } else if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-            FOLDER_ROOM
-        } else {
-            reach(&op.source, SHELL_MAX.saturating_sub(base))?
-        };
-        let long = base + extent > SHELL_MAX;
+        let long = exceeds_shell(&op.source, &op.target(), aside, 0)?;
         if long {
             let volume = |p: &Path| crate::pathid::volume(&verbatim(p));
             let from = op.source.parent().and_then(volume);
@@ -1154,6 +1176,22 @@ fn shell_ops<'a>(
 }
 /// Ctrl+V into the items' own folder: Explorer-style "name - コピー" duplicates, no prompt.
 pub fn duplicate(paths: &[PathBuf], destination: &Path) -> Result<bool, String> {
+    // The Shell picks the localized collision suffix and may add a number.
+    const COLLISION_ROOM: usize = 16;
+    os_path(destination)?;
+    for path in paths {
+        os_path(path)?;
+        let name = path
+            .file_name()
+            .ok_or("複製する項目の名前を取得できません")?;
+        if exceeds_shell(path, &destination.join(name), 0, COLLISION_ROOM)? {
+            return Err(format!(
+                "Windows のコピーエンジンで扱えるパス長を超えるため複製を中止しました: {}",
+                path.display()
+            ));
+        }
+    }
+
     let op = operation(FILEOPERATION_FLAGS(
         FOF_ALLOWUNDO.0 | FOF_RENAMEONCOLLISION.0,
     ))?;
@@ -2487,6 +2525,13 @@ mod tests {
         );
         assert!(transfer(&copy).is_err());
         assert!(names(&root.join("dst")).is_empty());
+        let source = root.join("src");
+        assert!(
+            duplicate(&[source.join("short.txt"), source.join("Deep")], &source)
+                .unwrap_err()
+                .contains("複製を中止")
+        );
+        assert_eq!(names(&source), ["Deep", "short.txt"]);
         let moved = plan(true);
         assert_eq!(beyond_shell(&moved, &[None, None]).unwrap(), [true, false]);
         let done = transfer(&moved).unwrap();

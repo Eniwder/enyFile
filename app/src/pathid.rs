@@ -1,18 +1,17 @@
 //! Whether two paths are the same file system object, or one lies inside the other.
 //! Path text cannot tell: case, 8.3 short names, `\\?\` prefixes, hard links and
 //! junctions all give one object several names. The object behind a path is identified by
-//! its volume serial number and file ID (links followed), with the normalized text only
-//! as a fallback where no ID can be read. Destructive steps check again right before they
+//! its volume serial number and file ID (links followed). Missing evidence is reported
+//! separately from a negative result. Destructive steps check again right before they
 //! run; a change in the moment between that check and the Shell acting remains possible.
 use std::{
     collections::HashMap,
-    os::windows::ffi::OsStrExt,
+    fs::{self, OpenOptions},
+    io::ErrorKind,
+    os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
 };
-use windows::{
-    Win32::{Foundation::CloseHandle, Storage::FileSystem::*},
-    core::PCWSTR,
-};
+use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::*};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Ident {
@@ -23,22 +22,17 @@ pub struct Ident {
 /// The object `path` names now (junctions and symbolic links followed), if it exists and
 /// can be opened. Opens with no access rights, so locked and read-only items work too.
 pub fn ident(path: &Path) -> Option<Ident> {
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: wide is NUL-terminated and lives through CreateFileW. Both info buffers
-    // have the API's exact size/alignment. The owned handle is closed after either query,
-    // including failure; no references into those stack buffers escape.
-    unsafe {
-        let handle = CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            None,
-            OPEN_EXISTING,
-            // Needed to open folders.
-            FILE_FLAG_BACKUP_SEMANTICS,
-            None,
-        )
+    // std applies Windows long-path handling here. Zero access still permits file ID
+    // queries, and backup semantics allows the same open for directories.
+    let file = OpenOptions::new()
+        .access_mode(0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
         .ok()?;
+    let handle = HANDLE(file.as_raw_handle());
+    // SAFETY: file owns the handle for both calls and each buffer has the exact API layout.
+    unsafe {
         let mut info = FILE_ID_INFO::default();
         let by_id = GetFileInformationByHandleEx(
             handle,
@@ -61,7 +55,6 @@ pub fn ident(path: &Path) -> Option<Ident> {
                     file: ((info.nFileIndexHigh as u128) << 32) | info.nFileIndexLow as u128,
                 })
         };
-        let _ = CloseHandle(handle);
         // Some network file systems report no ID at all: not usable for comparing.
         ident.filter(|i| i.file != 0)
     }
@@ -70,15 +63,6 @@ pub fn ident(path: &Path) -> Option<Ident> {
 /// The volume `path` lies on (links followed), if it can be opened.
 pub fn volume(path: &Path) -> Option<u64> {
     ident(path).map(|i| i.volume)
-}
-
-/// Text form for the fallback: no `\\?\` prefix, no trailing separator, lower case.
-fn text(path: &Path) -> String {
-    let plain = crate::shell::shell_path(path);
-    plain
-        .to_string_lossy()
-        .trim_end_matches('\\')
-        .to_lowercase()
 }
 
 /// Identities looked up once per check (a merge asks about many paths in one folder).
@@ -91,40 +75,45 @@ impl Idents {
             .entry(path.to_path_buf())
             .or_insert_with(|| ident(path))
     }
-    /// `a` and `b` are the same object (hard links included).
-    pub fn same(&mut self, a: &Path, b: &Path) -> bool {
-        match (self.get(a), self.get(b)) {
-            (Some(x), Some(y)) => x == y,
-            _ => text(a) == text(b),
-        }
+    /// None means one or both objects could not be identified.
+    pub fn same(&mut self, a: &Path, b: &Path) -> Option<bool> {
+        Some(self.get(a)? == self.get(b)?)
     }
-    /// `inner` is `outer` or somewhere below it. `inner` need not exist yet: its nearest
-    /// existing ancestors are compared. Each ancestor is opened as named, so a junction on
-    /// the way counts as the folder it points to. A junction pointing further down (J to
-    /// `outer\sub`) is not `outer` itself, so the ancestors of the resolved path count too.
-    pub fn within(&mut self, inner: &Path, outer: &Path) -> bool {
-        let Some(target) = self.get(outer) else {
-            let (inner, outer) = (text(inner), text(outer));
-            return inner == outer || inner.starts_with(&format!("{outer}\\"));
-        };
+
+    /// Check both named and resolved ancestors. A missing suffix can be checked by
+    /// its nearest existing ancestor, but an unreadable ancestor makes a negative
+    /// result inconclusive.
+    pub fn within(&mut self, inner: &Path, outer: &Path) -> Option<bool> {
+        let target = self.get(outer)?;
         let mut resolved = None;
-        let mut path = Some(inner);
-        while let Some(p) = path {
-            match self.get(p) {
-                Some(id) if id == target => return true,
-                Some(_) if resolved.is_none() => resolved = std::fs::canonicalize(p).ok(),
-                _ => {}
+        let mut complete = true;
+        for path in inner.ancestors().filter(|p| p.has_root()) {
+            if resolved.is_none() {
+                match fs::canonicalize(path) {
+                    Ok(path) => resolved = Some(path),
+                    Err(e)
+                        if e.kind() == ErrorKind::NotFound
+                            && matches!(fs::symlink_metadata(path), Err(e) if e.kind() == ErrorKind::NotFound) =>
+                    {
+                        continue;
+                    }
+                    Err(_) => complete = false,
+                }
             }
-            path = p.parent();
-        }
-        let mut path = resolved.as_deref();
-        while let Some(p) = path {
-            if self.get(p) == Some(target) {
-                return true;
+            match self.get(path) {
+                Some(id) if id == target => return Some(true),
+                Some(_) => {}
+                None => complete = false,
             }
-            path = p.parent();
         }
-        false
+        for path in resolved?.ancestors().filter(|p| p.has_root()) {
+            match self.get(path) {
+                Some(id) if id == target => return Some(true),
+                Some(_) => {}
+                None => complete = false,
+            }
+        }
+        complete.then_some(false)
     }
 }
 
@@ -134,10 +123,7 @@ mod tests {
     struct Fixture(PathBuf);
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("cmd")
-                .args(["/c", "rmdir", "/s", "/q"])
-                .arg(&self.0)
-                .output();
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
     #[test]
@@ -157,12 +143,21 @@ mod tests {
         let canonical = std::fs::canonicalize(&root).unwrap();
         let mut ids = Idents::default();
         // Case and the \\?\ prefix.
-        assert!(ids.same(&root.join(r"REAL\A.TXT"), &canonical.join(r"Real\a.txt")));
+        assert_eq!(
+            ids.same(&root.join(r"REAL\A.TXT"), &canonical.join(r"Real\a.txt")),
+            Some(true)
+        );
         // A hard link is the same file under another name.
-        assert!(ids.same(&root.join("link.txt"), &root.join(r"Real\a.txt")));
+        assert_eq!(
+            ids.same(&root.join("link.txt"), &root.join(r"Real\a.txt")),
+            Some(true)
+        );
         // Through a junction: the same folder, and inside it.
-        assert!(ids.same(&root.join("J"), &root.join("Real")));
-        assert!(ids.within(&root.join(r"J\Sub"), &root.join("Real")));
+        assert_eq!(ids.same(&root.join("J"), &root.join("Real")), Some(true));
+        assert_eq!(
+            ids.within(&root.join(r"J\Sub"), &root.join("Real")),
+            Some(true)
+        );
         // A junction to a folder inside: JS is Real\Sub, so it lies within Real.
         let made = std::process::Command::new("cmd")
             .args(["/c", "mklink", "/J"])
@@ -171,13 +166,35 @@ mod tests {
             .output()
             .unwrap();
         assert!(made.status.success());
-        assert!(ids.within(&root.join("JS"), &root.join("Real")));
-        assert!(ids.within(&root.join(r"JS\new\deeper"), &root.join("Real")));
-        assert!(!ids.within(&root.join("Real"), &root.join("JS")));
+        assert_eq!(ids.within(&root.join("JS"), &root.join("Real")), Some(true));
+        assert_eq!(
+            ids.within(&root.join(r"JS\new\deeper"), &root.join("Real")),
+            Some(true)
+        );
+        assert_eq!(
+            ids.within(&root.join("Real"), &root.join("JS")),
+            Some(false)
+        );
         // Not yet existing paths count by their existing ancestors.
-        assert!(ids.within(&root.join(r"Real\Sub\new\deeper"), &root.join("Real")));
-        assert!(!ids.within(&root.join("Realm"), &root.join("Real")));
-        assert!(!ids.within(&root.join("Real"), &root.join(r"Real\Sub")));
+        assert_eq!(
+            ids.within(&root.join(r"Real\Sub\new\deeper"), &root.join("Real")),
+            Some(true)
+        );
+        assert_eq!(
+            ids.within(&root.join("Realm"), &root.join("Real")),
+            Some(false)
+        );
+        assert_eq!(
+            ids.within(&root.join("Real"), &root.join(r"Real\Sub")),
+            Some(false)
+        );
+        assert_eq!(ids.same(&root, &root.join("missing")), None);
+        assert_eq!(ids.within(&root, &root.join("missing")), None);
+        let long = root.join(["long-path-segment-1234567890"; 10].join("\\"));
+        fs::create_dir_all(&long).unwrap();
+        let extended = fs::canonicalize(&long).unwrap();
+        assert_eq!(ids.same(&long, &extended), Some(true));
+        assert_eq!(ids.within(&long, &canonical), Some(true));
         drop(f);
     }
 }

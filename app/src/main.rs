@@ -2158,11 +2158,14 @@ impl Controller {
         };
         // Nothing selected: the cursor item, as the context menu does.
         let cursor = self.selected_paths(p).is_empty();
-        let selection: Vec<PathBuf> = self
-            .targets(p)
-            .iter()
-            .map(|p| shell::shell_path(p))
-            .collect();
+        let selection: Vec<PathBuf> =
+            match self.targets(p).iter().map(|p| shell::os_path(p)).collect() {
+                Ok(selection) => selection,
+                Err(e) => {
+                    self.fail(e);
+                    return false;
+                }
+            };
         let passed = match (cursor, selection.first()) {
             (true, Some(item)) => format!(
                 "カーソル: {}",
@@ -4082,9 +4085,10 @@ fn run_paste(p: usize, dir: &Path) -> Result<(Vec<PathBuf>, PasteOutcome), Strin
     let paths = clip.paths.unwrap();
     let mut ids = pathid::Idents::default();
     let same_folder = !paths.is_empty()
-        && paths
-            .iter()
-            .all(|path| path.parent().is_some_and(|d| ids.same(d, dir)));
+        && paths.iter().all(|path| {
+            path.parent()
+                .is_some_and(|d| ids.same(d, dir) == Some(true))
+        });
     if same_folder {
         if moved {
             return Err("切り取った項目は既にこのフォルダにあります".into());
